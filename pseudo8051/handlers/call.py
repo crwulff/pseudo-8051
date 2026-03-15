@@ -24,18 +24,29 @@ class LcallHandler(MnemonicHandler):
         return frozenset(PARAM_REGS)
 
     def lift(self, insn, state=None) -> List[str]:
-        return [f"{_op(insn, 0, state)}();"]
+        from pseudo8051.prototypes import get_proto, return_expr
+        callee = _op(insn, 0, state)
+        proto  = get_proto(callee)
+        if proto:
+            args_str   = ", ".join(p.name for p in proto.params)
+            call_expr  = f"{callee}({args_str})"
+            if proto.return_type != "void" and proto.return_regs:
+                return [f"{return_expr(proto)} = {call_expr};"]
+            return [f"{call_expr};"]
+        return [f"{callee}();"]
 
 
 class RetHandler(MnemonicHandler):
     def use(self, insn) -> frozenset:
-        return frozenset({"A"})   # A holds the return value by convention
+        return frozenset({"A"})   # conservative: A is the common return register
 
     def defs(self, insn) -> frozenset:
         return frozenset()
 
     def lift(self, insn, state=None) -> List[str]:
-        return ["return;  /* A = return value */"]
+        # Return expression is filled in by Function._fix_return_statements()
+        # once the prototype is known; default to bare return.
+        return ["return;"]
 
 
 class RetiHandler(MnemonicHandler):

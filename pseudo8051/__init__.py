@@ -111,19 +111,9 @@ class PseudocodeViewer(ida_kernwin.simplecustviewer_t):
             _show_as_tab(self.GetWidget(), self._title)
             return
 
-        func_name  = func.name
-        params     = func.parameters
-        params_str = ", ".join(params) if params else "—"
-
-        self.AddLine(f"// Function: {func_name}  @  {hex(func_ea)}")
-        self.AddLine(f"// Params:   {params_str}")
-        self.AddLine("//")
-        self.AddLine("")
-
-        HEADER_LINES = 4
         lines = func.render()
         for i, (ea, text) in enumerate(lines):
-            self._ea_map[HEADER_LINES + i] = ea
+            self._ea_map[i] = ea
             self.AddLine(text)
 
         self.Refresh()

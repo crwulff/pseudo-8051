@@ -20,6 +20,7 @@ if _scripts_dir not in sys.path:
 # Reload order: leaves → roots (each module reloaded after its dependencies).
 _RELOAD_ORDER = [
     "pseudo8051.constants",
+    "pseudo8051.prototypes",
     "pseudo8051.ir.hir",
     "pseudo8051.ir.operand",
     "pseudo8051.ir.instruction",
@@ -33,6 +34,7 @@ _RELOAD_ORDER = [
     "pseudo8051.passes.rmw",
     "pseudo8051.passes.loops",
     "pseudo8051.passes.ifelse",
+    "pseudo8051.passes.typesimplify",
     "pseudo8051.analysis.constprop",
     "pseudo8051.analysis.liveness",
     "pseudo8051.ir.basicblock",

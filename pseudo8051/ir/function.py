@@ -86,6 +86,13 @@ class Function:
         if absorbed:
             dbg("func", f"  absorbed blocks:          {absorbed}")
 
+        # ── Fix return statements using prototype ─────────────────────────
+        self._fix_return_statements()
+
+        # ── Type-aware simplification (runs on assembled func.hir) ────────
+        from pseudo8051.passes.typesimplify import TypeAwareSimplifier
+        TypeAwareSimplifier().run(self)
+
     # ── Block graph accessors ─────────────────────────────────────────────
 
     @property
@@ -160,16 +167,58 @@ class Function:
                 ida_lbl = ida_name.get_name(ea)
                 block.label = ida_lbl if ida_lbl else f"label_{hex(ea).removeprefix('0x')}"
 
+    # ── Return-statement fix ──────────────────────────────────────────────
+
+    def _fix_return_statements(self) -> None:
+        """
+        If this function has a prototype with a non-void return type, replace
+        every 'return;' Statement in the HIR with 'return <expr>;' where expr
+        is derived from the prototype's return_regs.
+        """
+        from pseudo8051.prototypes import get_proto, return_expr
+        proto = get_proto(self.name)
+        if proto is None or not proto.return_regs:
+            return
+        expr = return_expr(proto)
+        self._walk_fix_returns(self.hir, expr)
+
+    def _walk_fix_returns(self, nodes: List[HIRNode], ret_expr: str) -> None:
+        from pseudo8051.ir.hir import Statement, IfNode, WhileNode, ForNode
+        for node in nodes:
+            if isinstance(node, Statement) and node.text.startswith("return"):
+                node.text = f"return {ret_expr};"
+            elif isinstance(node, IfNode):
+                self._walk_fix_returns(node.then_nodes, ret_expr)
+                self._walk_fix_returns(node.else_nodes, ret_expr)
+            elif isinstance(node, (WhileNode, ForNode)):
+                self._walk_fix_returns(node.body_nodes, ret_expr)
+
     # ── Rendering ─────────────────────────────────────────────────────────
 
     def render(self) -> List[tuple]:
         """
         Return a flat list of (ea, text) tuples for the viewer.
-        Each HIR node renders itself recursively.
+        Wraps the body in a C-style function definition using the prototype
+        (if one exists) or inferred parameters from liveness analysis.
         """
-        lines = []
+        from pseudo8051.prototypes import get_proto
+        proto = get_proto(self.name)
+
+        if proto:
+            ret_type   = proto.return_type
+            params_str = ", ".join(f"{p.type} {p.name}" for p in proto.params) or "void"
+        else:
+            ret_type = "void"
+            params   = self.parameters
+            params_str = ", ".join(params) if params else "void"
+
+        lines: List[tuple] = [
+            (self.ea, f"{ret_type} {self.name}({params_str})"),
+            (self.ea, "{"),
+        ]
         for node in self.hir:
-            lines.extend(node.render(indent=0))
+            lines.extend(node.render(indent=1))
+        lines.append((self.ea, "}"))
         return lines
 
     def __repr__(self) -> str:
