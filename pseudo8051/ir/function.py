@@ -1,0 +1,168 @@
+"""
+ir/function.py — Function: block graph + pass runner + final HIR.
+"""
+
+from typing import List, Dict, Optional, TYPE_CHECKING
+
+import ida_funcs
+import ida_gdl
+import ida_name
+import idc
+
+from pseudo8051.ir.basicblock import BasicBlock
+from pseudo8051.ir.hir        import HIRNode, Label
+from pseudo8051.constants     import PARAM_REG_ORDER, dbg
+
+if TYPE_CHECKING:
+    from pseudo8051.analysis.constprop import CPState
+
+
+class Function:
+    """
+    Represents a single 8051 function.
+
+    __init__ builds the block graph, runs all analysis and optimisation passes,
+    then assembles the final top-level HIR list that the viewer renders.
+    """
+
+    def __init__(self, func_ea: int):
+        self.ea   = func_ea
+        self.name = ida_funcs.get_func_name(func_ea) or hex(func_ea)
+
+        ida_func = ida_funcs.get_func(func_ea)
+        if not ida_func:
+            raise ValueError(f"No function at {hex(func_ea)}")
+
+        # ── Build block graph ─────────────────────────────────────────────
+        try:
+            fc = ida_gdl.FlowChart(ida_func, flags=ida_gdl.FC_PREDS)
+        except Exception as e:
+            raise RuntimeError(f"FlowChart failed for {hex(func_ea)}: {e}") from e
+
+        BADADDR = idc.BADADDR
+
+        # Collect IDA blocks, skip synthetic sink (start_ea >= BADADDR)
+        raw_blocks = [b for b in fc if b.start_ea < BADADDR]
+
+        # Create BasicBlock wrappers; _block_map is needed by predecessors/successors
+        self._block_map: Dict[int, BasicBlock] = {}
+        for rb in raw_blocks:
+            self._block_map[rb.start_ea] = BasicBlock(rb, self)
+
+        self._blocks: List[BasicBlock] = sorted(
+            self._block_map.values(), key=lambda b: b.start_ea)
+
+        dbg("func", f"{self.name} @ {hex(self.ea)} — {len(self._blocks)} block(s)")
+
+        # ── Assign labels to blocks that need them ────────────────────────
+        self._assign_labels()
+
+        for blk in self._blocks:
+            preds = [hex(p.start_ea) for p in blk.predecessors]
+            succs = [hex(s.start_ea) for s in blk.successors]
+            label_str = f"  label={blk.label!r}" if blk.label else ""
+            loop_str  = "  [loop-header]"         if blk.is_loop_header else ""
+            dbg("func", f"  block {hex(blk.start_ea)}-{hex(blk.end_ea)}"
+                        f"  preds={preds}  succs={succs}{label_str}{loop_str}")
+
+        # ── Run all analysis + optimisation passes ────────────────────────
+        from pseudo8051.passes import run_all_passes
+        run_all_passes(self)
+
+        # ── Assemble top-level HIR from all blocks ────────────────────────
+        # After structural passes the per-block hir lists have been modified;
+        # blocks whose content was absorbed into a WhileNode / IfNode are
+        # marked absorbed and skipped here.
+        self.hir: List[HIRNode] = []
+        for block in self._blocks:
+            if not getattr(block, "_absorbed", False):
+                self.hir.extend(block.hir)
+
+        absorbed = [hex(b.start_ea) for b in self._blocks
+                    if getattr(b, "_absorbed", False)]
+        live     = [hex(b.start_ea) for b in self._blocks
+                    if not getattr(b, "_absorbed", False)]
+        dbg("func", f"  live blocks after passes: {live}")
+        if absorbed:
+            dbg("func", f"  absorbed blocks:          {absorbed}")
+
+    # ── Block graph accessors ─────────────────────────────────────────────
+
+    @property
+    def blocks(self) -> List[BasicBlock]:
+        return self._blocks
+
+    @property
+    def entry_block(self) -> BasicBlock:
+        return self._block_map[self.ea]
+
+    # ── Parameter / return inference (from liveness results) ─────────────
+
+    @property
+    def parameters(self) -> List[str]:
+        """Registers live at function entry (set by LivenessAnalysis)."""
+        entry = self.entry_block
+        live  = entry.live_in
+        return [r for r in PARAM_REG_ORDER if r in live]
+
+    @property
+    def return_registers(self) -> List[str]:
+        """Registers live at return-instruction blocks (from liveness)."""
+        regs: set = set()
+        for block in self._blocks:
+            last = None
+            for instr in block.instructions:
+                last = instr
+            if last and last.is_return():
+                regs.update(block.live_in)
+        return [r for r in PARAM_REG_ORDER if r in regs]
+
+    # ── Label assignment ──────────────────────────────────────────────────
+
+    def _assign_labels(self) -> None:
+        """
+        Give a label string to every block that needs one:
+          • blocks with more than one predecessor (join points), or
+          • blocks that are the target of a back-edge (loop headers).
+        """
+        BADADDR = idc.BADADDR
+
+        pred_count: Dict[int, int] = {}
+        loop_headers: set = set()
+
+        for block in self._blocks:
+            for succ in block._ida_block.succs():
+                if succ.start_ea >= BADADDR:
+                    continue
+                pred_count[succ.start_ea] = pred_count.get(succ.start_ea, 0) + 1
+                if succ.start_ea <= block.start_ea:
+                    loop_headers.add(succ.start_ea)
+                    if succ.start_ea in self._block_map:
+                        self._block_map[succ.start_ea].is_loop_header = True
+
+        needs_label = loop_headers | {ea for ea, cnt in pred_count.items() if cnt > 1}
+
+        for ea in needs_label:
+            block = self._block_map.get(ea)
+            if block and ea != self.ea:   # entry block never gets a label
+                # Prefer the IDA-assigned symbol name so that branch operands
+                # (resolved via ida_name.get_name in Operand.render) produce
+                # goto targets that match.  Fall back to a generated name only
+                # when IDA has no symbol at this address.
+                ida_lbl = ida_name.get_name(ea)
+                block.label = ida_lbl if ida_lbl else f"label_{hex(ea).removeprefix('0x')}"
+
+    # ── Rendering ─────────────────────────────────────────────────────────
+
+    def render(self) -> List[tuple]:
+        """
+        Return a flat list of (ea, text) tuples for the viewer.
+        Each HIR node renders itself recursively.
+        """
+        lines = []
+        for node in self.hir:
+            lines.extend(node.render(indent=0))
+        return lines
+
+    def __repr__(self) -> str:
+        return f"<Function name={self.name!r} ea={hex(self.ea)}>"
