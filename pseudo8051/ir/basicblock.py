@@ -6,6 +6,7 @@ from typing import List, Optional, TYPE_CHECKING
 
 import ida_ua
 import ida_bytes
+import ida_funcs
 import idc
 
 from pseudo8051.ir.instruction import Instruction
@@ -111,8 +112,45 @@ class BasicBlock:
             d = insn.defs()
             use  |= u - def_   # only count uses not already covered by defs
             def_ |= d
+
+        # Fall-through tail call: if this block has no in-function successors
+        # and does not end with a branch/return, check whether end_ea is the
+        # entry of another function.  The callee's parameter registers count as
+        # "used" here, just like SjmpHandler.use() does for explicit jumps.
+        ft = self._fallthrough_tail_call()
+        if ft is not None:
+            _, ft_proto = ft
+            if ft_proto:
+                from pseudo8051.prototypes import param_regs as _prs
+                for r_tuple in _prs(ft_proto):
+                    use |= set(r_tuple) - def_
+
         self._upward_use = frozenset(use)
         self._defined    = frozenset(def_)
+
+    def _fallthrough_tail_call(self):
+        """
+        Return (target_name, proto_or_None) if this block falls through into
+        another function, else return None.
+
+        Conditions:
+          • no in-function successors (fall-through target was filtered)
+          • last instruction is not a return or branch
+          • end_ea is the start_ea of a different IDA function
+        """
+        if self.successors:
+            return None
+        last = self.instructions[-1] if self.instructions else None
+        if last is None or last.is_return() or last.is_branch():
+            return None
+        target_fn = ida_funcs.get_func(self.end_ea)
+        if (target_fn is None
+                or target_fn.start_ea != self.end_ea
+                or target_fn.start_ea == self._func.ea):
+            return None
+        target_name = ida_funcs.get_func_name(self.end_ea) or hex(self.end_ea)
+        from pseudo8051.prototypes import get_proto
+        return (target_name, get_proto(target_name))
 
     # ── Initial HIR generation ────────────────────────────────────────────
 
@@ -145,6 +183,25 @@ class BasicBlock:
             propagate_insn(raw_insn, state)
             for s in stmts:
                 nodes.append(Statement(instr.ea, s))
+
+        # Fall-through tail call: append a synthetic call/return statement.
+        ft = self._fallthrough_tail_call()
+        if ft is not None:
+            target_name, proto = ft
+            ea = self.instructions[-1].ea if self.instructions else self.start_ea
+            from pseudo8051.prototypes import param_regs as _prs
+            from pseudo8051.constants  import dbg
+            if proto:
+                regs_list = _prs(proto)
+                args = ["".join(r) if r else "?" for r in regs_list]
+                call_expr = f"{target_name}({', '.join(args)})"
+                stmt = f"return {call_expr};" if proto.return_type != "void" \
+                       else f"{call_expr};"
+                dbg("func", f"  fall-through tail call → {target_name}")
+            else:
+                stmt = f"return {target_name}();  /* tail call */"
+                dbg("func", f"  fall-through tail call (no proto) → {target_name}")
+            nodes.append(Statement(ea, stmt))
 
         return nodes
 
