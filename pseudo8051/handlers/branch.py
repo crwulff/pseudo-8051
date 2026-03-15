@@ -5,6 +5,9 @@ handlers/branch.py — SJMP / LJMP / AJMP / JZ / JNZ / JC / JNC / JB / JNB /
 
 from typing import List
 
+import ida_funcs
+import ida_ua
+
 from pseudo8051.ir.instruction import MnemonicHandler
 from pseudo8051.ir.operand     import Operand
 from pseudo8051.constants      import PARAM_REGS
@@ -12,6 +15,26 @@ from pseudo8051.constants      import PARAM_REGS
 
 def _op(insn, n: int, state=None) -> str:
     return Operand(insn, n).render(state)
+
+
+def _tail_call_target(insn) -> str:
+    """
+    If the jump target is the entry of a *different* IDA function, return
+    its name (tail call).  Otherwise return None (normal intra-function jump).
+    """
+    op = insn.ops[0]
+    if op.type not in (ida_ua.o_near, ida_ua.o_far):
+        return None
+    page_base  = insn.ea & ~0xFFFF
+    target_ea  = page_base | (op.addr & 0xFFFF)
+    target_fn  = ida_funcs.get_func(target_ea)
+    current_fn = ida_funcs.get_func(insn.ea)
+    if (target_fn is not None
+            and target_fn.start_ea == target_ea       # target IS a function entry
+            and (current_fn is None
+                 or target_fn.start_ea != current_fn.start_ea)):
+        return ida_funcs.get_func_name(target_ea) or hex(target_ea)
+    return None
 
 
 class SjmpHandler(MnemonicHandler):
@@ -24,6 +47,17 @@ class SjmpHandler(MnemonicHandler):
         return frozenset()
 
     def lift(self, insn, state=None) -> List[str]:
+        tail = _tail_call_target(insn)
+        if tail:
+            from pseudo8051.prototypes import get_proto, return_expr
+            proto = get_proto(tail)
+            if proto:
+                args_str  = ", ".join(p.name for p in proto.params)
+                call_expr = f"{tail}({args_str})"
+                if proto.return_type != "void" and proto.return_regs:
+                    return [f"return {return_expr(proto)} = {call_expr};"]
+                return [f"{call_expr};"]
+            return [f"{tail}();  /* tail call */"]
         return [f"goto {_op(insn, 0, state)};"]
 
 

@@ -41,8 +41,20 @@ class Function:
 
         BADADDR = idc.BADADDR
 
-        # Collect IDA blocks, skip synthetic sink (start_ea >= BADADDR)
-        raw_blocks = [b for b in fc if b.start_ea < BADADDR]
+        # Collect IDA blocks that belong to this function.
+        # IDA's FlowChart follows unconditional jumps across function boundaries
+        # (tail calls via ljmp), so we must filter out blocks owned by other
+        # functions; otherwise tail-call targets appear as loop back-edges.
+        raw_blocks = []
+        for b in fc:
+            if b.start_ea >= BADADDR:
+                continue
+            owner = ida_funcs.get_func(b.start_ea)
+            if owner is not None and owner.start_ea != func_ea:
+                dbg("func", f"  skipping external block {hex(b.start_ea)} "
+                             f"(belongs to {ida_funcs.get_func_name(owner.start_ea)})")
+                continue
+            raw_blocks.append(b)
 
         # Create BasicBlock wrappers; _block_map is needed by predecessors/successors
         self._block_map: Dict[int, BasicBlock] = {}
