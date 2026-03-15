@@ -28,6 +28,9 @@ if _scripts_dir not in _sys.path:
     _sys.path.insert(0, _scripts_dir)
 del _os, _sys, _scripts_dir
 
+import string
+import sys
+
 import ida_funcs
 import ida_kernwin
 import idc
@@ -41,15 +44,30 @@ _WOPN_DP_TAB = getattr(ida_kernwin, 'WOPN_DP_TAB', _DP_TAB << 16)
 # IDA 7/8 fallback constants
 _DP_INSIDE = getattr(ida_kernwin, 'DP_INSIDE', 5)
 
+_BASE_TITLE = "8051 Pseudocode"
+
 from pseudo8051.ir.function import Function
 
+# Viewer registry that survives module reloads: keyed by tab title.
+# We store it on sys so it is not reset when this module is reloaded.
+if not hasattr(sys, '_pseudo8051_viewers'):
+    sys._pseudo8051_viewers: dict = {}
 
-def _show_as_tab(widget, title: str, dest: str = "IDA View-A") -> None:
+
+def _show_as_tab(widget, title: str) -> None:
     """
-    Display widget as a tab next to dest.
+    Display widget as a tab.  Prefer to dock next to an existing pseudocode
+    tab; fall back to IDA View-A if none is open yet.
     IDA 9+: display_widget accepts (widget, WOPN_DP_TAB, dest_title).
     IDA 7/8: use set_dock_pos then display_widget(widget, 0).
     """
+    # Find an already-open pseudocode tab to dock next to
+    dest = "IDA View-A"
+    for existing_title in sys._pseudo8051_viewers:
+        if ida_kernwin.find_widget(existing_title) is not None:
+            dest = existing_title
+            break
+
     try:
         ida_kernwin.display_widget(widget, _WOPN_DP_TAB, dest)
     except TypeError:
@@ -58,13 +76,26 @@ def _show_as_tab(widget, title: str, dest: str = "IDA View-A") -> None:
         ida_kernwin.display_widget(widget, 0)
 
 
+def _next_title() -> str:
+    """
+    Return the next available tab title of the form "8051 Pseudocode-A",
+    "8051 Pseudocode-B", … by checking which widgets are currently open.
+    """
+    for letter in string.ascii_uppercase:
+        title = f"{_BASE_TITLE}-{letter}"
+        if ida_kernwin.find_widget(title) is None:
+            return title
+    return f"{_BASE_TITLE}-?"   # all 26 slots occupied (shouldn't happen)
+
+
 class PseudocodeViewer(ida_kernwin.simplecustviewer_t):
     """
     Dockable IDA window showing 8051 pseudocode.
     Double-clicking a line jumps the disassembly view to that address.
     """
 
-    def Create(self, title: str = "8051 Pseudocode") -> bool:
+    def Create(self, title: str) -> bool:
+        self._title = title
         return super().Create(title)
 
     def Show(self, func_ea: int) -> None:
@@ -77,7 +108,7 @@ class PseudocodeViewer(ida_kernwin.simplecustviewer_t):
         except Exception as e:
             self.AddLine(f"/* ERROR building IR: {e} */")
             self.Refresh()
-            _show_as_tab(self.GetWidget(), "8051 Pseudocode")
+            _show_as_tab(self.GetWidget(), self._title)
             return
 
         func_name  = func.name
@@ -96,7 +127,7 @@ class PseudocodeViewer(ida_kernwin.simplecustviewer_t):
             self.AddLine(text)
 
         self.Refresh()
-        _show_as_tab(self.GetWidget(), "8051 Pseudocode")
+        _show_as_tab(self.GetWidget(), self._title)
 
     def OnDblClick(self, _shift: int) -> bool:
         """Jump IDA disassembly view to the address of the clicked line."""
@@ -106,7 +137,7 @@ class PseudocodeViewer(ida_kernwin.simplecustviewer_t):
         return True
 
     def OnClose(self) -> None:
-        pass
+        sys._pseudo8051_viewers.pop(getattr(self, '_title', None), None)
 
 
 def run_pseudocode_view() -> None:
@@ -117,16 +148,13 @@ def run_pseudocode_view() -> None:
                             "Place the cursor on a function and re-run.")
         return
 
-    # Keep a module-level reference so Python's GC doesn't collect the viewer
-    # while it is still displayed by IDA.
-    global _8051_viewer
-    _8051_viewer = PseudocodeViewer()
+    title = _next_title()
+    viewer = PseudocodeViewer()
 
-    if not _8051_viewer.Create("8051 Pseudocode"):
+    if not viewer.Create(title):
         ida_kernwin.warning("Failed to create pseudocode viewer.")
         return
 
-    _8051_viewer.Show(func.start_ea)
-
-
-run_pseudocode_view()
+    # Store in the persistent registry so GC doesn't collect it
+    sys._pseudo8051_viewers[title] = viewer
+    viewer.Show(func.start_ea)
