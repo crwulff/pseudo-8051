@@ -27,7 +27,7 @@ To override for a specific function (e.g. returns uint16_t in R0:R1):
 
 import re
 from dataclasses import dataclass, field
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, TYPE_CHECKING
 
 from pseudo8051.constants import dbg
 
@@ -54,6 +54,40 @@ def return_expr(proto: "FuncProto") -> str:
     ('R6','R7') → 'R6R7',  ('C',) → 'C'.
     """
     return "".join(proto.return_regs)
+
+
+# ── Standard 8051 calling-convention register allocation ─────────────────────
+
+_PROTO_REG_POOL = ["R0", "R1", "R2", "R3", "R4", "R5", "R6", "R7"]
+
+_PROTO_TYPE_BYTES: dict = {
+    "void": 0, "bool": 1,
+    "int8_t": 1, "uint8_t": 1,
+    "int16_t": 2, "uint16_t": 2,
+    "int32_t": 4, "uint32_t": 4,
+}
+
+
+def param_regs(proto: "FuncProto") -> List[Tuple[str, ...]]:
+    """
+    Return the physical register tuple for each parameter using the standard
+    8051 calling convention (R7 downward).  Explicit Param.regs take priority.
+    """
+    pool = list(_PROTO_REG_POOL)
+    result: List[Tuple[str, ...]] = []
+    for p in proto.params:
+        if p.regs:
+            result.append(p.regs)
+            pool = [r for r in pool if r not in p.regs]
+        else:
+            size = _PROTO_TYPE_BYTES.get(p.type, 0)
+            if size == 0 or size > len(pool):
+                result.append(())
+                continue
+            regs = tuple(pool[-size:])
+            pool = pool[:-size]
+            result.append(regs)
+    return result
 
 
 # ── IDA → C99 type name normalisation ────────────────────────────────────────

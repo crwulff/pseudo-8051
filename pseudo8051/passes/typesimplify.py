@@ -64,6 +64,47 @@ def _assign_regs(params) -> List[Tuple[str, ...]]:
     return result
 
 
+def _assign_regs_from_liveness(params, live_in: frozenset) -> List[Tuple[str, ...]]:
+    """
+    Infer parameter register assignment from liveness analysis.
+
+    Strategy: collect the Rn registers that are live at function entry,
+    sort them by register number (ascending), then greedily assign them to
+    params left-to-right.  Only succeeds when the total size of all params
+    exactly matches the number of live Rn registers AND each param's
+    registers form a contiguous ascending sequence.
+
+    Returns a parallel list of register tuples (same length as params),
+    or all-empty tuples if inference is not possible.
+    """
+    empty = [() for _ in params]
+
+    live_rn = sorted([r for r in _REG_POOL if r in live_in],
+                     key=lambda r: int(r[1:]))
+    total_bytes = sum(_type_bytes(p.type) for p in params)
+
+    if not live_rn or len(live_rn) != total_bytes:
+        return empty
+
+    result = []
+    pos = 0
+    for p in params:
+        size = _type_bytes(p.type)
+        if size == 0:
+            result.append(())
+            continue
+        group = tuple(live_rn[pos:pos + size])
+        if len(group) != size:
+            return empty
+        # Verify contiguous ascending register numbers
+        nums = [int(r[1:]) for r in group]
+        if nums != list(range(nums[0], nums[0] + size)):
+            return empty
+        result.append(group)
+        pos += size
+    return result
+
+
 # ── VarInfo: one named variable covering one or more registers ────────────────
 
 class VarInfo:
@@ -84,7 +125,8 @@ class VarInfo:
         return self.regs[-1] if self.regs else None
 
 
-def _build_reg_map(proto: "FuncProto") -> Dict[str, VarInfo]:
+def _build_reg_map(proto: "FuncProto",
+                   live_in: frozenset = frozenset()) -> Dict[str, VarInfo]:
     """
     Build a dict mapping register names → VarInfo for all prototype params
     and the return registers.
@@ -92,18 +134,40 @@ def _build_reg_map(proto: "FuncProto") -> Dict[str, VarInfo]:
     Only multi-register keys (e.g. 'R6R7') are added for text substitution;
     individual register keys are still present so pattern matchers can look
     them up.
+
+    Priority for register assignment (highest first):
+      1. Explicit regs on each Param (set manually in PROTOTYPES)
+      2. Liveness inference from live_in (if total bytes match)
+      3. Standard 8051 calling convention (R7 downward)
     """
     params   = proto.params
     assigned: List[Tuple[str, ...]] = []
     for p in params:
         assigned.append(p.regs if p.regs else ())
 
-    # Fill missing assignments from convention
+    # Fill missing assignments
     needs = [i for i, r in enumerate(assigned) if not r]
     if needs:
-        inferred = _assign_regs(params)
-        for i in needs:
-            assigned[i] = inferred[i]
+        # Try liveness-based inference first (handles non-standard conventions)
+        live_inferred = _assign_regs_from_liveness(params, live_in) if live_in else []
+        if live_inferred and any(r for r in live_inferred):
+            dbg("typesimp", f"  register assignment: liveness-inferred "
+                            f"{[v for v in live_inferred]}")
+            for i in needs:
+                if live_inferred[i]:
+                    assigned[i] = live_inferred[i]
+            # Refill any still-missing with convention (shouldn't happen if inference worked)
+            still_needs = [i for i in needs if not assigned[i]]
+            if still_needs:
+                conv = _assign_regs(params)
+                for i in still_needs:
+                    assigned[i] = conv[i]
+        else:
+            conv = _assign_regs(params)
+            dbg("typesimp", f"  register assignment: convention "
+                            f"{[v for v in conv]}")
+            for i in needs:
+                assigned[i] = conv[i]
 
     reg_map: Dict[str, VarInfo] = {}
 
@@ -340,14 +404,20 @@ def _simplify(nodes: List[HIRNode], reg_map: Dict[str, VarInfo]) -> List[HIRNode
             value, end_i = cm
             const_s = _const_str(value, vinfo.type)
             dbg("typesimp", f"  const-load: {vinfo.name} = {const_s}")
-            # Fold into return if immediately followed by 'return <var>;'.
-            # The lookahead node may still carry the pre-substitution pair name
-            # (e.g. 'return R4R5R6R7;') so check both forms.
-            ret_texts = {f"return {vinfo.name};", f"return {vinfo.pair_name};"}
-            if (end_i < len(nodes)
-                    and isinstance(nodes[end_i], Statement)
-                    and nodes[end_i].text in ret_texts):
-                out.append(Statement(node.ea, f"return {const_s};"))
+            # Fold into the immediately following statement if it is a return and
+            # contains the register pair (either as pair name or variable name).
+            # This handles both bare 'return R4R5R6R7;' and tail call forms like
+            # 'return func(R4R5R6R7, R0R1R2R3);'.
+            next_node = nodes[end_i] if end_i < len(nodes) else None
+            next_text = next_node.text if isinstance(next_node, Statement) else ""
+            pair_in_next = (vinfo.pair_name in next_text or
+                            (vinfo.name != vinfo.pair_name and
+                             re.search(r"\b" + re.escape(vinfo.name) + r"\b", next_text)))
+            if next_text.startswith("return ") and pair_in_next:
+                # Substitute pair name → const, then apply remaining pair subs
+                folded = next_text.replace(vinfo.pair_name, const_s)
+                folded = _replace_pairs(folded, reg_map)
+                out.append(Statement(node.ea, folded))
                 i = end_i + 1
             else:
                 # Declare with type so 'retval' (synthetic) shows its type
@@ -431,10 +501,12 @@ class TypeAwareSimplifier(OptimizationPass):
             dbg("typesimp", f"{func.name}: no prototype, skipping")
             return
 
-        reg_map = _build_reg_map(proto)
+        live_in = getattr(func.entry_block, "live_in", frozenset())
+        reg_map = _build_reg_map(proto, live_in)
         if not reg_map:
             dbg("typesimp", f"{func.name}: empty reg map, skipping")
             return
 
-        dbg("typesimp", f"{func.name}: reg_map = {list(reg_map.keys())}")
+        dbg("typesimp", f"{func.name}: live_in={sorted(live_in)}  "
+                        f"reg_map = {list(reg_map.keys())}")
         func.hir = _simplify(func.hir, reg_map)

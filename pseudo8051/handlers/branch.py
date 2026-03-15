@@ -41,6 +41,15 @@ class SjmpHandler(MnemonicHandler):
     """SJMP / LJMP / AJMP — unconditional jump."""
 
     def use(self, insn) -> frozenset:
+        tail = _tail_call_target(insn)
+        if tail:
+            from pseudo8051.prototypes import get_proto, param_regs
+            proto = get_proto(tail)
+            if proto:
+                regs: set = set()
+                for r_tuple in param_regs(proto):
+                    regs.update(r_tuple)
+                return frozenset(regs)
         return frozenset()
 
     def defs(self, insn) -> frozenset:
@@ -49,13 +58,16 @@ class SjmpHandler(MnemonicHandler):
     def lift(self, insn, state=None) -> List[str]:
         tail = _tail_call_target(insn)
         if tail:
-            from pseudo8051.prototypes import get_proto, return_expr
+            from pseudo8051.prototypes import get_proto, param_regs
             proto = get_proto(tail)
             if proto:
-                args_str  = ", ".join(p.name for p in proto.params)
-                call_expr = f"{tail}({args_str})"
-                if proto.return_type != "void" and proto.return_regs:
-                    return [f"return {return_expr(proto)} = {call_expr};"]
+                regs_list = param_regs(proto)
+                # Use register-pair names as arguments; TypeAwareSimplifier will
+                # substitute them with variable names / constants from the caller's scope.
+                args = ["".join(r) if r else "?" for r in regs_list]
+                call_expr = f"{tail}({', '.join(args)})"
+                if proto.return_type != "void":
+                    return [f"return {call_expr};"]
                 return [f"{call_expr};"]
             return [f"{tail}();  /* tail call */"]
         return [f"goto {_op(insn, 0, state)};"]
