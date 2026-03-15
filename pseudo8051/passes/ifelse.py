@@ -68,17 +68,47 @@ def _reachable_eas(start: "BasicBlock", min_ea: int) -> set:
     return visited
 
 
+def _is_dead_end(block: "BasicBlock", branch_ea: int) -> bool:
+    """
+    True when the arm starting at block has no forward successors beyond
+    branch_ea — i.e. it terminates (ret / unconditional jump out of range).
+    """
+    reach = _reachable_eas(block, branch_ea)
+    # A dead-end arm reaches only itself (and possibly other absorbed blocks
+    # that also have no forward exit).
+    for ea in reach:
+        blk = block._func._block_map.get(ea)
+        if blk is None:
+            continue
+        for succ in blk.successors:
+            if succ.start_ea > branch_ea and succ.start_ea not in reach:
+                return False  # has at least one exit to outside the arm
+    return True
+
+
 def _find_merge_ea(true_block: "BasicBlock",
                    false_block: "BasicBlock",
                    branch_ea: int) -> Optional[int]:
     """
     Return the EA of the immediate post-dominator — the block with the
-    smallest EA reachable from *both* arms.  Returns None if not found.
+    smallest EA reachable from *both* arms.
+
+    Special case: if one arm is a dead-end (returns / jumps away with no
+    forward exit), the merge is the other arm's first block — the branch
+    simply wraps the dead-end arm as an if-with-exit.
     """
     reach_true  = _reachable_eas(true_block,  branch_ea)
     reach_false = _reachable_eas(false_block, branch_ea)
     common = reach_true & reach_false
-    return min(common) if common else None
+    if common:
+        return min(common)
+
+    # One (or both) arms are dead-ends — check for if-with-exit pattern
+    if _is_dead_end(false_block, branch_ea):
+        return true_block.start_ea
+    if _is_dead_end(true_block, branch_ea):
+        return false_block.start_ea
+    return None
 
 
 def _arm_blocks(start: "BasicBlock", merge_ea: int) -> List["BasicBlock"]:

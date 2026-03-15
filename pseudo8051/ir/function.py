@@ -142,6 +142,14 @@ class Function:
 
         needs_label = loop_headers | {ea for ea, cnt in pred_count.items() if cnt > 1}
 
+        # Any block that IDA has a symbol for must also get a label: branch
+        # operands are rendered via ida_name.get_name(), so the goto target
+        # text must match block.label exactly — even for single-predecessor
+        # blocks that structural criteria alone would not label.
+        for block in self._blocks:
+            if block.start_ea != self.ea and ida_name.get_name(block.start_ea):
+                needs_label.add(block.start_ea)
+
         for ea in needs_label:
             block = self._block_map.get(ea)
             if block and ea != self.ea:   # entry block never gets a label
