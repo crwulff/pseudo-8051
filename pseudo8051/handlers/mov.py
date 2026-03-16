@@ -14,6 +14,9 @@ from pseudo8051.constants      import (
     PARAM_REGS, resolve_ext_addr,
 )
 
+# Registers whose constant values we can inline as immediates
+_TRACKED_REGS = frozenset(["A", "R0", "R1", "R2", "R3", "R4", "R5", "R6", "R7"])
+
 if TYPE_CHECKING:
     from pseudo8051.analysis.constprop import CPState
 
@@ -58,6 +61,16 @@ class MovHandler(MnemonicHandler):
             sym = resolve_ext_addr(imm)
             if sym != hex(imm):
                 return [f"DPTR = {sym};  /* {hex(imm)} */"]
+        # When the source register has a known constant value, inline it.
+        # This makes patterns like "MOV R6, A" (where A=0) emit "R6 = 0x00;"
+        # so ConstGroupPattern can recognize multi-byte constant loads.
+        if state is not None and op1.type == ida_ua.o_reg:
+            src_name = idc.print_operand(insn.ea, 1)
+            if src_name in _TRACKED_REGS:
+                val = state.get(src_name)
+                if val is not None:
+                    dst = _op(insn, 0, state)
+                    return [f"{dst} = {hex(val)};"]
         dst = _op(insn, 0, state)
         src = _op(insn, 1, state)
         return [f"{dst} = {src};"]

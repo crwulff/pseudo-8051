@@ -70,3 +70,40 @@ def _const_str(value: int, type_str: str) -> str:
     if size >= 4: return f"0x{value:08x}"
     if size == 2: return f"0x{value:04x}"
     return hex(value) if value > 9 else str(value)
+
+
+# ── Statement folding helper ──────────────────────────────────────────────────
+
+def _fold_into_stmt(next_text: str, name_to_fold: str,
+                    replacement: str,
+                    reg_map: Dict[str, "VarInfo"]) -> Optional[str]:
+    """
+    Try to substitute `name_to_fold` → `replacement` in `next_text`.
+
+    For assignment statements (`LHS = RHS;`) the substitution is applied only
+    to the RHS so the left-hand side is not accidentally replaced.  For return
+    statements and standalone expressions the substitution is unrestricted.
+
+    Returns the folded text (with _replace_pairs applied), or None when
+    `name_to_fold` does not appear in an expression position.
+    """
+    if not next_text:
+        return None
+    pat = re.compile(r'\b' + re.escape(name_to_fold) + r'\b')
+    if not pat.search(next_text):
+        return None
+
+    if next_text.startswith("return "):
+        return _replace_pairs(pat.sub(replacement, next_text), reg_map)
+
+    eq_pos = next_text.find(" = ")
+    if eq_pos > 0:
+        # Assignment: only replace in the RHS
+        rhs = next_text[eq_pos + 3:]
+        if pat.search(rhs):
+            new_rhs = pat.sub(replacement, rhs)
+            return _replace_pairs(next_text[:eq_pos + 3] + new_rhs, reg_map)
+        return None  # name_to_fold only in LHS — not a fold opportunity
+
+    # Standalone expression (e.g. a bare function call)
+    return _replace_pairs(pat.sub(replacement, next_text), reg_map)

@@ -19,7 +19,7 @@ from pseudo8051.ir.hir import HIRNode, Statement
 from pseudo8051.constants import dbg
 from pseudo8051.passes.patterns.base   import Pattern, Match, Simplify
 from pseudo8051.passes.patterns._utils import (
-    VarInfo, _replace_pairs, _parse_int, _const_str, _type_bytes,
+    VarInfo, _replace_pairs, _fold_into_stmt, _parse_int, _const_str, _type_bytes,
 )
 
 _RE_ASSIGN_IMM = re.compile(r"^(\w+) = (0x[0-9a-fA-F]+|\d+);$")
@@ -106,18 +106,20 @@ class ConstGroupPattern(Pattern):
             const_s = _const_str(value, vinfo.type)
             dbg("typesimp", f"  const-load: {vinfo.name} = {const_s}")
 
-            # Fold into the following return statement when it references the pair.
-            # Handles both bare 'return R4R5R6R7;' and tail call forms like
-            # 'return func(R4R5R6R7, R0R1R2R3);'.
+            # Try to fold the constant directly into the immediately following
+            # statement when it references the pair name (handles return statements,
+            # assignment RHS, and standalone calls).
             next_node = nodes[end_i] if end_i < len(nodes) else None
             next_text = next_node.text if isinstance(next_node, Statement) else ""
             pair_in_next = (vinfo.pair_name in next_text or
                             (vinfo.name != vinfo.pair_name and
                              re.search(r"\b" + re.escape(vinfo.name) + r"\b", next_text)))
-            if next_text.startswith("return ") and pair_in_next:
-                folded = next_text.replace(vinfo.pair_name, const_s)
-                folded = _replace_pairs(folded, reg_map)
-                return ([Statement(nodes[i].ea, folded)], end_i + 1)
+            if pair_in_next:
+                folded = _fold_into_stmt(next_text, vinfo.pair_name, const_s, reg_map)
+                if folded is None and vinfo.name != vinfo.pair_name:
+                    folded = _fold_into_stmt(next_text, vinfo.name, const_s, reg_map)
+                if folded is not None:
+                    return ([Statement(nodes[i].ea, folded)], end_i + 1)
 
             # Otherwise declare with type (synthetic 'retval' gets its type shown)
             return ([Statement(nodes[i].ea,

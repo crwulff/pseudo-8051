@@ -9,6 +9,7 @@ Individual patterns live in passes/patterns/.  To add a new one, see the
 instructions in passes/patterns/__init__.py.
 """
 
+import re
 from typing import Dict, List, Tuple, TYPE_CHECKING
 
 from pseudo8051.ir.hir    import HIRNode, Statement, IfNode, WhileNode, ForNode
@@ -21,6 +22,8 @@ from pseudo8051.passes.patterns._utils  import VarInfo, _replace_pairs, _type_by
 if TYPE_CHECKING:
     from pseudo8051.ir.function import Function
     from pseudo8051.prototypes  import FuncProto
+
+_RE_CALL_NAME = re.compile(r'\b([A-Za-z_]\w*)\(')
 
 
 # ── Standard 8051 calling-convention register assignment ─────────────────────
@@ -134,6 +137,47 @@ def _build_reg_map(proto: "FuncProto",
     return reg_map
 
 
+# ── Callee register-map augmentation ─────────────────────────────────────────
+
+def _collect_call_names(hir: List[HIRNode]) -> set:
+    """Recursively collect all called function names from HIR text."""
+    names: set = set()
+    for node in hir:
+        if isinstance(node, Statement):
+            for m in _RE_CALL_NAME.finditer(node.text):
+                names.add(m.group(1))
+        elif isinstance(node, IfNode):
+            names.update(_collect_call_names(node.then_nodes))
+            names.update(_collect_call_names(node.else_nodes))
+        elif isinstance(node, (WhileNode, ForNode)):
+            names.update(_collect_call_names(node.body_nodes))
+    return names
+
+
+def _augment_with_callee_regs(hir: List[HIRNode],
+                               reg_map: Dict[str, VarInfo]) -> Dict[str, VarInfo]:
+    """
+    Scan the HIR for function calls, look up each callee's prototype, and add
+    their parameter register mappings to reg_map.
+
+    Existing reg_map entries (from the caller's own prototype) take priority.
+    This enables backward type propagation: patterns like ConstGroupPattern and
+    XRAMGroupReadPattern can recognise and collapse argument-loading sequences
+    even when the caller function itself has no prototype.
+    """
+    from pseudo8051.prototypes import get_proto
+    result = dict(reg_map)
+    for name in _collect_call_names(hir):
+        proto = get_proto(name)
+        if proto is None:
+            continue
+        callee_reg_map = _build_reg_map(proto)
+        for r, info in callee_reg_map.items():
+            if r not in result:
+                result[r] = info
+    return result
+
+
 # ── Default node transformation ───────────────────────────────────────────────
 
 def _transform_default(node: HIRNode, reg_map: Dict[str, VarInfo]) -> HIRNode:
@@ -205,17 +249,27 @@ class TypeAwareSimplifier(OptimizationPass):
 
     def run(self, func: "Function") -> None:
         from pseudo8051.prototypes import get_proto
-        proto = get_proto(func.name)
-        if proto is None:
-            dbg("typesimp", f"{func.name}: no prototype, skipping")
-            return
-
         live_in = getattr(func.entry_block, "live_in", frozenset())
-        reg_map = _build_reg_map(proto, live_in)
+
+        proto = get_proto(func.name)
+        if proto is not None:
+            reg_map = _build_reg_map(proto, live_in)
+            dbg("typesimp", f"{func.name}: caller proto found, "
+                            f"live_in={sorted(live_in)}  "
+                            f"reg_map keys={list(reg_map.keys())}")
+        else:
+            reg_map = {}
+            dbg("typesimp", f"{func.name}: no caller proto, "
+                            "scanning callee prototypes for register mappings")
+
+        # Add register mappings from any callee prototypes found in the HIR.
+        # This propagates callee parameter types backward into the argument-
+        # loading sequences that precede each call.
+        reg_map = _augment_with_callee_regs(func.hir, reg_map)
+
         if not reg_map:
-            dbg("typesimp", f"{func.name}: empty reg map, skipping")
+            dbg("typesimp", f"{func.name}: no register mappings found, skipping")
             return
 
-        dbg("typesimp", f"{func.name}: live_in={sorted(live_in)}  "
-                        f"reg_map={list(reg_map.keys())}")
+        dbg("typesimp", f"{func.name}: final reg_map={list(reg_map.keys())}")
         func.hir = _simplify(func.hir, reg_map)

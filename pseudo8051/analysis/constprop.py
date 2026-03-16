@@ -16,6 +16,9 @@ import idc
 from pseudo8051.constants import REG_DPTR, PARAM_REGS
 from pseudo8051.passes     import OptimizationPass
 
+# Registers whose values we track through constant propagation
+_REG_TRACKED = frozenset(["A", "R0", "R1", "R2", "R3", "R4", "R5", "R6", "R7"])
+
 if TYPE_CHECKING:
     from pseudo8051.ir.function import Function
 
@@ -79,7 +82,8 @@ class CPState:
 def propagate_insn(insn, state: CPState) -> None:
     """
     Update state in-place with the known effects of insn.
-    Tracks DPTR, DPH, DPL.  Conservative on calls (kills all three).
+    Tracks DPTR, DPH, DPL, and general registers A/R0-R7.
+    Conservative on calls (kills all tracked registers).
     """
     mnem = insn.get_canon_mnem().upper()
     op0  = insn.ops[0]
@@ -118,6 +122,24 @@ def propagate_insn(insn, state: CPState) -> None:
                     state.kill("DPTR")
             else:
                 state.kill("DPL", "DPTR")
+        elif op0.type == ida_ua.o_reg:
+            # MOV A/#imm or MOV Rn, #imm / MOV Rn, Rm
+            op0_name = idc.print_operand(insn.ea, 0)
+            if op0_name in _REG_TRACKED:
+                if op1.type == ida_ua.o_imm:
+                    state.set(op0_name, op1.value & 0xFF)
+                elif op1.type == ida_ua.o_reg:
+                    op1_name = idc.print_operand(insn.ea, 1)
+                    if op1_name in _REG_TRACKED:
+                        val = state.get(op1_name)
+                        if val is not None:
+                            state.set(op0_name, val)
+                        else:
+                            state.kill(op0_name)
+                    else:
+                        state.kill(op0_name)
+                else:
+                    state.kill(op0_name)
 
     elif mnem == "INC":
         if op0.type == ida_ua.o_reg and op0.reg == REG_DPTR:
@@ -127,9 +149,62 @@ def propagate_insn(insn, state: CPState) -> None:
                 state.set("DPTR", nv)
                 state.set("DPH",  nv >> 8)
                 state.set("DPL",  nv & 0xFF)
+        elif op0.type == ida_ua.o_reg:
+            op0_name = idc.print_operand(insn.ea, 0)
+            if op0_name in _REG_TRACKED:
+                val = state.get(op0_name)
+                if val is not None:
+                    state.set(op0_name, (val + 1) & 0xFF)
+                else:
+                    state.kill(op0_name)
+
+    elif mnem == "DEC":
+        if op0.type == ida_ua.o_reg:
+            op0_name = idc.print_operand(insn.ea, 0)
+            if op0_name in _REG_TRACKED:
+                val = state.get(op0_name)
+                if val is not None:
+                    state.set(op0_name, (val - 1) & 0xFF)
+                else:
+                    state.kill(op0_name)
+
+    elif mnem in ("ADD", "ADDC", "SUBB", "DA", "MUL", "DIV"):
+        # These always modify A (and B for MUL/DIV, but we don't track B)
+        state.kill("A")
+
+    elif mnem == "CLR":
+        # CLR A clears the accumulator to zero; CLR C/bit doesn't affect A
+        if op0.type == ida_ua.o_reg:
+            op0_name = idc.print_operand(insn.ea, 0)
+            if op0_name == "A":
+                state.set("A", 0)
+
+    elif mnem in ("ANL", "ORL", "XRL", "CPL", "RL", "RLC", "RR", "RRC", "SWAP"):
+        # Only kill A when the accumulator is the destination
+        if op0.type == ida_ua.o_reg:
+            op0_name = idc.print_operand(insn.ea, 0)
+            if op0_name == "A":
+                state.kill("A")
+
+    elif mnem == "MOVX":
+        # MOVX A, @DPTR / MOVX A, @Ri — reading from XRAM kills A
+        if op0.type == ida_ua.o_reg:
+            op0_name = idc.print_operand(insn.ea, 0)
+            if op0_name == "A":
+                state.kill("A")
+
+    elif mnem == "XCH":
+        # XCH A, Rn — swap values; both become unknown
+        state.kill("A")
+        if op1.type == ida_ua.o_reg:
+            op1_name = idc.print_operand(insn.ea, 1)
+            if op1_name in _REG_TRACKED:
+                state.kill(op1_name)
 
     elif mnem in ("LCALL", "ACALL", "CALL"):
         state.kill("DPTR", "DPH", "DPL")
+        for r in _REG_TRACKED:
+            state.kill(r)
 
     elif mnem == "POP":
         if op0.type == ida_ua.o_mem:

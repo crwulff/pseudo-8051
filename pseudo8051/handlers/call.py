@@ -24,11 +24,18 @@ class LcallHandler(MnemonicHandler):
         return frozenset(PARAM_REGS)
 
     def lift(self, insn, state=None) -> List[str]:
-        from pseudo8051.prototypes import get_proto, return_expr
+        from pseudo8051.prototypes import get_proto, return_expr, param_regs
         callee = _op(insn, 0, state)
         proto  = get_proto(callee)
         if proto:
-            args_str   = ", ".join(p.name for p in proto.params)
+            # Use register pair names as arguments so TypeAwareSimplifier can
+            # substitute typed variable names or inline constants/expressions.
+            # Fall back to the parameter name only when no registers are assigned.
+            p_regs = param_regs(proto)
+            args = []
+            for p, regs in zip(proto.params, p_regs):
+                args.append("".join(regs) if regs else p.name)
+            args_str   = ", ".join(args)
             call_expr  = f"{callee}({args_str})"
             if proto.return_type != "void" and proto.return_regs:
                 return [f"{return_expr(proto)} = {call_expr};"]
