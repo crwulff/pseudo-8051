@@ -154,6 +154,29 @@ def _collect_call_names(hir: List[HIRNode]) -> set:
     return names
 
 
+def _augment_with_local_vars(func_ea: int,
+                              reg_map: Dict[str, VarInfo]) -> Dict[str, VarInfo]:
+    """
+    Add VarInfo entries for XRAM local variables declared for this function
+    (stored in the IDA netnode via set_local()).
+    Keyed by the resolved XRAM symbol name (e.g. 'EXT_DC8A').
+    These entries carry xram_sym so _replace_pairs skips them; they are
+    consumed by XRAMLocalWritePattern instead.
+    """
+    from pseudo8051.locals    import get_locals
+    from pseudo8051.constants import resolve_ext_addr
+    locals_list = get_locals(func_ea)
+    if not locals_list:
+        return reg_map
+    result = dict(reg_map)
+    for lv in locals_list:
+        sym = resolve_ext_addr(lv.addr)
+        if sym not in result:
+            result[sym] = VarInfo(lv.name, lv.type, (), xram_sym=sym)
+            dbg("typesimp", f"  local: {lv.name} ({lv.type}) @ {sym}")
+    return result
+
+
 def _augment_with_callee_regs(hir: List[HIRNode],
                                reg_map: Dict[str, VarInfo]) -> Dict[str, VarInfo]:
     """
@@ -262,6 +285,9 @@ class TypeAwareSimplifier(OptimizationPass):
             dbg("typesimp", f"{func.name}: no caller proto, "
                             "scanning callee prototypes for register mappings")
 
+        # Add XRAM local variable declarations for this function.
+        reg_map = _augment_with_local_vars(func.ea, reg_map)
+
         # Add register mappings from any callee prototypes found in the HIR.
         # This propagates callee parameter types backward into the argument-
         # loading sequences that precede each call.
@@ -273,3 +299,15 @@ class TypeAwareSimplifier(OptimizationPass):
 
         dbg("typesimp", f"{func.name}: final reg_map={list(reg_map.keys())}")
         func.hir = _simplify(func.hir, reg_map)
+
+        # Prepend C-style declarations for any XRAM local variables.
+        seen: set = set()
+        local_decls = []
+        for vinfo in reg_map.values():
+            if vinfo.xram_sym and vinfo.name not in seen:
+                seen.add(vinfo.name)
+                local_decls.append(vinfo)
+        if local_decls:
+            local_decls.sort(key=lambda v: v.xram_sym)
+            func.hir = [Statement(func.ea, f"{v.type} {v.name};")
+                        for v in local_decls] + func.hir

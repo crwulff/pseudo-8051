@@ -20,6 +20,15 @@ Architecture overview:
         ├── rmw.py            RMWCollapser
         ├── loops.py          LoopStructurer
         └── ifelse.py         IfElseStructurer
+
+XRAM local variable declarations (stored in IDA netnode, persistent per function):
+
+    import pseudo8051
+    pseudo8051.set_local(here(), 0xdc8a, 'count', 'int16_t')
+    pseudo8051.list_locals(here())
+    pseudo8051.del_local(here(), 0xdc8a)
+
+'here()' may be any address inside the target function.
 """
 
 import os as _os, sys as _sys
@@ -47,6 +56,8 @@ _DP_INSIDE = getattr(ida_kernwin, 'DP_INSIDE', 5)
 _BASE_TITLE = "8051 Pseudocode"
 
 from pseudo8051.ir.function import Function
+from pseudo8051.locals    import set_local, del_local, list_locals  # noqa: F401
+from pseudo8051.locals_ui import setup_popup, _register_local_actions
 
 # Viewer registry that survives module reloads: keyed by tab title.
 # We store it on sys so it is not reset when this module is reloaded.
@@ -101,7 +112,9 @@ class PseudocodeViewer(ida_kernwin.simplecustviewer_t):
     def Show(self, func_ea: int) -> None:
         """(Re-)generate pseudocode for func_ea and display the window."""
         self.ClearLines()
-        self._ea_map = {}   # viewer line number → instruction EA
+        self._ea_map   = {}   # viewer line number → instruction EA
+        self._func_ea  = func_ea
+        self._func_name = hex(func_ea)   # overwritten below on success
 
         try:
             func = Function(func_ea)
@@ -111,6 +124,7 @@ class PseudocodeViewer(ida_kernwin.simplecustviewer_t):
             _show_as_tab(self.GetWidget(), self._title)
             return
 
+        self._func_name = func.name
         lines = func.render()
         for i, (ea, text) in enumerate(lines):
             self._ea_map[i] = ea
@@ -118,6 +132,14 @@ class PseudocodeViewer(ida_kernwin.simplecustviewer_t):
 
         self.Refresh()
         _show_as_tab(self.GetWidget(), self._title)
+
+    def OnPopup(self, form, popup_handle) -> bool:
+        """Add XRAM-local management items to the right-click context menu."""
+        setup_popup(form, popup_handle,
+                    getattr(self, "_func_ea",   0),
+                    getattr(self, "_func_name", ""),
+                    self)
+        return False
 
     def OnDblClick(self, _shift: int) -> bool:
         """Jump IDA disassembly view to the address of the clicked line."""
@@ -148,3 +170,6 @@ def run_pseudocode_view() -> None:
     # Store in the persistent registry so GC doesn't collect it
     sys._pseudo8051_viewers[title] = viewer
     viewer.Show(func.start_ea)
+
+
+_register_local_actions()

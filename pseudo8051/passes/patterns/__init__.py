@@ -9,15 +9,17 @@ To add a new pattern:
 
 from typing import List
 
-from pseudo8051.passes.patterns.base            import Pattern, Match, Simplify       # noqa: F401
-from pseudo8051.passes.patterns._utils          import VarInfo, _replace_pairs        # noqa: F401
-from pseudo8051.passes.patterns.sign_bit        import SignBitTestPattern
-from pseudo8051.passes.patterns.neg16           import Neg16Pattern
-from pseudo8051.passes.patterns.const_group     import ConstGroupPattern
-from pseudo8051.passes.patterns.xram_group_read import XRAMGroupReadPattern
+from pseudo8051.passes.patterns.base             import Pattern, Match, Simplify       # noqa: F401
+from pseudo8051.passes.patterns._utils           import VarInfo, _replace_pairs        # noqa: F401
+from pseudo8051.passes.patterns.sign_bit         import SignBitTestPattern
+from pseudo8051.passes.patterns.neg16            import Neg16Pattern
+from pseudo8051.passes.patterns.const_group      import ConstGroupPattern
+from pseudo8051.passes.patterns.xram_group_read  import XRAMGroupReadPattern
+from pseudo8051.passes.patterns.xram_local_write import XRAMLocalWritePattern
 
 _PATTERNS: List[Pattern] = [
     SignBitTestPattern(),
+    XRAMLocalWritePattern(),   # before ConstGroup so locals are handled first
     ConstGroupPattern(),
     XRAMGroupReadPattern(),
     Neg16Pattern(),

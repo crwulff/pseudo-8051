@@ -28,13 +28,15 @@ def _is_signed(t: str) -> bool:
 # ── VarInfo ───────────────────────────────────────────────────────────────────
 
 class VarInfo:
-    """One named variable that occupies one or more consecutive registers."""
+    """One named variable occupying one or more consecutive registers or an XRAM address."""
 
-    def __init__(self, name: str, type_str: str, regs: Tuple[str, ...]):
+    def __init__(self, name: str, type_str: str, regs: Tuple[str, ...],
+                 xram_sym: str = ""):
         self.name      = name
         self.type      = type_str
-        self.regs      = regs           # high → low order, e.g. ('R6', 'R7')
-        self.pair_name = "".join(regs)  # e.g. 'R6R7'
+        self.regs      = regs           # high → low order, e.g. ('R6', 'R7'); () for XRAM locals
+        self.pair_name = "".join(regs)  # e.g. 'R6R7'; '' for XRAM locals
+        self.xram_sym  = xram_sym       # XRAM base address symbol, e.g. 'EXT_DC8A'; '' for reg vars
 
     @property
     def hi(self) -> Optional[str]:
@@ -53,8 +55,12 @@ def _replace_pairs(text: str, reg_map: Dict[str, VarInfo]) -> str:
     """
     Replace register-pair tokens (e.g. R6R7) with the variable name.
     Longest keys first; word-boundary match.  Single-register names untouched.
+    XRAM-local VarInfo entries (xram_sym != '') are skipped — they are handled
+    by dedicated patterns so their symbol names are not blindly substituted.
     """
     for key in sorted((k for k in reg_map if len(k) > 2), key=len, reverse=True):
+        if reg_map[key].xram_sym:
+            continue   # XRAM locals: leave substitution to XRAMLocalWritePattern
         text = re.sub(r"\b" + re.escape(key) + r"\b", reg_map[key].name, text)
     return text
 

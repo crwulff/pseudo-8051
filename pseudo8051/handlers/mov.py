@@ -104,7 +104,15 @@ class MovxHandler(MnemonicHandler):
 
         if op0.type == ida_ua.o_phrase and op0.phrase == PHRASE_AT_DPTR:
             mem = resolve_ext_addr(dptr_val) if dptr_val is not None else "DPTR"
-            return [f"XRAM[{mem}] = {_op(insn, 1, state)};"]
+            # Substitute a known constant source register (e.g. A=0 → emit 0x00)
+            src = _op(insn, 1, state)
+            if state is not None and op1.type == ida_ua.o_reg:
+                src_name = idc.print_operand(insn.ea, 1)
+                if src_name in _TRACKED_REGS:
+                    val = state.get(src_name)
+                    if val is not None:
+                        src = hex(val)
+            return [f"XRAM[{mem}] = {src};"]
         if op1.type == ida_ua.o_phrase and op1.phrase == PHRASE_AT_DPTR:
             mem = resolve_ext_addr(dptr_val) if dptr_val is not None else "DPTR"
             return [f"{_op(insn, 0, state)} = XRAM[{mem}];"]
