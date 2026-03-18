@@ -61,6 +61,8 @@ class Operand:
             sfr  = SFR_NAMES.get(addr)
             if sfr:
                 return sfr
+            if addr <= 7:
+                return f"R{addr}"
             iname = ida_name.get_name(op.addr)
             if iname:
                 return iname

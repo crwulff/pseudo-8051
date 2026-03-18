@@ -110,7 +110,7 @@ class XRAMGroupReadPattern(Pattern):
               simplify: Simplify) -> Optional[Match]:
         # Try largest register groups first
         candidates = sorted(
-            {v for v in reg_map.values() if len(v.regs) >= 2},
+            {v for v in reg_map.values() if isinstance(v, VarInfo) and len(v.regs) >= 2},
             key=lambda v: len(v.regs), reverse=True,
         )
         for vinfo in candidates:

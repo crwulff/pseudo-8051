@@ -10,14 +10,16 @@ instructions in passes/patterns/__init__.py.
 """
 
 import re
-from typing import Dict, List, Tuple, TYPE_CHECKING
+from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from pseudo8051.ir.hir    import HIRNode, Statement, IfNode, WhileNode, ForNode
 from pseudo8051.passes    import OptimizationPass
 from pseudo8051.constants import dbg
 
 from pseudo8051.passes.patterns         import _PATTERNS
-from pseudo8051.passes.patterns._utils  import VarInfo, _replace_pairs, _type_bytes
+from pseudo8051.passes.patterns._utils  import (
+    VarInfo, _replace_pairs, _replace_xram_syms, _type_bytes, _byte_names,
+)
 
 if TYPE_CHECKING:
     from pseudo8051.ir.function import Function
@@ -159,9 +161,15 @@ def _augment_with_local_vars(func_ea: int,
     """
     Add VarInfo entries for XRAM local variables declared for this function
     (stored in the IDA netnode via set_local()).
-    Keyed by the resolved XRAM symbol name (e.g. 'EXT_DC8A').
-    These entries carry xram_sym so _replace_pairs skips them; they are
-    consumed by XRAMLocalWritePattern instead.
+
+    For each local:
+      • A full-variable entry keyed by the base symbol (e.g. 'EXT_DC8A').
+        Carries xram_sym so _replace_pairs skips it; consumed by
+        XRAMLocalWritePattern / XRAMGroupReadPattern.
+      • For multi-byte locals, per-byte entries keyed as '_byte_<sym>'
+        (e.g. '_byte_EXT_DC8B') with is_byte_field=True.
+        These allow XRAMLocalWritePattern to collapse individual byte writes
+        and _replace_xram_syms to substitute individual byte reads.
     """
     from pseudo8051.locals    import get_locals
     from pseudo8051.constants import resolve_ext_addr
@@ -170,10 +178,21 @@ def _augment_with_local_vars(func_ea: int,
         return reg_map
     result = dict(reg_map)
     for lv in locals_list:
-        sym = resolve_ext_addr(lv.addr)
-        if sym not in result:
-            result[sym] = VarInfo(lv.name, lv.type, (), xram_sym=sym)
-            dbg("typesimp", f"  local: {lv.name} ({lv.type}) @ {sym}")
+        base_sym = resolve_ext_addr(lv.addr)
+        if base_sym not in result:
+            result[base_sym] = VarInfo(lv.name, lv.type, (), xram_sym=base_sym,
+                                       xram_addr=lv.addr)
+            dbg("typesimp", f"  local: {lv.name} ({lv.type}) @ {base_sym}")
+        n = _type_bytes(lv.type)
+        if n > 1:
+            bnames = _byte_names(lv.name, n)
+            for k, byte_name in enumerate(bnames):
+                byte_sym = resolve_ext_addr(lv.addr + k)
+                bkey = f"_byte_{byte_sym}"
+                if bkey not in result:
+                    result[bkey] = VarInfo(byte_name, "uint8_t", (),
+                                           xram_sym=byte_sym, is_byte_field=True)
+                    dbg("typesimp", f"  local byte: {byte_name} @ {byte_sym}")
     return result
 
 
@@ -203,34 +222,56 @@ def _augment_with_callee_regs(hir: List[HIRNode],
 
 # ── Default node transformation ───────────────────────────────────────────────
 
-def _transform_default(node: HIRNode, reg_map: Dict[str, VarInfo]) -> HIRNode:
+_RE_DPTR_SETUP = re.compile(r'^DPTR = (.+?);')
+
+
+def _subst(text: str, reg_map: Dict[str, VarInfo]) -> str:
+    """Apply XRAM-symbol and register-pair substitutions to a text fragment."""
+    return _replace_pairs(_replace_xram_syms(text, reg_map), reg_map)
+
+
+def _transform_default(node: HIRNode,
+                       reg_map: Dict[str, VarInfo]) -> Optional[HIRNode]:
     """
-    Fallback for nodes not consumed by any pattern: apply pair substitution to
-    Statement text, or recurse into the children of structured nodes.
+    Fallback for nodes not consumed by any pattern.
+
+    • Drops ``DPTR = sym;`` lines when sym is a declared XRAM local (the
+      DPTR setup is implicit once the XRAM reference is named).
+    • Applies XRAM-symbol substitution then register-pair substitution to
+      Statement text, or recurses into the children of structured nodes.
+
+    Returns None to signal that the node should be dropped.
     """
     if isinstance(node, Statement):
-        new_text = _replace_pairs(node.text, reg_map)
+        m = _RE_DPTR_SETUP.match(node.text)
+        if m:
+            sym = m.group(1).strip()
+            # Drop the setup line if sym is any declared XRAM local symbol
+            if any(v.xram_sym == sym for v in reg_map.values()
+                   if isinstance(v, VarInfo) and v.xram_sym):
+                return None
+        new_text = _subst(node.text, reg_map)
         return Statement(node.ea, new_text) if new_text != node.text else node
 
     if isinstance(node, IfNode):
         return IfNode(
             ea         = node.ea,
-            condition  = _replace_pairs(node.condition, reg_map),
+            condition  = _subst(node.condition, reg_map),
             then_nodes = _simplify(node.then_nodes, reg_map),
             else_nodes = _simplify(node.else_nodes, reg_map),
         )
     if isinstance(node, WhileNode):
         return WhileNode(
             ea         = node.ea,
-            condition  = _replace_pairs(node.condition, reg_map),
+            condition  = _subst(node.condition, reg_map),
             body_nodes = _simplify(node.body_nodes, reg_map),
         )
     if isinstance(node, ForNode):
         return ForNode(
             ea         = node.ea,
-            init       = _replace_pairs(node.init,      reg_map),
-            condition  = _replace_pairs(node.condition,  reg_map),
-            update     = _replace_pairs(node.update,     reg_map),
+            init       = _subst(node.init,      reg_map),
+            condition  = _subst(node.condition,  reg_map),
+            update     = _subst(node.update,     reg_map),
             body_nodes = _simplify(node.body_nodes, reg_map),
         )
     return node
@@ -238,11 +279,36 @@ def _transform_default(node: HIRNode, reg_map: Dict[str, VarInfo]) -> HIRNode:
 
 # ── Core simplifier walk ──────────────────────────────────────────────────────
 
+def _simplify_once(nodes: List[HIRNode], reg_map: Dict[str, VarInfo]) -> List[HIRNode]:
+    """
+    Apply one round of pattern matching to each node in ``nodes``.
+
+    Used to post-process replacement lists produced by fold patterns
+    (ConstGroupPattern, XRAMGroupReadPattern) so that RetvalPattern can rename
+    calls that those patterns absorbed into their output.  Only one round is
+    applied to avoid infinite recursion.
+    """
+    out: List[HIRNode] = []
+    for node in nodes:
+        for pat in _PATTERNS:
+            result = pat.match([node], 0, reg_map, _simplify)
+            if result is not None:
+                out.extend(result[0])
+                break
+        else:
+            out.append(node)
+    return out
+
+
 def _simplify(nodes: List[HIRNode], reg_map: Dict[str, VarInfo]) -> List[HIRNode]:
     """
     Walk `nodes`, trying each registered Pattern in turn.  Falls back to
     _transform_default (pair substitution + structural recursion) for nodes
     not consumed by any pattern.
+
+    After any pattern fires, its replacement list is passed through
+    _simplify_once so that secondary patterns (e.g. RetvalPattern on a call
+    statement that a fold pattern absorbed) get a chance to run.
     """
     out: List[HIRNode] = []
     i = 0
@@ -251,10 +317,12 @@ def _simplify(nodes: List[HIRNode], reg_map: Dict[str, VarInfo]) -> List[HIRNode
             result = pat.match(nodes, i, reg_map, _simplify)
             if result is not None:
                 replacement, i = result
-                out.extend(replacement)
+                out.extend(_simplify_once(replacement, reg_map))
                 break
         else:
-            out.append(_transform_default(nodes[i], reg_map))
+            transformed = _transform_default(nodes[i], reg_map)
+            if transformed is not None:
+                out.append(transformed)
             i += 1
     return out
 
@@ -298,16 +366,25 @@ class TypeAwareSimplifier(OptimizationPass):
             return
 
         dbg("typesimp", f"{func.name}: final reg_map={list(reg_map.keys())}")
+        reg_map["__n__"] = [0]
         func.hir = _simplify(func.hir, reg_map)
 
         # Prepend C-style declarations for any XRAM local variables.
+        # Only emit for full-variable entries, not per-byte fields.
         seen: set = set()
         local_decls = []
         for vinfo in reg_map.values():
-            if vinfo.xram_sym and vinfo.name not in seen:
+            if (isinstance(vinfo, VarInfo)
+                    and vinfo.xram_sym and not vinfo.is_byte_field
+                    and vinfo.name not in seen):
                 seen.add(vinfo.name)
                 local_decls.append(vinfo)
         if local_decls:
             local_decls.sort(key=lambda v: v.xram_sym)
-            func.hir = [Statement(func.ea, f"{v.type} {v.name};")
-                        for v in local_decls] + func.hir
+            func.hir = [
+                Statement(func.ea,
+                          f"{v.type} {v.name};"
+                          + (f"  /* {v.xram_sym} @ {hex(v.xram_addr)} */"
+                             if v.xram_addr else ""))
+                for v in local_decls
+            ] + func.hir

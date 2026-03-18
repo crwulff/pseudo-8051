@@ -131,7 +131,7 @@ class XRAMLocalWritePattern(Pattern):
               simplify: Simplify) -> Optional[Match]:
         # Collect XRAM-local VarInfo entries (sorted largest type first)
         candidates = sorted(
-            [v for v in reg_map.values() if v.xram_sym],
+            [v for v in reg_map.values() if isinstance(v, VarInfo) and v.xram_sym],
             key=lambda v: _type_bytes(v.type), reverse=True,
         )
         for vinfo in candidates:

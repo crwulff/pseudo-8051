@@ -95,7 +95,7 @@ class ConstGroupPattern(Pattern):
               simplify: Simplify) -> Optional[Match]:
         # Try largest register groups first to avoid a 2-byte match masking a 4-byte one
         candidates = sorted(
-            {v for v in reg_map.values() if len(v.regs) >= 2},
+            {v for v in reg_map.values() if isinstance(v, VarInfo) and len(v.regs) >= 2},
             key=lambda v: len(v.regs), reverse=True,
         )
         for vinfo in candidates:

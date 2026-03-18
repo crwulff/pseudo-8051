@@ -7,7 +7,7 @@ what it needs without pulling in the full typesimplify module.
 """
 
 import re
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from pseudo8051.ir.hir import HIRNode, Statement  # noqa: F401 (re-exported for patterns)
 
@@ -31,12 +31,15 @@ class VarInfo:
     """One named variable occupying one or more consecutive registers or an XRAM address."""
 
     def __init__(self, name: str, type_str: str, regs: Tuple[str, ...],
-                 xram_sym: str = ""):
-        self.name      = name
-        self.type      = type_str
-        self.regs      = regs           # high → low order, e.g. ('R6', 'R7'); () for XRAM locals
-        self.pair_name = "".join(regs)  # e.g. 'R6R7'; '' for XRAM locals
-        self.xram_sym  = xram_sym       # XRAM base address symbol, e.g. 'EXT_DC8A'; '' for reg vars
+                 xram_sym: str = "", is_byte_field: bool = False,
+                 xram_addr: int = 0):
+        self.name         = name
+        self.type         = type_str
+        self.regs         = regs           # high → low order, e.g. ('R6', 'R7'); () for XRAM locals
+        self.pair_name    = "".join(regs)  # e.g. 'R6R7'; '' for XRAM locals
+        self.xram_sym     = xram_sym       # XRAM base address symbol, e.g. 'EXT_DC8A'; '' for reg vars
+        self.is_byte_field = is_byte_field # True for per-byte entries of multi-byte XRAM locals
+        self.xram_addr    = xram_addr      # raw integer XRAM address (0 for register vars)
 
     @property
     def hi(self) -> Optional[str]:
@@ -49,6 +52,50 @@ class VarInfo:
         return self.regs[-1] if self.regs else None
 
 
+# ── XRAM byte-field helpers ───────────────────────────────────────────────────
+
+def _byte_names(var_name: str, n: int) -> List[str]:
+    """Per-byte field names for a multi-byte XRAM local.
+
+    Returns ['var.hi', 'var.lo'] for 2-byte vars, ['var.b0'...'var.bn'] for larger.
+    Names are ordered high-byte first (big-endian, matching 8051 XRAM layout).
+    """
+    if n == 2:
+        return [f"{var_name}.hi", f"{var_name}.lo"]
+    return [f"{var_name}.b{i}" for i in range(n)]
+
+
+def _replace_xram_syms(text: str, reg_map: Dict[str, "VarInfo"]) -> str:
+    """Replace XRAM[sym] and *sym references with declared XRAM local variable names.
+
+    For multi-byte locals the per-byte names (is_byte_field=True entries) take
+    priority over the full-variable name so that individual byte accesses are
+    rendered as e.g. ``var1.hi`` / ``var1.lo`` rather than the base name.
+    """
+    # Build sym → display name, letting byte-field entries override full-var entries.
+    sym_map: Dict[str, str] = {}
+    for vinfo in reg_map.values():
+        if not isinstance(vinfo, VarInfo) or not vinfo.xram_sym:
+            continue
+        if vinfo.is_byte_field:
+            sym_map[vinfo.xram_sym] = vinfo.name          # byte names take priority
+        elif vinfo.xram_sym not in sym_map:
+            sym_map[vinfo.xram_sym] = vinfo.name          # full-var as fallback
+
+    if not sym_map:
+        return text
+
+    def _repl_xram(m: "re.Match") -> str:
+        return sym_map.get(m.group(1).strip(), m.group(0))
+
+    def _repl_deref(m: "re.Match") -> str:
+        return sym_map.get(m.group(1), m.group(0))
+
+    text = re.sub(r'XRAM\[([^\]]+)\]', _repl_xram, text)
+    text = re.sub(r'\*([A-Za-z_]\w*)', _repl_deref, text)
+    return text
+
+
 # ── Register-pair text substitution ──────────────────────────────────────────
 
 def _replace_pairs(text: str, reg_map: Dict[str, VarInfo]) -> str:
@@ -58,7 +105,9 @@ def _replace_pairs(text: str, reg_map: Dict[str, VarInfo]) -> str:
     XRAM-local VarInfo entries (xram_sym != '') are skipped — they are handled
     by dedicated patterns so their symbol names are not blindly substituted.
     """
-    for key in sorted((k for k in reg_map if len(k) > 2), key=len, reverse=True):
+    for key in sorted((k for k in reg_map
+                       if len(k) > 2 and isinstance(reg_map[k], VarInfo)),
+                      key=len, reverse=True):
         if reg_map[key].xram_sym:
             continue   # XRAM locals: leave substitution to XRAMLocalWritePattern
         text = re.sub(r"\b" + re.escape(key) + r"\b", reg_map[key].name, text)
