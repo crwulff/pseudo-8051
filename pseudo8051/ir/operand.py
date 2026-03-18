@@ -4,6 +4,7 @@ ir/operand.py — Operand class wrapping one IDA operand slot.
 render() produces C-like text, migrated from lift_operand() in the old script.
 """
 
+import sys
 from typing import Optional, TYPE_CHECKING
 
 import ida_ua
@@ -54,7 +55,9 @@ class Operand:
 
         if op.type == ida_ua.o_imm:
             v = op.value
-            return str(v) if v <= 9 else hex(v)
+            _c = sys.modules.get("pseudo8051.constants")
+            use_hex = getattr(_c, "USE_HEX", True) if _c else True
+            return str(v) if (not use_hex or v <= 9) else hex(v)
 
         if op.type == ida_ua.o_mem:
             addr = op.addr & 0xFF

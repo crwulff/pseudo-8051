@@ -10,6 +10,8 @@ Exports:
         context menu under an "XRAM locals" submenu.
 """
 
+import sys
+
 import ida_kernwin
 
 # Context written by setup_popup() just before IDA invokes an action handler.
@@ -129,6 +131,24 @@ class _LocalListAction(ida_kernwin.action_handler_t):
         return ida_kernwin.AST_ENABLE_ALWAYS
 
 
+class _HexToggleAction(ida_kernwin.action_handler_t):
+    """Toggle integer constants between hexadecimal and decimal display."""
+
+    def activate(self, ctx) -> int:
+        _c = sys.modules.get("pseudo8051.constants")
+        if _c is None:
+            return 1
+        _c.USE_HEX = not _c.USE_HEX
+        viewer = _popup_ctx["viewer"]
+        func_ea = _popup_ctx["func_ea"]
+        if viewer is not None and func_ea:
+            viewer.Show(func_ea)
+        return 1
+
+    def update(self, ctx) -> int:
+        return ida_kernwin.AST_ENABLE_ALWAYS
+
+
 def setup_popup(form, popup_handle,
                 func_ea: int, func_name: str, viewer) -> None:
     """Attach XRAM-local actions to the right-click context menu."""
@@ -142,6 +162,13 @@ def setup_popup(form, popup_handle,
                                        "pseudo8051:local_del",  p)
     ida_kernwin.attach_action_to_popup(form, popup_handle,
                                        "pseudo8051:local_list", p)
+    _c = sys.modules.get("pseudo8051.constants")
+    label = "View constants as decimal" if (
+        _c is None or getattr(_c, "USE_HEX", True)
+    ) else "View constants as hexadecimal"
+    ida_kernwin.update_action_label("pseudo8051:toggle_hex", label)
+    ida_kernwin.attach_action_to_popup(form, popup_handle,
+                                       "pseudo8051:toggle_hex", "")
 
 
 def _register_local_actions() -> None:
@@ -150,6 +177,7 @@ def _register_local_actions() -> None:
         ("pseudo8051:local_add",  "Add / edit local variable\u2026", _LocalAddAction()),
         ("pseudo8051:local_del",  "Remove local variable\u2026",     _LocalDelAction()),
         ("pseudo8051:local_list", "List local variables",            _LocalListAction()),
+        ("pseudo8051:toggle_hex", "View constants as decimal",       _HexToggleAction()),
     ]
     for name, label, handler in _defs:
         ida_kernwin.unregister_action(name)

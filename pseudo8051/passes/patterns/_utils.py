@@ -7,6 +7,7 @@ what it needs without pulling in the full typesimplify module.
 """
 
 import re
+import sys
 from typing import Dict, List, Optional, Tuple
 
 from pseudo8051.ir.hir import HIRNode, Statement  # noqa: F401 (re-exported for patterns)
@@ -121,6 +122,9 @@ def _parse_int(s: str) -> int:
 
 
 def _const_str(value: int, type_str: str) -> str:
+    _c = sys.modules.get("pseudo8051.constants")
+    if _c is None or not getattr(_c, "USE_HEX", True):
+        return str(value)
     size = _type_bytes(type_str)
     if size >= 4: return f"0x{value:08x}"
     if size == 2: return f"0x{value:04x}"

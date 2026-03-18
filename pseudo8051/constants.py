@@ -8,6 +8,11 @@ Migrated from IDA_8051_Pseudocode.py (top-level constants section).
 # Set to True to print pass-by-pass diagnostics to the IDA console.
 DEBUG = True
 
+# ── Display options ────────────────────────────────────────────────────────────
+# When True, integer constants are rendered in hexadecimal; when False, decimal.
+# Toggled at runtime via the right-click menu in the pseudocode viewer.
+USE_HEX: bool = True
+
 
 def dbg(tag: str, msg: str) -> None:
     """Print a debug line to the IDA console if DEBUG is enabled."""
