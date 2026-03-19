@@ -40,6 +40,11 @@ def _collect_loop_body(header: "BasicBlock", tail: "BasicBlock") -> Set[int]:
     worklist = [tail]
     while worklist:
         blk = worklist.pop()
+        if blk is header:
+            # Never traverse the header's predecessors: they are loop entries,
+            # not loop-body blocks.  This also handles self-loops correctly
+            # (tail is header), preventing entry-block pull-in.
+            continue
         for pred in blk.predecessors:
             if pred.start_ea not in body:
                 body.add(pred.start_ea)
@@ -93,7 +98,7 @@ class LoopStructurer(OptimizationPass):
 
         # ── Build body HIR (all blocks except header, stripping back-edge) ─
         body_hir: List[HIRNode] = []
-        for blk in (body_blocks if body_blocks else [tail]):
+        for blk in body_blocks:
             for node in blk.hir:
                 # Skip the back-edge goto / DJNZ at the end of the tail block
                 if blk is tail and node is tail.hir[-1] and isinstance(node, Statement):
