@@ -29,7 +29,7 @@ import re
 from dataclasses import dataclass, field
 from typing import List, Tuple, Optional, TYPE_CHECKING
 
-from pseudo8051.constants import dbg
+from pseudo8051.constants import dbg, PARAM_REGS
 
 
 @dataclass
@@ -141,30 +141,96 @@ _RETURN_REGS: dict = {
 
 # ── Parse idc.get_type() string as fallback ───────────────────────────────────
 # idc.get_type() returns e.g. "__int16 __cdecl func(__int16 a1, __int8 a2)"
+# __usercall format: "rettype __usercall func@<Rn>(type name@<Rn>, ...)"
 
-_RE_PARAM = re.compile(r'(.+?)\s+(\w+)\s*$')
+# Matches: "type name" or "type name@<REG>"
+_RE_PARAM = re.compile(r'(.+?)\s+(\w+)(?:@<([^>]+)>)?\s*$')
 # idc.get_type() format: "rettype(params)" or "rettype __cdecl(params)"
+# __usercall return reg: "rettype@<Rn> __usercall func(params)"
 # — no function name, calling convention may appear before the '('
 _RE_GETTYPE = re.compile(
-    r'^(.+?)'                                           # return type
-    r'(?:\s+(?:__cdecl|__stdcall|__fastcall|__far))?'  # optional calling conv
-    r'\s*\(([^)]*)\)\s*;?\s*$'                         # ( params )
+    r'^(.+?)'                                                                    # return type (may include @<Rn>)
+    r'(?:\s+(?:__cdecl|__stdcall|__fastcall|__far|__usercall|__userpurge))?'    # optional calling conv
+    r'\s*\(([^)]*)\)\s*;?\s*$'                                                  # ( params )
 )
+# Capture @<Rn> from a return type string, e.g. "__int16@<R6R7>"
+_RE_RET_LOC = re.compile(r'@<([^>]+)>')
+
+
+_REG_RE = re.compile(r'(R[0-7]|DPTR|[AC])')
+
+
+def _regs_from_loc_str(loc_str: str) -> Tuple[str, ...]:
+    """
+    Parse a register location string from IDA's __usercall annotation.
+    Handles single registers ('R6'), pairs ('R6R7'), and quads ('R4R5R6R7').
+    Returns a tuple of register names, or () if not recognised.
+    """
+    parts: List[str] = []
+    for m in _REG_RE.finditer(loc_str.strip()):
+        reg = m.group(1)
+        if reg in PARAM_REGS or reg in ("A", "C", "DPTR"):
+            parts.append(reg)
+    return tuple(parts) if parts else ()
+
+
+def _regs_from_argloc(aloc, type_size: int) -> Tuple[str, ...]:
+    """
+    Extract register name(s) from an IDA argloc_t / retloc_t.
+    For ALOC_REG1 the register number encodes a base register; consecutive
+    registers are inferred from the type size (1→1 reg, 2→2, 4→4).
+    Returns () if the location is not a register location.
+    """
+    try:
+        import ida_typeinf as _idt
+        import ida_idp
+        atype = aloc.atype()
+        if atype == _idt.ALOC_REG1:
+            rn = aloc.reg1()
+            regnames = ida_idp.ph.regnames
+            if 0 <= rn < len(regnames):
+                base = regnames[rn].upper()
+                # For multi-byte types, expand consecutive registers
+                if type_size > 1:
+                    # base should be e.g. "R4"; extract index
+                    bm = re.match(r'^R(\d)$', base)
+                    if bm:
+                        idx = int(bm.group(1))
+                        regs = tuple(f"R{idx + k}" for k in range(type_size)
+                                     if idx + k <= 7)
+                        if len(regs) == type_size:
+                            return regs
+                return _regs_from_loc_str(base)
+    except Exception:
+        pass
+    return ()
 
 
 def _parse_type_string(type_str: str, func_name: str) -> Optional["FuncProto"]:
     """
     Parse a type string from idc.get_type() — format 'rettype(params)' —
     into a FuncProto.  Returns None if parsing fails.
+    Handles __usercall with @<Rn> register annotations on return type and params.
     """
     m = _RE_GETTYPE.match(type_str.strip())
     if not m:
         dbg("proto", f"{func_name}: can't parse type string {type_str!r}")
         return None
 
-    ret_type   = _norm(m.group(1).strip())
+    ret_raw    = m.group(1).strip()
     params_raw = m.group(2).strip()
-    ret_regs   = _RETURN_REGS.get(ret_type, ())
+
+    # Extract @<Rn> from return type if present (e.g. "__int16@<R6R7>")
+    ret_loc_m = _RE_RET_LOC.search(ret_raw)
+    ret_loc_str = ret_loc_m.group(1) if ret_loc_m else ""
+    ret_type_str = _RE_RET_LOC.sub("", ret_raw).strip()
+    ret_type = _norm(ret_type_str)
+
+    if ret_loc_str:
+        ret_regs = _regs_from_loc_str(ret_loc_str)
+        dbg("proto", f"{func_name}: usercall return loc {ret_loc_str!r} → {ret_regs}")
+    else:
+        ret_regs = _RETURN_REGS.get(ret_type, ())
 
     params: List[Param] = []
     if params_raw and params_raw.lower() != "void":
@@ -174,10 +240,13 @@ def _parse_type_string(type_str: str, func_name: str) -> Optional["FuncProto"]:
             if pm:
                 ptype = _norm(pm.group(1).strip())
                 pname = pm.group(2).strip()
+                ploc  = pm.group(3) or ""
             else:
                 ptype = _norm(part)
                 pname = f"arg{i}"
-            params.append(Param(name=pname, type=ptype))
+                ploc  = ""
+            pregs = _regs_from_loc_str(ploc) if ploc else ()
+            params.append(Param(name=pname, type=ptype, regs=pregs))
 
     return FuncProto(return_type=ret_type, return_regs=ret_regs, params=params)
 
@@ -196,7 +265,7 @@ def _proto_from_ida(name: str) -> Optional["FuncProto"]:
         import idc
         import ida_name
         import ida_nalt
-        import ida_typeinf
+        import ida_typeinf  # noqa: F401 — keep for ImportError early exit
     except ImportError as e:
         dbg("proto", f"{name}: IDA modules not available — {e}")
         return None
@@ -209,23 +278,42 @@ def _proto_from_ida(name: str) -> Optional["FuncProto"]:
     # ── Try structured tinfo API ──────────────────────────────────────────
     proto = None
     try:
-        tif = ida_typeinf.tinfo_t()
+        import ida_typeinf as _idt
+        tif = _idt.tinfo_t()
         got = ida_nalt.get_tinfo(tif, ea)
         dbg("proto", f"{name}: get_tinfo={got}  is_func={tif.is_func() if got else 'n/a'}")
         if got and tif.is_func():
-            fi = ida_typeinf.func_type_data_t()
+            fi = _idt.func_type_data_t()
             gfd = tif.get_func_details(fi)
             dbg("proto", f"{name}: get_func_details={gfd}")
             if gfd:
                 raw_ret  = str(fi.rettype)
                 ret_type = _norm(raw_ret)
-                ret_regs = _RETURN_REGS.get(ret_type, ())
+                # Check for explicit return register location (usercall convention)
+                ret_size = _PROTO_TYPE_BYTES.get(ret_type, 0)
+                try:
+                    ret_regs_uc = _regs_from_argloc(fi.retloc, ret_size)
+                    if ret_regs_uc:
+                        ret_regs = ret_regs_uc
+                        dbg("proto", f"{name}: usercall retloc → {ret_regs}")
+                    else:
+                        ret_regs = _RETURN_REGS.get(ret_type, ())
+                except Exception:
+                    ret_regs = _RETURN_REGS.get(ret_type, ())
                 params: List[Param] = []
                 for i in range(fi.size()):
                     arg   = fi[i]
                     pname = arg.name if arg.name else f"arg{i}"
                     ptype = _norm(str(arg.type))
-                    params.append(Param(name=pname, type=ptype))
+                    # Extract register from argloc if __usercall
+                    arg_size = _PROTO_TYPE_BYTES.get(ptype, 0)
+                    try:
+                        pregs = _regs_from_argloc(arg.argloc, arg_size)
+                        if pregs:
+                            dbg("proto", f"{name}: arg{i} argloc → {pregs}")
+                    except Exception:
+                        pregs = ()
+                    params.append(Param(name=pname, type=ptype, regs=pregs))
                 proto = FuncProto(return_type=ret_type,
                                   return_regs=ret_regs, params=params)
                 dbg("proto", f"{name}: tinfo → ret={ret_type!r} ({raw_ret!r})  "
