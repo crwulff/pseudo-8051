@@ -33,7 +33,7 @@ class VarInfo:
 
     def __init__(self, name: str, type_str: str, regs: Tuple[str, ...],
                  xram_sym: str = "", is_byte_field: bool = False,
-                 xram_addr: int = 0):
+                 xram_addr: int = 0, is_param: bool = False):
         self.name         = name
         self.type         = type_str
         self.regs         = regs           # high → low order, e.g. ('R6', 'R7'); () for XRAM locals
@@ -41,6 +41,7 @@ class VarInfo:
         self.xram_sym     = xram_sym       # XRAM base address symbol, e.g. 'EXT_DC8A'; '' for reg vars
         self.is_byte_field = is_byte_field # True for per-byte entries of multi-byte XRAM locals
         self.xram_addr    = xram_addr      # raw integer XRAM address (0 for register vars)
+        self.is_param     = is_param       # True only for params from the current function's proto
 
     @property
     def hi(self) -> Optional[str]:
@@ -113,6 +114,37 @@ def _replace_pairs(text: str, reg_map: Dict[str, VarInfo]) -> str:
             continue   # XRAM locals: leave substitution to XRAMLocalWritePattern
         text = re.sub(r"\b" + re.escape(key) + r"\b", reg_map[key].name, text)
     return text
+
+
+_RE_SINGLE_REG = re.compile(r'^R[0-7]$')
+
+
+def _replace_single_regs(text: str, reg_map: Dict[str, VarInfo]) -> str:
+    """
+    Substitute single-register parameter names (R0–R7) in read (RHS) positions.
+
+    Only substitutes entries with ``is_param=True`` so that callee-augmented
+    register mappings are not incorrectly applied to the caller's body.
+    For assignments the substitution is applied only to the RHS.
+    """
+    singles = [(k, v) for k, v in reg_map.items()
+               if _RE_SINGLE_REG.match(k)
+               and isinstance(v, VarInfo)
+               and not v.xram_sym
+               and v.is_param]
+    if not singles:
+        return text
+
+    eq_pos = text.find(" = ")
+    if eq_pos > 0:
+        rhs = text[eq_pos + 3:]
+        for reg, vinfo in singles:
+            rhs = re.sub(r'\b' + re.escape(reg) + r'\b', vinfo.name, rhs)
+        return text[:eq_pos + 3] + rhs
+    else:
+        for reg, vinfo in singles:
+            text = re.sub(r'\b' + re.escape(reg) + r'\b', vinfo.name, text)
+        return text
 
 
 # ── Constant formatting ───────────────────────────────────────────────────────

@@ -18,7 +18,8 @@ from pseudo8051.constants import dbg
 
 from pseudo8051.passes.patterns         import _PATTERNS
 from pseudo8051.passes.patterns._utils  import (
-    VarInfo, _replace_pairs, _replace_xram_syms, _type_bytes, _byte_names,
+    VarInfo, _replace_pairs, _replace_xram_syms, _replace_single_regs,
+    _type_bytes, _byte_names,
 )
 
 if TYPE_CHECKING:
@@ -119,7 +120,7 @@ def _build_reg_map(proto: "FuncProto",
     for p, regs in zip(params, assigned):
         if not regs:
             continue
-        info = VarInfo(p.name, p.type, regs)
+        info = VarInfo(p.name, p.type, regs, is_param=True)
         for r in regs:
             reg_map[r] = info
         if len(regs) > 1:
@@ -226,8 +227,11 @@ _RE_DPTR_SETUP = re.compile(r'^DPTR = (.+?);')
 
 
 def _subst(text: str, reg_map: Dict[str, VarInfo]) -> str:
-    """Apply XRAM-symbol and register-pair substitutions to a text fragment."""
-    return _replace_pairs(_replace_xram_syms(text, reg_map), reg_map)
+    """Apply XRAM-symbol, register-pair, and single-reg-param substitutions."""
+    text = _replace_xram_syms(text, reg_map)
+    text = _replace_pairs(text, reg_map)
+    text = _replace_single_regs(text, reg_map)
+    return text
 
 
 def _transform_default(node: HIRNode,

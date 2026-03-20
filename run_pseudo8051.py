@@ -45,6 +45,7 @@ _RELOAD_ORDER = [
     "pseudo8051.passes.patterns.mb_add",
     "pseudo8051.passes.patterns.retval",
     "pseudo8051.passes.patterns.reg_copy_group",
+    "pseudo8051.passes.patterns.accum_relay",
     "pseudo8051.passes.patterns",
     "pseudo8051.passes.typesimplify",
     "pseudo8051.analysis.constprop",
