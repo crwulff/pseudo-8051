@@ -10,14 +10,11 @@ Equations:
 """
 
 from collections import deque
-from typing import TYPE_CHECKING
 
 import idc
 
-from pseudo8051.passes import OptimizationPass
-
-if TYPE_CHECKING:
-    from pseudo8051.ir.function import Function
+from pseudo8051.passes      import OptimizationPass
+from pseudo8051.ir.function import Function
 
 
 class LivenessAnalysis(OptimizationPass):
@@ -26,7 +23,7 @@ class LivenessAnalysis(OptimizationPass):
     Populates block.live_in and block.live_out for every block.
     """
 
-    def run(self, func: "Function") -> None:
+    def run(self, func: Function) -> None:
         BADADDR = idc.BADADDR
         blocks_by_ea = {b.start_ea: b for b in func.blocks}
         if not blocks_by_ea:

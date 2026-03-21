@@ -2,7 +2,9 @@
 ir/basicblock.py — BasicBlock: a sequence of Instructions with analysis slots.
 """
 
-from typing import List, Optional, TYPE_CHECKING
+from __future__ import annotations
+
+from typing import Dict, List, Optional
 
 import ida_ua
 import ida_bytes
@@ -11,10 +13,7 @@ import idc
 
 from pseudo8051.ir.instruction import Instruction
 from pseudo8051.ir.hir         import HIRNode, Statement, Label
-
-if TYPE_CHECKING:
-    from pseudo8051.ir.function        import Function
-    from pseudo8051.analysis.constprop import CPState
+from pseudo8051.ir.cpstate     import CPState, propagate_insn
 
 
 class BasicBlock:
@@ -25,9 +24,12 @@ class BasicBlock:
     Structural passes populate / replace hir.
     """
 
-    def __init__(self, ida_block, func: "Function"):
+    def __init__(self, ida_block,
+                 block_map: Dict[int, BasicBlock],
+                 func_ea: int):
         self._ida_block   = ida_block
-        self._func        = func
+        self._block_map   = block_map
+        self._func_ea     = func_ea
 
         self.start_ea: int = ida_block.start_ea
         self.end_ea:   int = ida_block.end_ea
@@ -35,7 +37,7 @@ class BasicBlock:
         # ── Analysis slots (set by passes) ────────────────────────────────
         self.live_in:       frozenset = frozenset()
         self.live_out:      frozenset = frozenset()
-        self.cp_entry:      "CPState" = None   # set by ConstantPropagation
+        self.cp_entry:      CPState = None   # set by ConstantPropagation
 
         # ── Structural annotations ────────────────────────────────────────
         self.is_loop_header: bool          = False
@@ -52,16 +54,14 @@ class BasicBlock:
     # ── Graph edges ───────────────────────────────────────────────────────
 
     @property
-    def predecessors(self) -> List["BasicBlock"]:
-        bmap = self._func._block_map
-        return [bmap[p.start_ea] for p in self._ida_block.preds()
-                if p.start_ea in bmap]
+    def predecessors(self) -> List[BasicBlock]:
+        return [self._block_map[p.start_ea] for p in self._ida_block.preds()
+                if p.start_ea in self._block_map]
 
     @property
-    def successors(self) -> List["BasicBlock"]:
-        bmap = self._func._block_map
-        return [bmap[s.start_ea] for s in self._ida_block.succs()
-                if s.start_ea in bmap]
+    def successors(self) -> List[BasicBlock]:
+        return [self._block_map[s.start_ea] for s in self._ida_block.succs()
+                if s.start_ea in self._block_map]
 
     # ── Instruction list (cached) ─────────────────────────────────────────
 
@@ -146,7 +146,7 @@ class BasicBlock:
         target_fn = ida_funcs.get_func(self.end_ea)
         if (target_fn is None
                 or target_fn.start_ea != self.end_ea
-                or target_fn.start_ea == self._func.ea):
+                or target_fn.start_ea == self._func_ea):
             return None
         target_name = ida_funcs.get_func_name(self.end_ea) or hex(self.end_ea)
         from pseudo8051.prototypes import get_proto
@@ -164,8 +164,6 @@ class BasicBlock:
         produce Goto/conditional Statement nodes verbatim at this stage;
         structural passes will later replace them with IfNode / WhileNode.
         """
-        from pseudo8051.analysis.constprop import CPState, propagate_insn
-
         nodes: List[HIRNode] = []
 
         # Prepend label if this block needs one

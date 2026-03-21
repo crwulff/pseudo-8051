@@ -9,8 +9,6 @@ Each node implements:
   __eq__ / __hash__             — needed for use in replacement dicts and sets
 """
 
-from __future__ import annotations
-
 import sys
 from abc import ABC, abstractmethod
 from typing import List, Optional, Tuple

@@ -3,12 +3,10 @@ passes/patterns/base.py — Pattern ABC and shared type aliases.
 """
 
 from abc import ABC, abstractmethod
-from typing import Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import Callable, Dict, List, Optional, Tuple
 
 from pseudo8051.ir.hir import HIRNode
-
-if TYPE_CHECKING:
-    from pseudo8051.passes.patterns._utils import VarInfo
+from pseudo8051.passes.patterns._utils import VarInfo
 
 # Recursive-simplify callback.  Patterns that need to transform nested HIR
 # (e.g. IfNode branches) receive this instead of importing the walker directly,
@@ -33,7 +31,7 @@ class Pattern(ABC):
     def match(self,
               nodes:    List[HIRNode],
               i:        int,
-              reg_map:  "Dict[str, VarInfo]",
+              reg_map:  Dict[str, VarInfo],
               simplify: Simplify) -> Optional[Match]:
         """
         Try to match a sequence starting at nodes[i].

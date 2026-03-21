@@ -14,16 +14,15 @@ the pass removes Label nodes that are no longer targeted by any goto.
 """
 
 import re
-from typing import List, Optional, Tuple, Union, TYPE_CHECKING
+from typing import List, Optional, Tuple, Union
 
-from pseudo8051.ir.hir    import HIRNode, Statement, IfNode, WhileNode, ForNode, Label, IfGoto, GotoStatement
-from pseudo8051.ir.expr   import Expr, UnaryOp
+from pseudo8051.ir.hir      import HIRNode, Statement, IfNode, WhileNode, ForNode, Label, IfGoto, GotoStatement
+from pseudo8051.ir.expr     import Expr, UnaryOp
 from pseudo8051.passes    import OptimizationPass
 from pseudo8051.constants import dbg
 
-if TYPE_CHECKING:
-    from pseudo8051.ir.function   import Function
-    from pseudo8051.ir.basicblock import BasicBlock
+from pseudo8051.ir.function   import Function
+from pseudo8051.ir.basicblock import BasicBlock
 
 _Cond = Union[str, Expr]
 
@@ -60,13 +59,13 @@ def _invert_condition(cond: _Cond) -> _Cond:
     return f"!({cond})"
 
 
-def _label_for(block: "BasicBlock") -> str:
+def _label_for(block: BasicBlock) -> str:
     return block.label or f"label_{hex(block.start_ea).removeprefix('0x')}"
 
 
 # ── BFS / arm helpers ─────────────────────────────────────────────────────────
 
-def _reachable_eas(start: "BasicBlock", min_ea: int) -> set:
+def _reachable_eas(start: BasicBlock, min_ea: int) -> set:
     """
     Forward BFS from start collecting all reachable block EAs.
     Only follows successors with start_ea > min_ea (stay forward in the code).
@@ -86,7 +85,7 @@ def _reachable_eas(start: "BasicBlock", min_ea: int) -> set:
     return visited
 
 
-def _is_dead_end(block: "BasicBlock", branch_ea: int) -> bool:
+def _is_dead_end(block: BasicBlock, branch_ea: int) -> bool:
     """
     True when the arm starting at block has no forward successors beyond
     branch_ea — i.e. it terminates (ret / unconditional jump out of range).
@@ -104,8 +103,8 @@ def _is_dead_end(block: "BasicBlock", branch_ea: int) -> bool:
     return True
 
 
-def _find_merge_ea(true_block: "BasicBlock",
-                   false_block: "BasicBlock",
+def _find_merge_ea(true_block: BasicBlock,
+                   false_block: BasicBlock,
                    branch_ea: int) -> Optional[int]:
     """
     Return the EA of the immediate post-dominator — the block with the
@@ -129,7 +128,7 @@ def _find_merge_ea(true_block: "BasicBlock",
     return None
 
 
-def _arm_blocks(start: "BasicBlock", merge_ea: int) -> List["BasicBlock"]:
+def _arm_blocks(start: BasicBlock, merge_ea: int) -> List[BasicBlock]:
     """
     Collect all non-absorbed blocks belonging to one if-arm:
     reachable from start with EA < merge_ea, sorted by EA.
@@ -153,7 +152,7 @@ def _arm_blocks(start: "BasicBlock", merge_ea: int) -> List["BasicBlock"]:
     return sorted(result, key=lambda b: b.start_ea)
 
 
-def _build_arm_hir(blocks: List["BasicBlock"], merge_ea: int) -> List[HIRNode]:
+def _build_arm_hir(blocks: List[BasicBlock], merge_ea: int) -> List[HIRNode]:
     """
     Concatenate HIR from all arm blocks, stripping:
       • the block's own Label node (it becomes internal to the IfNode)
@@ -233,7 +232,7 @@ class IfElseStructurer(OptimizationPass):
     them.
     """
 
-    def run(self, func: "Function") -> None:
+    def run(self, func: Function) -> None:
         # ── Structure if/else nodes ───────────────────────────────────────
         changed = True
         passes  = 0
@@ -265,7 +264,7 @@ class IfElseStructurer(OptimizationPass):
         if removed:
             dbg("ifelse", f"dead labels removed: {removed}")
 
-    def _try_structure(self, func: "Function", block: "BasicBlock") -> bool:
+    def _try_structure(self, func: Function, block: BasicBlock) -> bool:
         succs = [s for s in block.successors
                  if not getattr(s, "_absorbed", False)]
         if len(succs) != 2:

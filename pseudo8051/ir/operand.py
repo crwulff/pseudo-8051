@@ -5,7 +5,7 @@ render() produces C-like text, migrated from lift_operand() in the old script.
 """
 
 import sys
-from typing import Optional, TYPE_CHECKING
+from typing import Optional
 
 import ida_ua
 import ida_name
@@ -19,9 +19,7 @@ from pseudo8051.constants import (
 from pseudo8051.ir.expr import (
     Expr, Reg, Const, Name, XRAMRef, IRAMRef, CROMRef, BinOp,
 )
-
-if TYPE_CHECKING:
-    from pseudo8051.analysis.constprop import CPState
+from pseudo8051.ir.cpstate import CPState
 
 
 class Operand:
@@ -41,7 +39,7 @@ class Operand:
     def _op(self):
         return self._insn.ops[self._n]
 
-    def render(self, cp_state: Optional["CPState"] = None) -> str:
+    def render(self, cp_state: Optional[CPState] = None) -> str:
         """
         Return a C-like string for this operand.
         cp_state may supply a known DPTR value for MOVX resolution.
@@ -118,7 +116,7 @@ class Operand:
 
         return frozenset()
 
-    def to_expr(self, cp_state: Optional["CPState"] = None) -> Expr:
+    def to_expr(self, cp_state: Optional[CPState] = None) -> Expr:
         """
         Return an Expr node for this operand.
         Mirrors render() but returns structured Expr objects instead of strings.

@@ -2,7 +2,7 @@
 handlers/mov.py — MOV / MOVX / MOVC / PUSH / POP / XCH / XCHD handlers.
 """
 
-from typing import List, Optional, TYPE_CHECKING
+from typing import List, Optional
 
 import ida_ua
 import idc
@@ -19,8 +19,7 @@ from pseudo8051.constants      import (
 # Registers whose constant values we can inline as immediates
 _TRACKED_REGS = frozenset(["A", "R0", "R1", "R2", "R3", "R4", "R5", "R6", "R7"])
 
-if TYPE_CHECKING:
-    from pseudo8051.analysis.constprop import CPState
+from pseudo8051.ir.cpstate import CPState
 
 
 def _op_expr(insn, n: int, state=None):

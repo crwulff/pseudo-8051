@@ -10,7 +10,7 @@ instructions in passes/patterns/__init__.py.
 """
 
 import re
-from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import Dict, List, Optional, Tuple
 
 from pseudo8051.ir.hir    import (HIRNode, Statement, Assign, CompoundAssign,
                                    ExprStmt, ReturnStmt, IfNode, WhileNode, ForNode)
@@ -25,9 +25,8 @@ from pseudo8051.passes.patterns._utils  import (
     _type_bytes, _byte_names,
 )
 
-if TYPE_CHECKING:
-    from pseudo8051.ir.function import Function
-    from pseudo8051.prototypes  import FuncProto
+from pseudo8051.ir.function import Function
+from pseudo8051.prototypes  import FuncProto
 
 _RE_CALL_NAME = re.compile(r'\b([A-Za-z_]\w*)\(')
 
@@ -80,7 +79,7 @@ def _assign_regs_from_liveness(params, live_in: frozenset) -> List[Tuple[str, ..
 
 # ── Register map construction ─────────────────────────────────────────────────
 
-def _build_reg_map(proto: "FuncProto",
+def _build_reg_map(proto: FuncProto,
                    live_in: frozenset = frozenset()) -> Dict[str, VarInfo]:
     """Map register names → VarInfo for prototype params and return registers."""
     params   = proto.params
@@ -391,7 +390,7 @@ class TypeAwareSimplifier(OptimizationPass):
     common multi-byte patterns via the registered Pattern list.
     """
 
-    def run(self, func: "Function") -> None:
+    def run(self, func: Function) -> None:
         from pseudo8051.prototypes import get_proto
         live_in = getattr(func.entry_block, "live_in", frozenset())
 

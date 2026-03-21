@@ -2,7 +2,7 @@
 ir/function.py — Function: block graph + pass runner + final HIR.
 """
 
-from typing import List, Dict, Optional, TYPE_CHECKING
+from typing import List, Dict, Optional
 
 import ida_funcs
 import ida_gdl
@@ -12,9 +12,6 @@ import idc
 from pseudo8051.ir.basicblock import BasicBlock
 from pseudo8051.ir.hir        import HIRNode, Label
 from pseudo8051.constants     import PARAM_REG_ORDER, dbg
-
-if TYPE_CHECKING:
-    from pseudo8051.analysis.constprop import CPState
 
 
 class Function:
@@ -59,7 +56,7 @@ class Function:
         # Create BasicBlock wrappers; _block_map is needed by predecessors/successors
         self._block_map: Dict[int, BasicBlock] = {}
         for rb in raw_blocks:
-            self._block_map[rb.start_ea] = BasicBlock(rb, self)
+            self._block_map[rb.start_ea] = BasicBlock(rb, self._block_map, self.ea)
 
         self._blocks: List[BasicBlock] = sorted(
             self._block_map.values(), key=lambda b: b.start_ea)

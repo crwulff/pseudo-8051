@@ -6,16 +6,14 @@ to the appropriate MnemonicHandler looked up from handlers/__init__.py.
 """
 
 from abc import ABC, abstractmethod
-from typing import List, Optional, TYPE_CHECKING
+from typing import List, Optional
 
 import ida_ua
 import ida_bytes
 import idc
 
-from pseudo8051.ir.operand import Operand
-
-if TYPE_CHECKING:
-    from pseudo8051.analysis.constprop import CPState
+from pseudo8051.ir.operand  import Operand
+from pseudo8051.ir.cpstate  import CPState
 
 
 # ── MnemonicHandler ABC ───────────────────────────────────────────────────────
@@ -37,7 +35,7 @@ class MnemonicHandler(ABC):
         ...
 
     @abstractmethod
-    def lift(self, insn, state: Optional["CPState"] = None) -> List:
+    def lift(self, insn, state: Optional[CPState] = None) -> List:
         """Return a list of HIRNode objects (or legacy strings) for this instruction."""
         ...
 
@@ -104,7 +102,7 @@ class Instruction:
         insn = self.insn
         return self._handler().defs(insn) if insn else frozenset()
 
-    def lift(self, state: Optional["CPState"] = None) -> List:
+    def lift(self, state: Optional[CPState] = None) -> List:
         """Return HIRNode objects (or legacy strings) for this instruction."""
         insn = self.insn
         return self._handler().lift(insn, state) if insn else []

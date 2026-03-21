@@ -13,16 +13,15 @@ determined, otherwise  while (--Rn != 0).
 """
 
 import re
-from typing import List, Set, Optional, TYPE_CHECKING
+from typing import List, Set, Optional
 
-from pseudo8051.ir.hir   import HIRNode, Statement, Assign, WhileNode, ForNode, Label, IfGoto, GotoStatement
-from pseudo8051.ir.expr  import Expr, Reg, Const, BinOp, UnaryOp
-from pseudo8051.passes   import OptimizationPass
+from pseudo8051.ir.hir      import HIRNode, Statement, Assign, WhileNode, ForNode, Label, IfGoto, GotoStatement
+from pseudo8051.ir.expr     import Expr, Reg, Const, BinOp, UnaryOp
+from pseudo8051.passes      import OptimizationPass
 from pseudo8051.constants import dbg
 
-if TYPE_CHECKING:
-    from pseudo8051.ir.function   import Function
-    from pseudo8051.ir.basicblock import BasicBlock
+from pseudo8051.ir.function   import Function
+from pseudo8051.ir.basicblock import BasicBlock
 
 
 # Regex to detect DJNZ-style conditional at the bottom of a loop body (legacy Statement)
@@ -48,7 +47,7 @@ def _is_djnz_node(node: HIRNode) -> Optional[str]:
     return None
 
 
-def _collect_loop_body(header: "BasicBlock", tail: "BasicBlock") -> Set[int]:
+def _collect_loop_body(header: BasicBlock, tail: BasicBlock) -> Set[int]:
     """
     Collect the EAs of all blocks in the natural loop defined by back-edge
     tail → header using a simple backward reachability from tail up to header.
@@ -78,7 +77,7 @@ class LoopStructurer(OptimizationPass):
     the Function.render() step skips them.
     """
 
-    def run(self, func: "Function") -> None:
+    def run(self, func: Function) -> None:
         # Identify all back-edges: succ.start_ea <= block.start_ea
         back_edges = []
         for block in func.blocks:
@@ -92,12 +91,12 @@ class LoopStructurer(OptimizationPass):
             dbg("loops", f"back-edge: {hex(tail.start_ea)} → {hex(header.start_ea)}")
             self._structure_loop(func, header, tail)
 
-    def _structure_loop(self, func: "Function",
-                        header: "BasicBlock", tail: "BasicBlock") -> None:
+    def _structure_loop(self, func: Function,
+                        header: BasicBlock, tail: BasicBlock) -> None:
         body_eas = _collect_loop_body(header, tail)
 
         # Body blocks sorted by EA (excluding header)
-        body_blocks: List["BasicBlock"] = sorted(
+        body_blocks: List[BasicBlock] = sorted(
             (func._block_map[ea] for ea in body_eas
              if ea != header.start_ea and ea in func._block_map),
             key=lambda b: b.start_ea)
@@ -210,8 +209,8 @@ class LoopStructurer(OptimizationPass):
         if body_blocks and tail not in body_blocks:
             tail._absorbed = True
 
-    def _find_init_value(self, header: "BasicBlock",
-                         _body_blocks: List["BasicBlock"], reg: str) -> Optional[str]:
+    def _find_init_value(self, header: BasicBlock,
+                         _body_blocks: List[BasicBlock], reg: str) -> Optional[str]:
         """
         Search the block immediately preceding the header for an assignment
         'reg = value;' that initialises the loop counter.

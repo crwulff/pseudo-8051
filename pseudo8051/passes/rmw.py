@@ -18,14 +18,12 @@ Collapsed to:
 """
 
 import re
-from typing import List, TYPE_CHECKING
+from typing import List
 
-from pseudo8051.ir.hir   import HIRNode, Statement
-from pseudo8051.passes   import OptimizationPass
-from pseudo8051.constants import dbg
-
-if TYPE_CHECKING:
-    from pseudo8051.ir.function import Function
+from pseudo8051.ir.hir    import HIRNode, Statement
+from pseudo8051.passes      import OptimizationPass
+from pseudo8051.constants   import dbg
+from pseudo8051.ir.function import Function
 
 
 # Regex patterns — match on Statement.text (no leading whitespace at this stage)
@@ -109,7 +107,7 @@ def _collapse_block_hir(hir: List[HIRNode]) -> List[HIRNode]:
 class RMWCollapser(OptimizationPass):
     """Collapse XRAM read-modify-write sequences within each block's HIR."""
 
-    def run(self, func: "Function") -> None:
+    def run(self, func: Function) -> None:
         for block in func.blocks:
             if block.hir:
                 before = len(block.hir)

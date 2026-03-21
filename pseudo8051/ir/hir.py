@@ -6,10 +6,9 @@ render() returns a list of (ea, indented_text) tuples.
 """
 
 from abc import ABC, abstractmethod
-from typing import List, Optional, Tuple, Union, TYPE_CHECKING
+from typing import List, Optional, Tuple, Union
 
-if TYPE_CHECKING:
-    from pseudo8051.ir.expr import Expr
+from pseudo8051.ir.expr import Expr
 
 
 class HIRNode(ABC):
@@ -30,10 +29,9 @@ class HIRNode(ABC):
 
 # ── Expression-tree statement nodes ───────────────────────────────────────────
 
-def _render_expr(val: "Union[str, Expr]") -> str:
+def _render_expr(val: Union[str, Expr]) -> str:
     """Render either a plain string or an Expr to a string."""
-    from pseudo8051.ir.expr import Expr as ExprCls
-    if isinstance(val, ExprCls):
+    if isinstance(val, Expr):
         return val.render()
     return str(val)
 
@@ -41,7 +39,7 @@ def _render_expr(val: "Union[str, Expr]") -> str:
 class Assign(HIRNode):
     """lhs = rhs;"""
 
-    def __init__(self, ea: int, lhs: "Expr", rhs: "Expr"):
+    def __init__(self, ea: int, lhs: Expr, rhs: Expr):
         super().__init__(ea)
         self.lhs = lhs
         self.rhs = rhs
@@ -53,7 +51,7 @@ class Assign(HIRNode):
 class CompoundAssign(HIRNode):
     """lhs op= rhs;  e.g. A += rhs;"""
 
-    def __init__(self, ea: int, lhs: "Expr", op: str, rhs: "Expr"):
+    def __init__(self, ea: int, lhs: Expr, op: str, rhs: Expr):
         super().__init__(ea)
         self.lhs = lhs
         self.op  = op
@@ -66,7 +64,7 @@ class CompoundAssign(HIRNode):
 class ExprStmt(HIRNode):
     """A standalone expression statement: push(R7);  R7++;"""
 
-    def __init__(self, ea: int, expr: "Expr"):
+    def __init__(self, ea: int, expr: Expr):
         super().__init__(ea)
         self.expr = expr
 
@@ -77,7 +75,7 @@ class ExprStmt(HIRNode):
 class ReturnStmt(HIRNode):
     """return;  or  return expr;"""
 
-    def __init__(self, ea: int, value: "Optional[Expr]" = None):
+    def __init__(self, ea: int, value: Optional[Expr] = None):
         super().__init__(ea)
         self.value = value
 
@@ -90,7 +88,7 @@ class ReturnStmt(HIRNode):
 class IfGoto(HIRNode):
     """if (cond) goto label;"""
 
-    def __init__(self, ea: int, cond: "Expr", label: str):
+    def __init__(self, ea: int, cond: Expr, label: str):
         super().__init__(ea)
         self.cond  = cond
         self.label = label
@@ -142,13 +140,12 @@ class Label(HIRNode):
 # ── Condition type alias ──────────────────────────────────────────────────────
 # Structural nodes accept str | Expr during migration; Phase 8 removes str.
 
-_Cond = Union[str, "Expr"]
+_Cond = Union[str, Expr]
 
 
 def _render_cond(c: _Cond) -> str:
     """Render a condition that is either a plain str or an Expr."""
-    from pseudo8051.ir.expr import Expr as ExprCls
-    if isinstance(c, ExprCls):
+    if isinstance(c, Expr):
         return c.render()
     return str(c)
 
@@ -215,9 +212,9 @@ class ForNode(HIRNode):
     """
 
     def __init__(self, ea: int,
-                 init: Union[str, "Expr", "Assign"],
+                 init: Union[str, Expr, Assign],
                  condition: _Cond,
-                 update: Union[str, "Expr"],
+                 update: Union[str, Expr],
                  body_nodes: List[HIRNode]):
         super().__init__(ea)
         self.init       = init
@@ -227,10 +224,9 @@ class ForNode(HIRNode):
 
     def _render_init(self) -> str:
         """Render the for-loop init clause (no trailing semicolon)."""
-        from pseudo8051.ir.expr import Expr as ExprCls
         if isinstance(self.init, Assign):
             return f"{_render_expr(self.init.lhs)} = {_render_expr(self.init.rhs)}"
-        if isinstance(self.init, ExprCls):
+        if isinstance(self.init, Expr):
             return self.init.render()
         return str(self.init)
 

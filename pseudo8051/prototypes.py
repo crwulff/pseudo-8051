@@ -27,7 +27,7 @@ To override for a specific function (e.g. returns uint16_t in R0:R1):
 
 import re
 from dataclasses import dataclass, field
-from typing import List, Tuple, Optional, TYPE_CHECKING
+from typing import List, Tuple, Optional
 
 from pseudo8051.constants import dbg, PARAM_REGS
 
