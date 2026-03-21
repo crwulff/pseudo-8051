@@ -6,7 +6,10 @@ render() returns a list of (ea, indented_text) tuples.
 """
 
 from abc import ABC, abstractmethod
-from typing import List, Tuple, Optional
+from typing import List, Optional, Tuple, Union, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pseudo8051.ir.expr import Expr
 
 
 class HIRNode(ABC):
@@ -25,6 +28,79 @@ class HIRNode(ABC):
         return "    " * indent
 
 
+# ── Expression-tree statement nodes ───────────────────────────────────────────
+
+def _render_expr(val: "Union[str, Expr]") -> str:
+    """Render either a plain string or an Expr to a string."""
+    from pseudo8051.ir.expr import Expr as ExprCls
+    if isinstance(val, ExprCls):
+        return val.render()
+    return str(val)
+
+
+class Assign(HIRNode):
+    """lhs = rhs;"""
+
+    def __init__(self, ea: int, lhs: "Expr", rhs: "Expr"):
+        super().__init__(ea)
+        self.lhs = lhs
+        self.rhs = rhs
+
+    def render(self, indent: int = 0) -> List[Tuple[int, str]]:
+        return [(self.ea, f"{self._ind(indent)}{_render_expr(self.lhs)} = {_render_expr(self.rhs)};")]
+
+
+class CompoundAssign(HIRNode):
+    """lhs op= rhs;  e.g. A += rhs;"""
+
+    def __init__(self, ea: int, lhs: "Expr", op: str, rhs: "Expr"):
+        super().__init__(ea)
+        self.lhs = lhs
+        self.op  = op
+        self.rhs = rhs
+
+    def render(self, indent: int = 0) -> List[Tuple[int, str]]:
+        return [(self.ea, f"{self._ind(indent)}{_render_expr(self.lhs)} {self.op} {_render_expr(self.rhs)};")]
+
+
+class ExprStmt(HIRNode):
+    """A standalone expression statement: push(R7);  R7++;"""
+
+    def __init__(self, ea: int, expr: "Expr"):
+        super().__init__(ea)
+        self.expr = expr
+
+    def render(self, indent: int = 0) -> List[Tuple[int, str]]:
+        return [(self.ea, f"{self._ind(indent)}{_render_expr(self.expr)};")]
+
+
+class ReturnStmt(HIRNode):
+    """return;  or  return expr;"""
+
+    def __init__(self, ea: int, value: "Optional[Expr]" = None):
+        super().__init__(ea)
+        self.value = value
+
+    def render(self, indent: int = 0) -> List[Tuple[int, str]]:
+        if self.value is None:
+            return [(self.ea, f"{self._ind(indent)}return;")]
+        return [(self.ea, f"{self._ind(indent)}return {_render_expr(self.value)};")]
+
+
+class IfGoto(HIRNode):
+    """if (cond) goto label;"""
+
+    def __init__(self, ea: int, cond: "Expr", label: str):
+        super().__init__(ea)
+        self.cond  = cond
+        self.label = label
+
+    def render(self, indent: int = 0) -> List[Tuple[int, str]]:
+        return [(self.ea, f"{self._ind(indent)}if ({_render_expr(self.cond)}) goto {self.label};")]
+
+
+# ── Legacy string-based statement (kept for test compat; see Phase 8 note) ───
+
 class Statement(HIRNode):
     """A single C-like statement string (already formatted by a handler)."""
 
@@ -35,6 +111,8 @@ class Statement(HIRNode):
     def render(self, indent: int = 0) -> List[Tuple[int, str]]:
         return [(self.ea, f"{self._ind(indent)}{self.text}")]
 
+
+# ── Flow control ──────────────────────────────────────────────────────────────
 
 class GotoStatement(HIRNode):
     """goto label;"""
@@ -55,20 +133,36 @@ class Label(HIRNode):
         self.name = name
 
     def render(self, indent: int = 0) -> List[Tuple[int, str]]:
-        # Labels are not indented by the passed indent; they typically sit at
-        # the outermost scope.
         return [
             (self.ea, ""),
             (self.ea, f"{self.name}:"),
         ]
 
 
+# ── Condition type alias ──────────────────────────────────────────────────────
+# Structural nodes accept str | Expr during migration; Phase 8 removes str.
+
+_Cond = Union[str, "Expr"]
+
+
+def _render_cond(c: _Cond) -> str:
+    """Render a condition that is either a plain str or an Expr."""
+    from pseudo8051.ir.expr import Expr as ExprCls
+    if isinstance(c, ExprCls):
+        return c.render()
+    return str(c)
+
+
+# ── Structured control-flow nodes ─────────────────────────────────────────────
+
 class IfNode(HIRNode):
     """
     if (condition) { then_nodes } [else { else_nodes }]
+
+    condition may be str (legacy) or Expr (Phase 7+).
     """
 
-    def __init__(self, ea: int, condition: str,
+    def __init__(self, ea: int, condition: _Cond,
                  then_nodes: List[HIRNode],
                  else_nodes: Optional[List[HIRNode]] = None):
         super().__init__(ea)
@@ -79,7 +173,7 @@ class IfNode(HIRNode):
     def render(self, indent: int = 0) -> List[Tuple[int, str]]:
         ind = self._ind(indent)
         lines: List[Tuple[int, str]] = []
-        lines.append((self.ea, f"{ind}if ({self.condition}) {{"))
+        lines.append((self.ea, f"{ind}if ({_render_cond(self.condition)}) {{"))
         for node in self.then_nodes:
             lines.extend(node.render(indent + 1))
         if self.else_nodes:
@@ -93,9 +187,11 @@ class IfNode(HIRNode):
 class WhileNode(HIRNode):
     """
     while (condition) { body_nodes }
+
+    condition may be str (legacy) or Expr (Phase 7+).
     """
 
-    def __init__(self, ea: int, condition: str,
+    def __init__(self, ea: int, condition: _Cond,
                  body_nodes: List[HIRNode]):
         super().__init__(ea)
         self.condition  = condition
@@ -104,7 +200,7 @@ class WhileNode(HIRNode):
     def render(self, indent: int = 0) -> List[Tuple[int, str]]:
         ind = self._ind(indent)
         lines: List[Tuple[int, str]] = []
-        lines.append((self.ea, f"{ind}while ({self.condition}) {{"))
+        lines.append((self.ea, f"{ind}while ({_render_cond(self.condition)}) {{"))
         for node in self.body_nodes:
             lines.extend(node.render(indent + 1))
         lines.append((self.ea, f"{ind}}}"))
@@ -114,9 +210,14 @@ class WhileNode(HIRNode):
 class ForNode(HIRNode):
     """
     for (init; condition; update) { body_nodes }
+
+    init/condition/update may be str (legacy) or Assign/Expr (Phase 7+).
     """
 
-    def __init__(self, ea: int, init: str, condition: str, update: str,
+    def __init__(self, ea: int,
+                 init: Union[str, "Expr", "Assign"],
+                 condition: _Cond,
+                 update: Union[str, "Expr"],
                  body_nodes: List[HIRNode]):
         super().__init__(ea)
         self.init       = init
@@ -124,10 +225,22 @@ class ForNode(HIRNode):
         self.update     = update
         self.body_nodes = body_nodes
 
+    def _render_init(self) -> str:
+        """Render the for-loop init clause (no trailing semicolon)."""
+        from pseudo8051.ir.expr import Expr as ExprCls
+        if isinstance(self.init, Assign):
+            return f"{_render_expr(self.init.lhs)} = {_render_expr(self.init.rhs)}"
+        if isinstance(self.init, ExprCls):
+            return self.init.render()
+        return str(self.init)
+
     def render(self, indent: int = 0) -> List[Tuple[int, str]]:
         ind = self._ind(indent)
         lines: List[Tuple[int, str]] = []
-        lines.append((self.ea, f"{ind}for ({self.init}; {self.condition}; {self.update}) {{"))
+        lines.append((self.ea,
+                       f"{ind}for ({self._render_init()}; "
+                       f"{_render_cond(self.condition)}; "
+                       f"{_render_cond(self.update)}) {{"))
         for node in self.body_nodes:
             lines.extend(node.render(indent + 1))
         lines.append((self.ea, f"{ind}}}"))

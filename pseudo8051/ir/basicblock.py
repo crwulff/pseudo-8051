@@ -182,7 +182,11 @@ class BasicBlock:
             stmts = instr.lift(state)
             propagate_insn(raw_insn, state)
             for s in stmts:
-                nodes.append(Statement(instr.ea, s))
+                if isinstance(s, str):
+                    # Legacy: wrap string result in Statement
+                    nodes.append(Statement(instr.ea, s))
+                else:
+                    nodes.append(s)
 
         # Fall-through tail call: append a synthetic call/return statement.
         ft = self._fallthrough_tail_call()

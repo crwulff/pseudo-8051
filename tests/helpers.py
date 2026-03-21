@@ -64,18 +64,24 @@ def connect(src: FakeBlock, dst: FakeBlock) -> None:
     dst._preds.append(src)
 
 
-def make_single_block_func(name: str, stmt_texts: List[str],
+def make_single_block_func(name: str, stmts_or_texts,
                            proto=None):
     """
-    Build a single-block FakeFunction from a list of raw statement strings.
+    Build a single-block FakeFunction from a list of HIRNodes or raw strings.
 
-    Each string becomes a Statement with an incrementing ea starting at 0x1000.
+    Strings are wrapped in Statement with an incrementing ea starting at 0x1000.
+    HIRNodes are used as-is (ea attribute preserved).
     If *proto* is provided it is inserted into PROTOTYPES[name].
     """
-    from pseudo8051.ir.hir import Statement
+    from pseudo8051.ir.hir import Statement, HIRNode
     from pseudo8051.prototypes import PROTOTYPES
 
-    stmts = [Statement(0x1000 + i * 2, t) for i, t in enumerate(stmt_texts)]
+    stmts = []
+    for i, item in enumerate(stmts_or_texts):
+        if isinstance(item, HIRNode):
+            stmts.append(item)
+        else:
+            stmts.append(Statement(0x1000 + i * 2, item))
     block = FakeBlock(0x1000, hir=stmts)
     func  = FakeFunction(name, [block], hir=stmts)
     if proto is not None:

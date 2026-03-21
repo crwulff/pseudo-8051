@@ -37,8 +37,8 @@ class MnemonicHandler(ABC):
         ...
 
     @abstractmethod
-    def lift(self, insn, state: Optional["CPState"] = None) -> List[str]:
-        """Return a list of C-like statement strings for this instruction."""
+    def lift(self, insn, state: Optional["CPState"] = None) -> List:
+        """Return a list of HIRNode objects (or legacy strings) for this instruction."""
         ...
 
 
@@ -104,7 +104,8 @@ class Instruction:
         insn = self.insn
         return self._handler().defs(insn) if insn else frozenset()
 
-    def lift(self, state: Optional["CPState"] = None) -> List[str]:
+    def lift(self, state: Optional["CPState"] = None) -> List:
+        """Return HIRNode objects (or legacy strings) for this instruction."""
         insn = self.insn
         return self._handler().lift(insn, state) if insn else []
 

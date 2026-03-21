@@ -2,31 +2,34 @@
 passes/patterns/reg_copy_group.py — RegCopyGroupPattern.
 
 Recognises a consecutive sequence of single-register copy statements that
-together copy a complete multi-byte variable into a new set of registers:
+together copy a complete multi-byte variable into a new set of registers.
 
-    R0 = R4;
-    R1 = R5;
-    R2 = R6;
-    R3 = R7;
-
-where R4–R7 all belong to the *same* non-XRAM VarInfo (e.g. ``retval1``).
-
-On match the statements are dropped and ``reg_map`` is updated so that the
-destination registers (R0–R3) and their pair key (``R0R1R2R3``) also resolve
-to the same variable.  This propagates retval names into the next call's
-argument substitution.
+Handles both Assign (expression-tree) and legacy Statement nodes.
 """
 
 import re
 from typing import Dict, List, Optional
 
-from pseudo8051.ir.hir import HIRNode, Statement
+from pseudo8051.ir.hir import HIRNode, Statement, Assign
+from pseudo8051.ir.expr import Reg
 from pseudo8051.constants import dbg
 from pseudo8051.passes.patterns.base   import Pattern, Match, Simplify
 from pseudo8051.passes.patterns._utils import VarInfo
 
 
 _RE_COPY = re.compile(r'^(\w+) = (\w+);$')
+
+
+def _as_reg_copy(node: HIRNode) -> Optional[tuple]:
+    """Return (dst_name, src_name) if node is a simple reg=reg copy; else None."""
+    if isinstance(node, Assign):
+        if isinstance(node.lhs, Reg) and isinstance(node.rhs, Reg):
+            return (node.lhs.name, node.rhs.name)
+    if isinstance(node, Statement):
+        m = _RE_COPY.match(node.text)
+        if m:
+            return (m.group(1), m.group(2))
+    return None
 
 
 class RegCopyGroupPattern(Pattern):
@@ -38,43 +41,36 @@ class RegCopyGroupPattern(Pattern):
               reg_map:  Dict[str, VarInfo],
               simplify: Simplify) -> Optional[Match]:
         node = nodes[i]
-        if not isinstance(node, Statement):
-            return None
-        m = _RE_COPY.match(node.text)
-        if not m:
+        pair = _as_reg_copy(node)
+        if pair is None:
             return None
 
-        dst0, src0 = m.group(1), m.group(2)
+        dst0, src0 = pair
 
-        # Source must be the high byte of a known multi-byte non-XRAM variable
         vinfo = reg_map.get(src0)
         if not isinstance(vinfo, VarInfo) or vinfo.xram_sym or len(vinfo.regs) < 2:
             return None
         if vinfo.regs[0] != src0:
-            return None  # must start from the high byte
+            return None
 
         n = len(vinfo.regs)
         if i + n > len(nodes):
             return None
 
-        # Collect all n copy statements; verify each source matches vinfo.regs[k]
         dsts: List[str] = []
         for k in range(n):
             nd = nodes[i + k]
-            if not isinstance(nd, Statement):
+            mk = _as_reg_copy(nd)
+            if mk is None:
                 return None
-            mk = _RE_COPY.match(nd.text)
-            if not mk:
-                return None
-            dk, sk = mk.group(1), mk.group(2)
+            dk, sk = mk
             if sk != vinfo.regs[k]:
                 return None
             dsts.append(dk)
 
-        # Update reg_map: map destination registers (and their pair) to a new VarInfo
         new_info = VarInfo(vinfo.name, vinfo.type, tuple(dsts))
-        pair = "".join(dsts)
-        reg_map[pair] = new_info
+        pair_key = "".join(dsts)
+        reg_map[pair_key] = new_info
         for d in dsts:
             reg_map[d] = new_info
 

@@ -14,9 +14,10 @@ the pass removes Label nodes that are no longer targeted by any goto.
 """
 
 import re
-from typing import List, Optional, TYPE_CHECKING
+from typing import List, Optional, Tuple, Union, TYPE_CHECKING
 
-from pseudo8051.ir.hir    import HIRNode, Statement, IfNode, WhileNode, ForNode, Label
+from pseudo8051.ir.hir    import HIRNode, Statement, IfNode, WhileNode, ForNode, Label, IfGoto, GotoStatement
+from pseudo8051.ir.expr   import Expr, UnaryOp
 from pseudo8051.passes    import OptimizationPass
 from pseudo8051.constants import dbg
 
@@ -24,17 +25,34 @@ if TYPE_CHECKING:
     from pseudo8051.ir.function   import Function
     from pseudo8051.ir.basicblock import BasicBlock
 
+_Cond = Union[str, Expr]
+
 
 # ── Condition helpers ─────────────────────────────────────────────────────────
 
-def _extract_condition(text: str):
-    """Parse 'if (cond) goto label;' → (cond, label) or None."""
+def _extract_condition(text: str) -> Optional[Tuple[str, str]]:
+    """Parse 'if (cond) goto label;' → (cond_str, label) or None."""
     m = re.match(r'^if \((.+)\) goto (\S+);$', text)
     return (m.group(1), m.group(2)) if m else None
 
 
-def _invert_condition(cond: str) -> str:
-    """Negate a C condition string, avoiding double negation."""
+def _extract_condition_node(node: HIRNode) -> Optional[Tuple[_Cond, str]]:
+    """Return (condition, label) from an IfGoto or conditional Statement, else None."""
+    if isinstance(node, IfGoto):
+        return (node.cond, node.label)
+    if isinstance(node, Statement):
+        return _extract_condition(node.text)
+    return None
+
+
+def _invert_condition(cond: _Cond) -> _Cond:
+    """Negate a condition (str or Expr), avoiding double negation."""
+    if isinstance(cond, Expr):
+        # UnaryOp("!", UnaryOp("!", x)) → x
+        if isinstance(cond, UnaryOp) and cond.op == "!":
+            return cond.operand
+        return UnaryOp("!", cond)
+    # str path
     if cond.startswith("!(") and cond.endswith(")"):
         return cond[2:-1]
     if cond.startswith("!"):
@@ -139,7 +157,7 @@ def _build_arm_hir(blocks: List["BasicBlock"], merge_ea: int) -> List[HIRNode]:
     """
     Concatenate HIR from all arm blocks, stripping:
       • the block's own Label node (it becomes internal to the IfNode)
-      • any 'goto merge_label;' statement
+      • any 'goto merge_label;' statement or GotoStatement to merge
       • any conditional branch whose target is the merge label
     """
     merge_label = f"label_{hex(merge_ea).removeprefix('0x')}"
@@ -148,6 +166,10 @@ def _build_arm_hir(blocks: List["BasicBlock"], merge_ea: int) -> List[HIRNode]:
     for blk in blocks:
         for node in blk.hir:
             if isinstance(node, Label):
+                continue
+            if isinstance(node, GotoStatement) and node.label == merge_label:
+                continue
+            if isinstance(node, IfGoto) and node.label == merge_label:
                 continue
             if isinstance(node, Statement):
                 if node.text == f"goto {merge_label};":
@@ -166,7 +188,11 @@ def _collect_goto_targets(nodes: List[HIRNode]) -> set:
     """Recursively collect every label name referenced by a goto."""
     targets: set = set()
     for node in nodes:
-        if isinstance(node, Statement):
+        if isinstance(node, GotoStatement):
+            targets.add(node.label)
+        elif isinstance(node, IfGoto):
+            targets.add(node.label)
+        elif isinstance(node, Statement):
             if node.text.startswith("goto "):
                 targets.add(node.text[5:].rstrip(";"))
             else:
@@ -247,13 +273,13 @@ class IfElseStructurer(OptimizationPass):
 
         # Find the last conditional branch in this block's HIR
         branch_idx = -1
-        cond = true_label = None
+        cond: Optional[_Cond] = None
+        true_label: Optional[str] = None
         for i, node in enumerate(block.hir):
-            if isinstance(node, Statement):
-                parsed = _extract_condition(node.text)
-                if parsed:
-                    branch_idx = i
-                    cond, true_label = parsed
+            parsed = _extract_condition_node(node)
+            if parsed:
+                branch_idx = i
+                cond, true_label = parsed
 
         if branch_idx < 0:
             return False
@@ -270,7 +296,8 @@ class IfElseStructurer(OptimizationPass):
                           f"({_label_for(s0)!r}, {_label_for(s1)!r})")
             return False
 
-        dbg("ifelse", f"block {hex(block.start_ea)}: cond={cond!r} "
+        cond_str = cond.render() if isinstance(cond, Expr) else cond
+        dbg("ifelse", f"block {hex(block.start_ea)}: cond={cond_str!r} "
                       f"true={hex(true_block.start_ea)} "
                       f"false={hex(false_block.start_ea)}")
 
@@ -297,9 +324,11 @@ class IfElseStructurer(OptimizationPass):
         # the arms and invert the condition so the body is always in "then".
         # Example: jnb BIT, merge  →  if (BIT) { body }  (no else)
         if not then_nodes and else_nodes:
+            inv = _invert_condition(cond)
+            inv_str = inv.render() if isinstance(inv, Expr) else inv
             dbg("ifelse", f"  swapping arms (then was empty), inverted cond to "
-                          f"{_invert_condition(cond)!r}")
-            cond       = _invert_condition(cond)
+                          f"{inv_str!r}")
+            cond       = inv
             then_nodes = else_nodes
             else_nodes = []
 
@@ -308,7 +337,8 @@ class IfElseStructurer(OptimizationPass):
             dbg("ifelse", f"  both arms empty, skipping")
             return False
 
-        dbg("ifelse", f"  → IfNode  cond={cond!r}  "
+        cond_dbg = cond.render() if isinstance(cond, Expr) else cond
+        dbg("ifelse", f"  → IfNode  cond={cond_dbg!r}  "
                       f"then={len(then_nodes)} node(s)  "
                       f"else={len(else_nodes)} node(s)")
 

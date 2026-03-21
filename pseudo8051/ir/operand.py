@@ -16,6 +16,9 @@ from pseudo8051.constants import (
     PHRASE_AT_R0, PHRASE_AT_R1, PHRASE_AT_DPTR, PHRASE_AT_A_DPTR,
     PARAM_REGS, resolve_ext_addr,
 )
+from pseudo8051.ir.expr import (
+    Expr, Reg, Const, Name, XRAMRef, IRAMRef, CROMRef, BinOp,
+)
 
 if TYPE_CHECKING:
     from pseudo8051.analysis.constprop import CPState
@@ -114,6 +117,62 @@ class Operand:
             if phrase in (PHRASE_AT_DPTR, PHRASE_AT_A_DPTR):     return frozenset({"DPTR"})
 
         return frozenset()
+
+    def to_expr(self, cp_state: Optional["CPState"] = None) -> Expr:
+        """
+        Return an Expr node for this operand.
+        Mirrors render() but returns structured Expr objects instead of strings.
+        """
+        insn = self._insn
+        n    = self._n
+        op   = self._op
+
+        if op.type == ida_ua.o_void:
+            return Name("")
+
+        if op.type == ida_ua.o_reg:
+            return Reg(idc.print_operand(insn.ea, n))
+
+        if op.type == ida_ua.o_imm:
+            return Const(op.value)
+
+        if op.type == ida_ua.o_mem:
+            addr = op.addr & 0xFF
+            sfr  = SFR_NAMES.get(addr)
+            if sfr:
+                return Reg(sfr)
+            if addr <= 7:
+                return Reg(f"R{addr}")
+            iname = ida_name.get_name(op.addr)
+            if iname:
+                return Name(iname)
+            return Name(f"MEM[{hex(addr)}]")
+
+        if op.type == ida_ua.o_phrase:
+            phrase = op.phrase
+            if phrase == PHRASE_AT_R0:
+                return IRAMRef(Reg("R0"))
+            if phrase == PHRASE_AT_R1:
+                return IRAMRef(Reg("R1"))
+            if phrase == PHRASE_AT_DPTR:
+                if cp_state is not None:
+                    dptr_val = cp_state.get("DPTR")
+                    if dptr_val is not None:
+                        sym = resolve_ext_addr(dptr_val)
+                        return XRAMRef(Name(sym))
+                return XRAMRef(Reg("DPTR"))
+            if phrase == PHRASE_AT_A_DPTR:
+                return CROMRef(BinOp(Reg("A"), "+", Reg("DPTR")))
+            return Name(idc.print_operand(insn.ea, n))
+
+        if op.type in (ida_ua.o_near, ida_ua.o_far):
+            page_base = insn.ea & ~0xFFFF
+            target_ea = page_base | (op.addr & 0xFFFF)
+            name = ida_name.get_name(target_ea)
+            return Name(name) if name else Name(hex(op.addr & 0xFFFF))
+
+        # o_bit, o_displ, o_idpspec*, … — IDA fallback
+        return Name(idc.print_operand(insn.ea, n))
 
     def reg_name(self) -> Optional[str]:
         """

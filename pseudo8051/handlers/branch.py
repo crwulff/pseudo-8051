@@ -10,10 +10,17 @@ import ida_ua
 
 from pseudo8051.ir.instruction import MnemonicHandler
 from pseudo8051.ir.operand     import Operand
+from pseudo8051.ir.hir         import HIRNode, Assign, ExprStmt, ReturnStmt, IfGoto, GotoStatement
+from pseudo8051.ir.expr        import Reg, Const, Name, BinOp, UnaryOp, Call
 from pseudo8051.constants      import PARAM_REGS
 
 
-def _op(insn, n: int, state=None) -> str:
+def _op_expr(insn, n: int, state=None):
+    return Operand(insn, n).to_expr(state)
+
+
+def _label_str(insn, n: int, state=None) -> str:
+    """Render a branch-target operand as a label string."""
     return Operand(insn, n).render(state)
 
 
@@ -55,22 +62,21 @@ class SjmpHandler(MnemonicHandler):
     def defs(self, insn) -> frozenset:
         return frozenset()
 
-    def lift(self, insn, state=None) -> List[str]:
+    def lift(self, insn, state=None) -> List[HIRNode]:
         tail = _tail_call_target(insn)
         if tail:
             from pseudo8051.prototypes import get_proto, param_regs
             proto = get_proto(tail)
             if proto:
                 regs_list = param_regs(proto)
-                # Use register-pair names as arguments; TypeAwareSimplifier will
-                # substitute them with variable names / constants from the caller's scope.
-                args = ["".join(r) if r else "?" for r in regs_list]
-                call_expr = f"{tail}({', '.join(args)})"
+                args = [Name("".join(r)) if r else Name("?") for r in regs_list]
+                call_node = Call(tail, args)
                 if proto.return_type != "void":
-                    return [f"return {call_expr};"]
-                return [f"{call_expr};"]
-            return [f"{tail}();  /* tail call */"]
-        return [f"goto {_op(insn, 0, state)};"]
+                    return [ReturnStmt(insn.ea, call_node)]
+                return [ExprStmt(insn.ea, call_node)]
+            return [ExprStmt(insn.ea, Call(tail, []))]
+        label = _label_str(insn, 0, state)
+        return [GotoStatement(insn.ea, label)]
 
 
 class JzHandler(MnemonicHandler):
@@ -80,8 +86,9 @@ class JzHandler(MnemonicHandler):
     def defs(self, insn) -> frozenset:
         return frozenset()
 
-    def lift(self, insn, state=None) -> List[str]:
-        return [f"if (A == 0) goto {_op(insn, 0, state)};"]
+    def lift(self, insn, state=None) -> List[HIRNode]:
+        label = _label_str(insn, 0, state)
+        return [IfGoto(insn.ea, BinOp(Reg("A"), "==", Const(0)), label)]
 
 
 class JnzHandler(MnemonicHandler):
@@ -91,8 +98,9 @@ class JnzHandler(MnemonicHandler):
     def defs(self, insn) -> frozenset:
         return frozenset()
 
-    def lift(self, insn, state=None) -> List[str]:
-        return [f"if (A != 0) goto {_op(insn, 0, state)};"]
+    def lift(self, insn, state=None) -> List[HIRNode]:
+        label = _label_str(insn, 0, state)
+        return [IfGoto(insn.ea, BinOp(Reg("A"), "!=", Const(0)), label)]
 
 
 class JcHandler(MnemonicHandler):
@@ -102,8 +110,9 @@ class JcHandler(MnemonicHandler):
     def defs(self, insn) -> frozenset:
         return frozenset()
 
-    def lift(self, insn, state=None) -> List[str]:
-        return [f"if (C) goto {_op(insn, 0, state)};"]
+    def lift(self, insn, state=None) -> List[HIRNode]:
+        label = _label_str(insn, 0, state)
+        return [IfGoto(insn.ea, Reg("C"), label)]
 
 
 class JncHandler(MnemonicHandler):
@@ -113,8 +122,9 @@ class JncHandler(MnemonicHandler):
     def defs(self, insn) -> frozenset:
         return frozenset()
 
-    def lift(self, insn, state=None) -> List[str]:
-        return [f"if (!C) goto {_op(insn, 0, state)};"]
+    def lift(self, insn, state=None) -> List[HIRNode]:
+        label = _label_str(insn, 0, state)
+        return [IfGoto(insn.ea, UnaryOp("!", Reg("C")), label)]
 
 
 class JbHandler(MnemonicHandler):
@@ -126,8 +136,10 @@ class JbHandler(MnemonicHandler):
     def defs(self, insn) -> frozenset:
         return frozenset()
 
-    def lift(self, insn, state=None) -> List[str]:
-        return [f"if ({_op(insn, 0, state)}) goto {_op(insn, 1, state)};"]
+    def lift(self, insn, state=None) -> List[HIRNode]:
+        bit   = _op_expr(insn, 0, state)
+        label = _label_str(insn, 1, state)
+        return [IfGoto(insn.ea, bit, label)]
 
 
 class JnbHandler(MnemonicHandler):
@@ -137,8 +149,10 @@ class JnbHandler(MnemonicHandler):
     def defs(self, insn) -> frozenset:
         return frozenset()
 
-    def lift(self, insn, state=None) -> List[str]:
-        return [f"if (!{_op(insn, 0, state)}) goto {_op(insn, 1, state)};"]
+    def lift(self, insn, state=None) -> List[HIRNode]:
+        bit   = _op_expr(insn, 0, state)
+        label = _label_str(insn, 1, state)
+        return [IfGoto(insn.ea, UnaryOp("!", bit), label)]
 
 
 class JbcHandler(MnemonicHandler):
@@ -150,14 +164,13 @@ class JbcHandler(MnemonicHandler):
     def defs(self, insn) -> frozenset:
         return frozenset()
 
-    def lift(self, insn, state=None) -> List[str]:
-        dst = _op(insn, 0, state)
-        lbl = _op(insn, 1, state)
+    def lift(self, insn, state=None) -> List[HIRNode]:
+        bit   = _op_expr(insn, 0, state)
+        label = _label_str(insn, 1, state)
         return [
-            f"if ({dst}) {{",
-            f"    {dst} = 0;",
-            f"    goto {lbl};",
-            "}",
+            IfGoto(insn.ea, bit, label),
+            Assign(insn.ea, bit, Const(0)),
+            GotoStatement(insn.ea, label),
         ]
 
 
@@ -177,9 +190,10 @@ class CjneHandler(MnemonicHandler):
     def defs(self, insn) -> frozenset:
         return frozenset()
 
-    def lift(self, insn, state=None) -> List[str]:
-        tgt = _op(insn, 2, state)
-        return [f"if ({_op(insn, 0, state)} != {_op(insn, 1, state)}) goto {tgt};"]
+    def lift(self, insn, state=None) -> List[HIRNode]:
+        label = _label_str(insn, 2, state)
+        cond  = BinOp(_op_expr(insn, 0, state), "!=", _op_expr(insn, 1, state))
+        return [IfGoto(insn.ea, cond, label)]
 
 
 class DjnzHandler(MnemonicHandler):
@@ -193,7 +207,9 @@ class DjnzHandler(MnemonicHandler):
         r0 = Operand(insn, 0).reg_name()
         return frozenset({r0}) if r0 else frozenset()
 
-    def lift(self, insn, state=None) -> List[str]:
-        dst = _op(insn, 0, state)
-        lbl = _op(insn, 1, state)
-        return [f"if (--{dst} != 0) goto {lbl};"]
+    def lift(self, insn, state=None) -> List[HIRNode]:
+        dst   = _op_expr(insn, 0, state)
+        label = _label_str(insn, 1, state)
+        # if (--dst != 0) goto label;
+        cond  = BinOp(UnaryOp("--", dst, post=False), "!=", Const(0))
+        return [IfGoto(insn.ea, cond, label)]

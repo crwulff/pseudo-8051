@@ -15,7 +15,8 @@ determined, otherwise  while (--Rn != 0).
 import re
 from typing import List, Set, Optional, TYPE_CHECKING
 
-from pseudo8051.ir.hir   import HIRNode, Statement, WhileNode, ForNode, Label
+from pseudo8051.ir.hir   import HIRNode, Statement, Assign, WhileNode, ForNode, Label, IfGoto, GotoStatement
+from pseudo8051.ir.expr  import Expr, Reg, Const, BinOp, UnaryOp
 from pseudo8051.passes   import OptimizationPass
 from pseudo8051.constants import dbg
 
@@ -24,11 +25,27 @@ if TYPE_CHECKING:
     from pseudo8051.ir.basicblock import BasicBlock
 
 
-# Regex to detect DJNZ-style conditional at the bottom of a loop body
+# Regex to detect DJNZ-style conditional at the bottom of a loop body (legacy Statement)
 _RE_DJNZ = re.compile(r'^if \(--(\w+) != 0\) goto (\S+);$')
 
-# Regex to detect a simple register assignment: Rn = value;
+# Regex to detect a simple register assignment: Rn = value; (legacy Statement)
 _RE_ASSIGN = re.compile(r'^(\w+) = (.+);$')
+
+
+def _is_djnz_node(node: HIRNode) -> Optional[str]:
+    """Return the register name if node is a DJNZ-style conditional, else None."""
+    if isinstance(node, IfGoto):
+        cond = node.cond
+        if isinstance(cond, BinOp) and cond.op == "!=" and cond.rhs == Const(0):
+            lhs = cond.lhs
+            if (isinstance(lhs, UnaryOp) and lhs.op == "--" and not lhs.post
+                    and isinstance(lhs.operand, Reg)):
+                return lhs.operand.name
+    if isinstance(node, Statement):
+        m = _RE_DJNZ.match(node.text)
+        if m:
+            return m.group(1)
+    return None
 
 
 def _collect_loop_body(header: "BasicBlock", tail: "BasicBlock") -> Set[int]:
@@ -90,19 +107,22 @@ class LoopStructurer(OptimizationPass):
 
         # ── Detect DJNZ pattern ───────────────────────────────────────────
         # Look for "if (--Rn != 0) goto label;" as the last statement of tail
-        djnz_match = None
+        djnz_reg: Optional[str] = None
         if tail.hir:
-            last = tail.hir[-1]
-            if isinstance(last, Statement):
-                djnz_match = _RE_DJNZ.match(last.text)
+            djnz_reg = _is_djnz_node(tail.hir[-1])
 
         # ── Build body HIR (all blocks except header, stripping back-edge) ─
         body_hir: List[HIRNode] = []
         for blk in body_blocks:
             for node in blk.hir:
                 # Skip the back-edge goto / DJNZ at the end of the tail block
-                if blk is tail and node is tail.hir[-1] and isinstance(node, Statement):
-                    if (node.text.startswith("goto ") or
+                if blk is tail and node is tail.hir[-1]:
+                    if isinstance(node, IfGoto):
+                        continue
+                    if isinstance(node, GotoStatement):
+                        continue
+                    if isinstance(node, Statement) and (
+                            node.text.startswith("goto ") or
                             _RE_DJNZ.match(node.text)):
                         continue
                 # Skip Label nodes pointing back to the header (redundant)
@@ -114,6 +134,9 @@ class LoopStructurer(OptimizationPass):
         header_stmts: List[HIRNode] = []
         branch_node: Optional[HIRNode] = None
         for node in header.hir:
+            if isinstance(node, (IfGoto, GotoStatement)):
+                branch_node = node
+                break
             if isinstance(node, Statement) and (
                     node.text.startswith("if ") or node.text.startswith("goto ")):
                 branch_node = node
@@ -125,8 +148,8 @@ class LoopStructurer(OptimizationPass):
         # ── Construct structured node ─────────────────────────────────────
         loop_ea = header.start_ea
 
-        if djnz_match:
-            reg = djnz_match.group(1)
+        if djnz_reg is not None:
+            reg = djnz_reg
             # Look for an immediate assignment before the loop for ForNode
             init_val = self._find_init_value(header, body_blocks, reg)
             if init_val is not None:
@@ -134,24 +157,29 @@ class LoopStructurer(OptimizationPass):
                 loop_node: HIRNode = ForNode(
                     loop_ea,
                     init=f"{reg} = {init_val}",
-                    condition=reg,
-                    update=f"--{reg}",
+                    condition=Reg(reg),
+                    update=UnaryOp("--", Reg(reg), post=False),
                     body_nodes=body_hir,
                 )
             else:
                 dbg("loops", f"  → WhileNode (DJNZ)  reg={reg}")
                 loop_node = WhileNode(
                     loop_ea,
-                    condition=f"--{reg} != 0",
+                    condition=BinOp(UnaryOp("--", Reg(reg), post=False), "!=", Const(0)),
                     body_nodes=body_hir,
                 )
-        elif branch_node is not None and isinstance(branch_node, Statement):
-            # Extract condition from "if (cond) goto label;"
-            m = re.match(r'^if \((.+)\) goto \S+;$', branch_node.text)
-            if m:
-                cond = m.group(1)
+        elif branch_node is not None:
+            if isinstance(branch_node, IfGoto):
+                cond: object = branch_node.cond  # Expr
+            elif isinstance(branch_node, Statement):
+                m = re.match(r'^if \((.+)\) goto \S+;$', branch_node.text)
+                if m:
+                    cond = m.group(1)
+                else:
+                    dbg("loops", f"  → can't parse branch {branch_node.text!r}, skipping")
+                    return
             else:
-                dbg("loops", f"  → can't parse branch {branch_node.text!r}, skipping")
+                dbg("loops", f"  → unhandled branch node type, skipping")
                 return
             dbg("loops", f"  → WhileNode  cond={cond!r}")
             # Body HIR = header_stmts body + loop body
@@ -191,9 +219,11 @@ class LoopStructurer(OptimizationPass):
         for pred in header.predecessors:
             if pred.start_ea < header.start_ea:   # not a back-edge
                 for node in reversed(pred.hir):
+                    if isinstance(node, Assign) and node.lhs == Reg(reg):
+                        return node.rhs.render()
                     if isinstance(node, Statement):
                         m = _RE_ASSIGN.match(node.text)
                         if m and m.group(1) == reg:
                             return m.group(2)
-                        break   # stop at first statement from the end
+                    break   # stop at first non-label node from the end
         return None

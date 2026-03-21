@@ -9,6 +9,8 @@ import idc
 
 from pseudo8051.ir.instruction import MnemonicHandler
 from pseudo8051.ir.operand     import Operand
+from pseudo8051.ir.hir         import HIRNode, Assign, ExprStmt
+from pseudo8051.ir.expr        import Reg, Const, Name, XRAMRef, CROMRef, Call
 from pseudo8051.constants      import (
     REG_DPTR, PHRASE_AT_DPTR,
     PARAM_REGS, resolve_ext_addr,
@@ -21,8 +23,8 @@ if TYPE_CHECKING:
     from pseudo8051.analysis.constprop import CPState
 
 
-def _op(insn, n: int, state=None) -> str:
-    return Operand(insn, n).render(state)
+def _op_expr(insn, n: int, state=None):
+    return Operand(insn, n).to_expr(state)
 
 
 class MovHandler(MnemonicHandler):
@@ -52,28 +54,27 @@ class MovHandler(MnemonicHandler):
                 return frozenset({r})
         return frozenset()
 
-    def lift(self, insn, state=None) -> List[str]:
+    def lift(self, insn, state=None) -> List[HIRNode]:
         op0, op1 = insn.ops[0], insn.ops[1]
+        ea = insn.ea
         # MOV DPTR, #imm — annotate with EXT symbol
         if (op0.type == ida_ua.o_reg and op0.reg == REG_DPTR
                 and op1.type == ida_ua.o_imm):
             imm = op1.value & 0xFFFF
             sym = resolve_ext_addr(imm)
             if sym != hex(imm):
-                return [f"DPTR = {sym};  /* {hex(imm)} */"]
+                return [Assign(ea, Reg("DPTR"), Name(sym))]
         # When the source register has a known constant value, inline it.
-        # This makes patterns like "MOV R6, A" (where A=0) emit "R6 = 0x00;"
-        # so ConstGroupPattern can recognize multi-byte constant loads.
         if state is not None and op1.type == ida_ua.o_reg:
             src_name = idc.print_operand(insn.ea, 1)
             if src_name in _TRACKED_REGS:
                 val = state.get(src_name)
                 if val is not None:
-                    dst = _op(insn, 0, state)
-                    return [f"{dst} = {hex(val)};"]
-        dst = _op(insn, 0, state)
-        src = _op(insn, 1, state)
-        return [f"{dst} = {src};"]
+                    dst = _op_expr(insn, 0, state)
+                    return [Assign(ea, dst, Const(val))]
+        dst = _op_expr(insn, 0, state)
+        src = _op_expr(insn, 1, state)
+        return [Assign(ea, dst, src)]
 
 
 class MovxHandler(MnemonicHandler):
@@ -98,25 +99,39 @@ class MovxHandler(MnemonicHandler):
             return frozenset({r0})
         return frozenset()
 
-    def lift(self, insn, state=None) -> List[str]:
+    def lift(self, insn, state=None) -> List[HIRNode]:
         op0, op1 = insn.ops[0], insn.ops[1]
         dptr_val  = state.get("DPTR") if state else None
+        ea        = insn.ea
 
         if op0.type == ida_ua.o_phrase and op0.phrase == PHRASE_AT_DPTR:
-            mem = resolve_ext_addr(dptr_val) if dptr_val is not None else "DPTR"
-            # Substitute a known constant source register (e.g. A=0 → emit 0x00)
-            src = _op(insn, 1, state)
+            if dptr_val is not None:
+                mem_name = resolve_ext_addr(dptr_val)
+                xram_ref = XRAMRef(Name(mem_name))
+            else:
+                xram_ref = XRAMRef(Reg("DPTR"))
+            # Substitute a known constant source register
             if state is not None and op1.type == ida_ua.o_reg:
                 src_name = idc.print_operand(insn.ea, 1)
                 if src_name in _TRACKED_REGS:
                     val = state.get(src_name)
                     if val is not None:
-                        src = hex(val)
-            return [f"XRAM[{mem}] = {src};"]
+                        return [Assign(ea, xram_ref, Const(val))]
+            src = _op_expr(insn, 1, state)
+            return [Assign(ea, xram_ref, src)]
+
         if op1.type == ida_ua.o_phrase and op1.phrase == PHRASE_AT_DPTR:
-            mem = resolve_ext_addr(dptr_val) if dptr_val is not None else "DPTR"
-            return [f"{_op(insn, 0, state)} = XRAM[{mem}];"]
-        return [f"{_op(insn, 0, state)} = {_op(insn, 1, state)};"]
+            if dptr_val is not None:
+                mem_name = resolve_ext_addr(dptr_val)
+                xram_ref = XRAMRef(Name(mem_name))
+            else:
+                xram_ref = XRAMRef(Reg("DPTR"))
+            dst = _op_expr(insn, 0, state)
+            return [Assign(ea, dst, xram_ref)]
+
+        dst = _op_expr(insn, 0, state)
+        src = _op_expr(insn, 1, state)
+        return [Assign(ea, dst, src)]
 
 
 class MovcHandler(MnemonicHandler):
@@ -127,10 +142,10 @@ class MovcHandler(MnemonicHandler):
         r0 = Operand(insn, 0).reg_name()
         return frozenset({r0}) if r0 else frozenset()
 
-    def lift(self, insn, state=None) -> List[str]:
-        dst = _op(insn, 0, state)
-        src = _op(insn, 1, state)
-        return [f"{dst} = {src};  /* code ROM */"]
+    def lift(self, insn, state=None) -> List[HIRNode]:
+        dst = _op_expr(insn, 0, state)
+        src = _op_expr(insn, 1, state)
+        return [Assign(insn.ea, dst, src)]
 
 
 class PushHandler(MnemonicHandler):
@@ -146,8 +161,8 @@ class PushHandler(MnemonicHandler):
     def defs(self, insn) -> frozenset:
         return frozenset()
 
-    def lift(self, insn, state=None) -> List[str]:
-        return [f"push({_op(insn, 0, state)});"]
+    def lift(self, insn, state=None) -> List[HIRNode]:
+        return [ExprStmt(insn.ea, Call("push", [_op_expr(insn, 0, state)]))]
 
 
 class PopHandler(MnemonicHandler):
@@ -161,8 +176,9 @@ class PopHandler(MnemonicHandler):
         r0 = Operand(insn, 0).reg_name()
         return frozenset({r0}) if r0 else frozenset()
 
-    def lift(self, insn, state=None) -> List[str]:
-        return [f"{_op(insn, 0, state)} = pop();"]
+    def lift(self, insn, state=None) -> List[HIRNode]:
+        dst = _op_expr(insn, 0, state)
+        return [Assign(insn.ea, dst, Call("pop", []))]
 
 
 class XchHandler(MnemonicHandler):
@@ -184,8 +200,8 @@ class XchHandler(MnemonicHandler):
         if r1: d.add(r1)
         return frozenset(d & PARAM_REGS)
 
-    def lift(self, insn, state=None) -> List[str]:
-        return [f"swap(A, {_op(insn, 1, state)});"]
+    def lift(self, insn, state=None) -> List[HIRNode]:
+        return [ExprStmt(insn.ea, Call("swap", [Reg("A"), _op_expr(insn, 1, state)]))]
 
 
 class XchdHandler(MnemonicHandler):
@@ -205,5 +221,5 @@ class XchdHandler(MnemonicHandler):
         if r1: d.add(r1)
         return frozenset(d & PARAM_REGS)
 
-    def lift(self, insn, state=None) -> List[str]:
-        return [f"swap_nibble(A, {_op(insn, 1, state)});  /* low nibble only */"]
+    def lift(self, insn, state=None) -> List[HIRNode]:
+        return [ExprStmt(insn.ea, Call("swap_nibble", [Reg("A"), _op_expr(insn, 1, state)]))]

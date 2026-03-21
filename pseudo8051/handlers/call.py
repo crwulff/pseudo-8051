@@ -6,11 +6,13 @@ from typing import List
 
 from pseudo8051.ir.instruction import MnemonicHandler
 from pseudo8051.ir.operand     import Operand
+from pseudo8051.ir.hir         import HIRNode, Assign, ExprStmt, ReturnStmt
+from pseudo8051.ir.expr        import Reg, Name, RegGroup, Call
 from pseudo8051.constants      import PARAM_REGS
 
 
-def _op(insn, n: int, state=None) -> str:
-    return Operand(insn, n).render(state)
+def _op_expr(insn, n: int, state=None):
+    return Operand(insn, n).to_expr(state)
 
 
 class LcallHandler(MnemonicHandler):
@@ -23,24 +25,30 @@ class LcallHandler(MnemonicHandler):
         # Conservative: called function may clobber any tracked register.
         return frozenset(PARAM_REGS)
 
-    def lift(self, insn, state=None) -> List[str]:
+    def lift(self, insn, state=None) -> List[HIRNode]:
         from pseudo8051.prototypes import get_proto, return_expr, param_regs
-        callee = _op(insn, 0, state)
+        callee_expr = _op_expr(insn, 0, state)
+        callee = callee_expr.name if isinstance(callee_expr, Name) else callee_expr.render()
         proto  = get_proto(callee)
+        ea     = insn.ea
         if proto:
-            # Use register pair names as arguments so TypeAwareSimplifier can
-            # substitute typed variable names or inline constants/expressions.
-            # Fall back to the parameter name only when no registers are assigned.
             p_regs = param_regs(proto)
             args = []
             for p, regs in zip(proto.params, p_regs):
-                args.append("".join(regs) if regs else p.name)
-            args_str   = ", ".join(args)
-            call_expr  = f"{callee}({args_str})"
+                if regs:
+                    args.append(Name("".join(regs)))
+                else:
+                    args.append(Name(p.name))
+            call_node = Call(callee, args)
             if proto.return_type != "void" and proto.return_regs:
-                return [f"{return_expr(proto)} = {call_expr};"]
-            return [f"{call_expr};"]
-        return [f"{callee}();"]
+                ret_regs = proto.return_regs
+                if len(ret_regs) == 1:
+                    lhs = Reg(ret_regs[0])
+                else:
+                    lhs = RegGroup(ret_regs)
+                return [Assign(ea, lhs, call_node)]
+            return [ExprStmt(ea, call_node)]
+        return [ExprStmt(ea, Call(callee, []))]
 
 
 class RetHandler(MnemonicHandler):
@@ -50,10 +58,10 @@ class RetHandler(MnemonicHandler):
     def defs(self, insn) -> frozenset:
         return frozenset()
 
-    def lift(self, insn, state=None) -> List[str]:
+    def lift(self, insn, state=None) -> List[HIRNode]:
         # Return expression is filled in by Function._fix_return_statements()
         # once the prototype is known; default to bare return.
-        return ["return;"]
+        return [ReturnStmt(insn.ea, None)]
 
 
 class RetiHandler(MnemonicHandler):
@@ -63,8 +71,9 @@ class RetiHandler(MnemonicHandler):
     def defs(self, insn) -> frozenset:
         return frozenset()
 
-    def lift(self, insn, state=None) -> List[str]:
-        return ["return;  /* interrupt return */"]
+    def lift(self, insn, state=None) -> List[HIRNode]:
+        from pseudo8051.ir.hir import Statement
+        return [Statement(insn.ea, "return;  /* interrupt return */")]
 
 
 class NopHandler(MnemonicHandler):
@@ -74,5 +83,5 @@ class NopHandler(MnemonicHandler):
     def defs(self, insn) -> frozenset:
         return frozenset()
 
-    def lift(self, insn, state=None) -> List[str]:
-        return ["/* nop */"]
+    def lift(self, insn, state=None) -> List[HIRNode]:
+        return []

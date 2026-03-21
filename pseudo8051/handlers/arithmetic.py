@@ -6,11 +6,13 @@ from typing import List
 
 from pseudo8051.ir.instruction import MnemonicHandler
 from pseudo8051.ir.operand     import Operand
+from pseudo8051.ir.hir         import HIRNode, Assign, CompoundAssign, ExprStmt
+from pseudo8051.ir.expr        import Reg, Const, BinOp, UnaryOp, RegGroup, Call
 from pseudo8051.constants      import PARAM_REGS
 
 
-def _op(insn, n: int, state=None) -> str:
-    return Operand(insn, n).render(state)
+def _op_expr(insn, n: int, state=None):
+    return Operand(insn, n).to_expr(state)
 
 
 class AddHandler(MnemonicHandler):
@@ -25,8 +27,8 @@ class AddHandler(MnemonicHandler):
     def defs(self, insn) -> frozenset:
         return frozenset({"A"})
 
-    def lift(self, insn, state=None) -> List[str]:
-        return [f"A += {_op(insn, 1, state)};"]
+    def lift(self, insn, state=None) -> List[HIRNode]:
+        return [CompoundAssign(insn.ea, Reg("A"), "+=", _op_expr(insn, 1, state))]
 
 
 class AddcHandler(MnemonicHandler):
@@ -39,8 +41,9 @@ class AddcHandler(MnemonicHandler):
     def defs(self, insn) -> frozenset:
         return frozenset({"A"})
 
-    def lift(self, insn, state=None) -> List[str]:
-        return [f"A += {_op(insn, 1, state)} + C;"]
+    def lift(self, insn, state=None) -> List[HIRNode]:
+        rhs = BinOp(_op_expr(insn, 1, state), "+", Reg("C"))
+        return [CompoundAssign(insn.ea, Reg("A"), "+=", rhs)]
 
 
 class SubbHandler(MnemonicHandler):
@@ -53,8 +56,9 @@ class SubbHandler(MnemonicHandler):
     def defs(self, insn) -> frozenset:
         return frozenset({"A"})
 
-    def lift(self, insn, state=None) -> List[str]:
-        return [f"A -= {_op(insn, 1, state)} + C;  /* borrow */"]
+    def lift(self, insn, state=None) -> List[HIRNode]:
+        rhs = BinOp(_op_expr(insn, 1, state), "+", Reg("C"))
+        return [CompoundAssign(insn.ea, Reg("A"), "-=", rhs)]
 
 
 class IncHandler(MnemonicHandler):
@@ -66,8 +70,8 @@ class IncHandler(MnemonicHandler):
         r0 = Operand(insn, 0).reg_name()
         return frozenset({r0}) if r0 else frozenset()
 
-    def lift(self, insn, state=None) -> List[str]:
-        return [f"{_op(insn, 0, state)}++;"]
+    def lift(self, insn, state=None) -> List[HIRNode]:
+        return [ExprStmt(insn.ea, UnaryOp("++", _op_expr(insn, 0, state), post=True))]
 
 
 class DecHandler(MnemonicHandler):
@@ -79,8 +83,8 @@ class DecHandler(MnemonicHandler):
         r0 = Operand(insn, 0).reg_name()
         return frozenset({r0}) if r0 else frozenset()
 
-    def lift(self, insn, state=None) -> List[str]:
-        return [f"{_op(insn, 0, state)}--;"]
+    def lift(self, insn, state=None) -> List[HIRNode]:
+        return [ExprStmt(insn.ea, UnaryOp("--", _op_expr(insn, 0, state), post=True))]
 
 
 class MulHandler(MnemonicHandler):
@@ -90,8 +94,10 @@ class MulHandler(MnemonicHandler):
     def defs(self, insn) -> frozenset:
         return frozenset({"A", "B"})
 
-    def lift(self, insn, state=None) -> List[str]:
-        return ["{B, A} = A * B;  /* unsigned 16-bit result */"]
+    def lift(self, insn, state=None) -> List[HIRNode]:
+        lhs = RegGroup(("B", "A"), brace=True)
+        rhs = BinOp(Reg("A"), "*", Reg("B"))
+        return [Assign(insn.ea, lhs, rhs)]
 
 
 class DivHandler(MnemonicHandler):
@@ -101,8 +107,12 @@ class DivHandler(MnemonicHandler):
     def defs(self, insn) -> frozenset:
         return frozenset({"A", "B"})
 
-    def lift(self, insn, state=None) -> List[str]:
-        return ["A = A / B;  B = A % B;"]
+    def lift(self, insn, state=None) -> List[HIRNode]:
+        ea = insn.ea
+        return [
+            Assign(ea, Reg("A"), BinOp(Reg("A"), "/", Reg("B"))),
+            Assign(ea, Reg("B"), BinOp(Reg("A"), "%", Reg("B"))),
+        ]
 
 
 class DaHandler(MnemonicHandler):
@@ -112,5 +122,5 @@ class DaHandler(MnemonicHandler):
     def defs(self, insn) -> frozenset:
         return frozenset({"A"})
 
-    def lift(self, insn, state=None) -> List[str]:
-        return ["A = bcd_adjust(A);"]
+    def lift(self, insn, state=None) -> List[HIRNode]:
+        return [Assign(insn.ea, Reg("A"), Call("bcd_adjust", [Reg("A")]))]

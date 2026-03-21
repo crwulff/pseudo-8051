@@ -6,11 +6,13 @@ from typing import List
 
 from pseudo8051.ir.instruction import MnemonicHandler
 from pseudo8051.ir.operand     import Operand
+from pseudo8051.ir.hir         import HIRNode, Assign, CompoundAssign, ExprStmt
+from pseudo8051.ir.expr        import Reg, Const, UnaryOp, BinOp, Call
 from pseudo8051.constants      import PARAM_REGS
 
 
-def _op(insn, n: int, state=None) -> str:
-    return Operand(insn, n).render(state)
+def _op_expr(insn, n: int, state=None):
+    return Operand(insn, n).to_expr(state)
 
 
 class AnlHandler(MnemonicHandler):
@@ -25,8 +27,8 @@ class AnlHandler(MnemonicHandler):
     def defs(self, insn) -> frozenset:
         return frozenset({"A"})
 
-    def lift(self, insn, state=None) -> List[str]:
-        return [f"{_op(insn, 0, state)} &= {_op(insn, 1, state)};"]
+    def lift(self, insn, state=None) -> List[HIRNode]:
+        return [CompoundAssign(insn.ea, _op_expr(insn, 0, state), "&=", _op_expr(insn, 1, state))]
 
 
 class OrlHandler(MnemonicHandler):
@@ -41,8 +43,8 @@ class OrlHandler(MnemonicHandler):
     def defs(self, insn) -> frozenset:
         return frozenset({"A"})
 
-    def lift(self, insn, state=None) -> List[str]:
-        return [f"{_op(insn, 0, state)} |= {_op(insn, 1, state)};"]
+    def lift(self, insn, state=None) -> List[HIRNode]:
+        return [CompoundAssign(insn.ea, _op_expr(insn, 0, state), "|=", _op_expr(insn, 1, state))]
 
 
 class XrlHandler(MnemonicHandler):
@@ -57,8 +59,8 @@ class XrlHandler(MnemonicHandler):
     def defs(self, insn) -> frozenset:
         return frozenset({"A"})
 
-    def lift(self, insn, state=None) -> List[str]:
-        return [f"{_op(insn, 0, state)} ^= {_op(insn, 1, state)};"]
+    def lift(self, insn, state=None) -> List[HIRNode]:
+        return [CompoundAssign(insn.ea, _op_expr(insn, 0, state), "^=", _op_expr(insn, 1, state))]
 
 
 class ClrHandler(MnemonicHandler):
@@ -69,8 +71,8 @@ class ClrHandler(MnemonicHandler):
         r0 = Operand(insn, 0).reg_name()
         return frozenset({r0}) if r0 else frozenset()
 
-    def lift(self, insn, state=None) -> List[str]:
-        return [f"{_op(insn, 0, state)} = 0;"]
+    def lift(self, insn, state=None) -> List[HIRNode]:
+        return [Assign(insn.ea, _op_expr(insn, 0, state), Const(0))]
 
 
 class SetbHandler(MnemonicHandler):
@@ -80,8 +82,8 @@ class SetbHandler(MnemonicHandler):
     def defs(self, insn) -> frozenset:
         return frozenset()
 
-    def lift(self, insn, state=None) -> List[str]:
-        return [f"{_op(insn, 0, state)} = 1;"]
+    def lift(self, insn, state=None) -> List[HIRNode]:
+        return [Assign(insn.ea, _op_expr(insn, 0, state), Const(1))]
 
 
 class CplHandler(MnemonicHandler):
@@ -93,9 +95,9 @@ class CplHandler(MnemonicHandler):
         r0 = Operand(insn, 0).reg_name()
         return frozenset({r0}) if r0 else frozenset()
 
-    def lift(self, insn, state=None) -> List[str]:
-        dst = _op(insn, 0, state)
-        return [f"{dst} = ~{dst};"]
+    def lift(self, insn, state=None) -> List[HIRNode]:
+        dst = _op_expr(insn, 0, state)
+        return [Assign(insn.ea, dst, UnaryOp("~", dst))]
 
 
 class RlHandler(MnemonicHandler):
@@ -105,8 +107,8 @@ class RlHandler(MnemonicHandler):
     def defs(self, insn) -> frozenset:
         return frozenset({"A"})
 
-    def lift(self, insn, state=None) -> List[str]:
-        return ["A = rol8(A);"]
+    def lift(self, insn, state=None) -> List[HIRNode]:
+        return [Assign(insn.ea, Reg("A"), Call("rol8", [Reg("A")]))]
 
 
 class RlcHandler(MnemonicHandler):
@@ -116,8 +118,8 @@ class RlcHandler(MnemonicHandler):
     def defs(self, insn) -> frozenset:
         return frozenset({"A"})
 
-    def lift(self, insn, state=None) -> List[str]:
-        return ["A = rol9(A, C);  /* through carry */"]
+    def lift(self, insn, state=None) -> List[HIRNode]:
+        return [Assign(insn.ea, Reg("A"), Call("rol9", [Reg("A"), Reg("C")]))]
 
 
 class RrHandler(MnemonicHandler):
@@ -127,8 +129,8 @@ class RrHandler(MnemonicHandler):
     def defs(self, insn) -> frozenset:
         return frozenset({"A"})
 
-    def lift(self, insn, state=None) -> List[str]:
-        return ["A = ror8(A);"]
+    def lift(self, insn, state=None) -> List[HIRNode]:
+        return [Assign(insn.ea, Reg("A"), Call("ror8", [Reg("A")]))]
 
 
 class RrcHandler(MnemonicHandler):
@@ -138,8 +140,8 @@ class RrcHandler(MnemonicHandler):
     def defs(self, insn) -> frozenset:
         return frozenset({"A"})
 
-    def lift(self, insn, state=None) -> List[str]:
-        return ["A = ror9(A, C);  /* through carry */"]
+    def lift(self, insn, state=None) -> List[HIRNode]:
+        return [Assign(insn.ea, Reg("A"), Call("ror9", [Reg("A"), Reg("C")]))]
 
 
 class SwapHandler(MnemonicHandler):
@@ -149,5 +151,9 @@ class SwapHandler(MnemonicHandler):
     def defs(self, insn) -> frozenset:
         return frozenset({"A"})
 
-    def lift(self, insn, state=None) -> List[str]:
-        return ["A = ((A & 0x0F) << 4) | ((A >> 4) & 0x0F);"]
+    def lift(self, insn, state=None) -> List[HIRNode]:
+        # A = ((A & 0x0F) << 4) | ((A >> 4) & 0x0F)
+        from pseudo8051.ir.expr import BinOp, Const
+        lo_nibble = BinOp(BinOp(Reg("A"), "&", Const(0x0F)), "<<", Const(4))
+        hi_nibble = BinOp(BinOp(Reg("A"), ">>", Const(4)), "&", Const(0x0F))
+        return [Assign(insn.ea, Reg("A"), BinOp(lo_nibble, "|", hi_nibble))]

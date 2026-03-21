@@ -3,7 +3,7 @@ passes/typesimplify.py — TypeAwareSimplifier pass.
 
 Builds a register → variable-name map from the function prototype and
 liveness analysis, then walks the HIR applying registered patterns and
-falling back to register-pair text substitution.
+falling back to register-pair substitution.
 
 Individual patterns live in passes/patterns/.  To add a new one, see the
 instructions in passes/patterns/__init__.py.
@@ -12,13 +12,16 @@ instructions in passes/patterns/__init__.py.
 import re
 from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 
-from pseudo8051.ir.hir    import HIRNode, Statement, IfNode, WhileNode, ForNode
+from pseudo8051.ir.hir    import (HIRNode, Statement, Assign, CompoundAssign,
+                                   ExprStmt, ReturnStmt, IfNode, WhileNode, ForNode)
 from pseudo8051.passes    import OptimizationPass
 from pseudo8051.constants import dbg
 
 from pseudo8051.passes.patterns         import _PATTERNS
 from pseudo8051.passes.patterns._utils  import (
     VarInfo, _replace_pairs, _replace_xram_syms, _replace_single_regs,
+    _replace_pairs_in_node, _replace_single_regs_in_node,
+    _subst_all_expr, _subst_xram_in_expr,
     _type_bytes, _byte_names,
 )
 
@@ -50,12 +53,7 @@ def _assign_regs(params) -> List[Tuple[str, ...]]:
 
 
 def _assign_regs_from_liveness(params, live_in: frozenset) -> List[Tuple[str, ...]]:
-    """
-    Infer parameter register assignment from liveness analysis.
-
-    Succeeds only when the live Rn count exactly matches total param bytes
-    and each param's registers form a contiguous ascending sequence.
-    """
+    """Infer parameter register assignment from liveness analysis."""
     empty = [() for _ in params]
     live_rn = sorted([r for r in _REG_POOL if r in live_in],
                      key=lambda r: int(r[1:]))
@@ -84,14 +82,7 @@ def _assign_regs_from_liveness(params, live_in: frozenset) -> List[Tuple[str, ..
 
 def _build_reg_map(proto: "FuncProto",
                    live_in: frozenset = frozenset()) -> Dict[str, VarInfo]:
-    """
-    Map register names → VarInfo for prototype params and return registers.
-
-    Assignment priority:
-      1. Explicit Param.regs (manual PROTOTYPES override)
-      2. Liveness inference (handles non-standard calling conventions)
-      3. Standard 8051 convention (R7 downward)
-    """
+    """Map register names → VarInfo for prototype params and return registers."""
     params   = proto.params
     assigned: List[Tuple[str, ...]] = [p.regs if p.regs else () for p in params]
 
@@ -143,12 +134,25 @@ def _build_reg_map(proto: "FuncProto",
 # ── Callee register-map augmentation ─────────────────────────────────────────
 
 def _collect_call_names(hir: List[HIRNode]) -> set:
-    """Recursively collect all called function names from HIR text."""
+    """Recursively collect all called function names from HIR."""
+    from pseudo8051.ir.expr import Call
     names: set = set()
     for node in hir:
         if isinstance(node, Statement):
             for m in _RE_CALL_NAME.finditer(node.text):
                 names.add(m.group(1))
+        elif isinstance(node, (Assign, ExprStmt, ReturnStmt)):
+            # Walk the expr for Call nodes
+            expr = None
+            if isinstance(node, Assign):
+                expr = node.rhs
+            elif isinstance(node, ExprStmt):
+                expr = node.expr
+            elif isinstance(node, ReturnStmt) and node.value is not None:
+                expr = node.value
+            if expr is not None:
+                from pseudo8051.ir.expr import Call
+                _collect_calls_from_expr(expr, names)
         elif isinstance(node, IfNode):
             names.update(_collect_call_names(node.then_nodes))
             names.update(_collect_call_names(node.else_nodes))
@@ -157,21 +161,26 @@ def _collect_call_names(hir: List[HIRNode]) -> set:
     return names
 
 
+def _collect_calls_from_expr(expr, names: set) -> None:
+    """Walk an Expr tree, adding any Call.func_name to names."""
+    from pseudo8051.ir.expr import (Expr, Call, BinOp, UnaryOp,
+                                     XRAMRef, IRAMRef, CROMRef)
+    if isinstance(expr, Call):
+        names.add(expr.func_name)
+        for a in expr.args:
+            _collect_calls_from_expr(a, names)
+    elif isinstance(expr, BinOp):
+        _collect_calls_from_expr(expr.lhs, names)
+        _collect_calls_from_expr(expr.rhs, names)
+    elif isinstance(expr, UnaryOp):
+        _collect_calls_from_expr(expr.operand, names)
+    elif isinstance(expr, (XRAMRef, IRAMRef, CROMRef)):
+        _collect_calls_from_expr(expr.inner, names)
+
+
 def _augment_with_local_vars(func_ea: int,
                               reg_map: Dict[str, VarInfo]) -> Dict[str, VarInfo]:
-    """
-    Add VarInfo entries for XRAM local variables declared for this function
-    (stored in the IDA netnode via set_local()).
-
-    For each local:
-      • A full-variable entry keyed by the base symbol (e.g. 'EXT_DC8A').
-        Carries xram_sym so _replace_pairs skips it; consumed by
-        XRAMLocalWritePattern / XRAMGroupReadPattern.
-      • For multi-byte locals, per-byte entries keyed as '_byte_<sym>'
-        (e.g. '_byte_EXT_DC8B') with is_byte_field=True.
-        These allow XRAMLocalWritePattern to collapse individual byte writes
-        and _replace_xram_syms to substitute individual byte reads.
-    """
+    """Add VarInfo entries for XRAM local variables declared for this function."""
     from pseudo8051.locals    import get_locals
     from pseudo8051.constants import resolve_ext_addr
     locals_list = get_locals(func_ea)
@@ -199,15 +208,7 @@ def _augment_with_local_vars(func_ea: int,
 
 def _augment_with_callee_regs(hir: List[HIRNode],
                                reg_map: Dict[str, VarInfo]) -> Dict[str, VarInfo]:
-    """
-    Scan the HIR for function calls, look up each callee's prototype, and add
-    their parameter register mappings to reg_map.
-
-    Existing reg_map entries (from the caller's own prototype) take priority.
-    This enables backward type propagation: patterns like ConstGroupPattern and
-    XRAMGroupReadPattern can recognise and collapse argument-loading sequences
-    even when the caller function itself has no prototype.
-    """
+    """Scan the HIR for function calls and add callee parameter register mappings."""
     from pseudo8051.prototypes import get_proto
     result = dict(reg_map)
     for name in _collect_call_names(hir):
@@ -226,12 +227,17 @@ def _augment_with_callee_regs(hir: List[HIRNode],
 _RE_DPTR_SETUP = re.compile(r'^DPTR = (.+?);')
 
 
-def _subst(text: str, reg_map: Dict[str, VarInfo]) -> str:
-    """Apply XRAM-symbol, register-pair, and single-reg-param substitutions."""
+def _subst_text(text: str, reg_map: Dict[str, VarInfo]) -> str:
+    """Apply XRAM-symbol, register-pair, and single-reg-param substitutions to text."""
     text = _replace_xram_syms(text, reg_map)
     text = _replace_pairs(text, reg_map)
     text = _replace_single_regs(text, reg_map)
     return text
+
+
+def _subst_expr(expr, reg_map: Dict[str, VarInfo]):
+    """Apply all substitutions to an Expr node."""
+    return _subst_all_expr(expr, reg_map)
 
 
 def _transform_default(node: HIRNode,
@@ -239,10 +245,9 @@ def _transform_default(node: HIRNode,
     """
     Fallback for nodes not consumed by any pattern.
 
-    • Drops ``DPTR = sym;`` lines when sym is a declared XRAM local (the
-      DPTR setup is implicit once the XRAM reference is named).
-    • Applies XRAM-symbol substitution then register-pair substitution to
-      Statement text, or recurses into the children of structured nodes.
+    • Drops ``DPTR = sym;`` lines when sym is a declared XRAM local.
+    • Applies substitutions to Statement text or Expr nodes.
+    • Recurses into children of structured nodes.
 
     Returns None to signal that the node should be dropped.
     """
@@ -250,32 +255,91 @@ def _transform_default(node: HIRNode,
         m = _RE_DPTR_SETUP.match(node.text)
         if m:
             sym = m.group(1).strip()
-            # Drop the setup line if sym is any declared XRAM local symbol
             if any(v.xram_sym == sym for v in reg_map.values()
                    if isinstance(v, VarInfo) and v.xram_sym):
                 return None
-        new_text = _subst(node.text, reg_map)
+        new_text = _subst_text(node.text, reg_map)
         return Statement(node.ea, new_text) if new_text != node.text else node
 
+    if isinstance(node, Assign):
+        # Check for DPTR = sym drop
+        from pseudo8051.ir.expr import Reg as RegExpr, Name as NameExpr
+        if isinstance(node.lhs, RegExpr) and node.lhs.name == "DPTR":
+            sym = node.rhs.render()
+            if any(v.xram_sym == sym for v in reg_map.values()
+                   if isinstance(v, VarInfo) and v.xram_sym):
+                return None
+        new_rhs = _subst_expr(node.rhs, reg_map)
+        if new_rhs is not node.rhs:
+            return Assign(node.ea, node.lhs, new_rhs)
+        return node
+
+    if isinstance(node, CompoundAssign):
+        new_rhs = _subst_expr(node.rhs, reg_map)
+        if new_rhs is not node.rhs:
+            return CompoundAssign(node.ea, node.lhs, node.op, new_rhs)
+        return node
+
+    if isinstance(node, ExprStmt):
+        new_expr = _subst_expr(node.expr, reg_map)
+        if new_expr is not node.expr:
+            return ExprStmt(node.ea, new_expr)
+        return node
+
+    if isinstance(node, ReturnStmt):
+        if node.value is not None:
+            new_val = _subst_expr(node.value, reg_map)
+            if new_val is not node.value:
+                return ReturnStmt(node.ea, new_val)
+        return node
+
     if isinstance(node, IfNode):
+        cond = node.condition
+        if isinstance(cond, str):
+            new_cond = _subst_text(cond, reg_map)
+        else:
+            new_cond = _subst_expr(cond, reg_map)
         return IfNode(
             ea         = node.ea,
-            condition  = _subst(node.condition, reg_map),
+            condition  = new_cond,
             then_nodes = _simplify(node.then_nodes, reg_map),
             else_nodes = _simplify(node.else_nodes, reg_map),
         )
     if isinstance(node, WhileNode):
+        cond = node.condition
+        if isinstance(cond, str):
+            new_cond = _subst_text(cond, reg_map)
+        else:
+            new_cond = _subst_expr(cond, reg_map)
         return WhileNode(
             ea         = node.ea,
-            condition  = _subst(node.condition, reg_map),
+            condition  = new_cond,
             body_nodes = _simplify(node.body_nodes, reg_map),
         )
     if isinstance(node, ForNode):
+        init = node.init
+        cond = node.condition
+        update = node.update
+        if isinstance(init, str):
+            new_init = _subst_text(init, reg_map)
+        elif isinstance(init, Assign):
+            new_rhs = _subst_expr(init.rhs, reg_map)
+            new_init = Assign(init.ea, init.lhs, new_rhs) if new_rhs is not init.rhs else init
+        else:
+            new_init = init
+        if isinstance(cond, str):
+            new_cond = _subst_text(cond, reg_map)
+        else:
+            new_cond = _subst_expr(cond, reg_map)
+        if isinstance(update, str):
+            new_update = _subst_text(update, reg_map)
+        else:
+            new_update = _subst_expr(update, reg_map)
         return ForNode(
             ea         = node.ea,
-            init       = _subst(node.init,      reg_map),
-            condition  = _subst(node.condition,  reg_map),
-            update     = _subst(node.update,     reg_map),
+            init       = new_init,
+            condition  = new_cond,
+            update     = new_update,
             body_nodes = _simplify(node.body_nodes, reg_map),
         )
     return node
@@ -284,14 +348,7 @@ def _transform_default(node: HIRNode,
 # ── Core simplifier walk ──────────────────────────────────────────────────────
 
 def _simplify_once(nodes: List[HIRNode], reg_map: Dict[str, VarInfo]) -> List[HIRNode]:
-    """
-    Apply one round of pattern matching to each node in ``nodes``.
-
-    Used to post-process replacement lists produced by fold patterns
-    (ConstGroupPattern, XRAMGroupReadPattern) so that RetvalPattern can rename
-    calls that those patterns absorbed into their output.  Only one round is
-    applied to avoid infinite recursion.
-    """
+    """Apply one round of pattern matching to each node."""
     out: List[HIRNode] = []
     for node in nodes:
         for pat in _PATTERNS:
@@ -306,13 +363,8 @@ def _simplify_once(nodes: List[HIRNode], reg_map: Dict[str, VarInfo]) -> List[HI
 
 def _simplify(nodes: List[HIRNode], reg_map: Dict[str, VarInfo]) -> List[HIRNode]:
     """
-    Walk `nodes`, trying each registered Pattern in turn.  Falls back to
-    _transform_default (pair substitution + structural recursion) for nodes
-    not consumed by any pattern.
-
-    After any pattern fires, its replacement list is passed through
-    _simplify_once so that secondary patterns (e.g. RetvalPattern on a call
-    statement that a fold pattern absorbed) get a chance to run.
+    Walk nodes, trying each registered Pattern in turn.  Falls back to
+    _transform_default for nodes not consumed by any pattern.
     """
     out: List[HIRNode] = []
     i = 0
@@ -337,9 +389,6 @@ class TypeAwareSimplifier(OptimizationPass):
     """
     Replace register-level expressions with typed variable names and collapse
     common multi-byte patterns via the registered Pattern list.
-
-    Runs on func.hir after structural passes.
-    No-ops if the function has no known prototype.
     """
 
     def run(self, func: "Function") -> None:
@@ -357,12 +406,7 @@ class TypeAwareSimplifier(OptimizationPass):
             dbg("typesimp", f"{func.name}: no caller proto, "
                             "scanning callee prototypes for register mappings")
 
-        # Add XRAM local variable declarations for this function.
         reg_map = _augment_with_local_vars(func.ea, reg_map)
-
-        # Add register mappings from any callee prototypes found in the HIR.
-        # This propagates callee parameter types backward into the argument-
-        # loading sequences that precede each call.
         reg_map = _augment_with_callee_regs(func.hir, reg_map)
 
         if not reg_map:
@@ -374,7 +418,6 @@ class TypeAwareSimplifier(OptimizationPass):
         func.hir = _simplify(func.hir, reg_map)
 
         # Prepend C-style declarations for any XRAM local variables.
-        # Only emit for full-variable entries, not per-byte fields.
         seen: set = set()
         local_decls = []
         for vinfo in reg_map.values():

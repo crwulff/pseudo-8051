@@ -1,42 +1,64 @@
 """
 passes/patterns/const_group.py — ConstGroupPattern.
 
-Collapses a byte-by-byte constant load into a multi-byte register group:
-    A = 0x00;  R4 = A;  R5 = A;  R6 = 0x5d;  R7 = 0xc0;
-
-into a single typed assignment:
-    int32_t retval = 0x00005dc0;
-
-When the load is immediately followed by a return statement that references
-the register pair, the constant is folded directly into that statement:
-    return div32(R4R5R6R7, R0R1R2R3);  →  return div32(0x00005dc0, divisor);
+Collapses a byte-by-byte constant load into a multi-byte register group.
+Handles both Assign (expression-tree) and legacy Statement nodes.
 """
 
 import re
 from typing import Dict, List, Optional, Tuple
 
-from pseudo8051.ir.hir import HIRNode, Statement
+from pseudo8051.ir.hir import HIRNode, Statement, Assign, ReturnStmt, ExprStmt
+from pseudo8051.ir.expr import Reg, Const, Name, RegGroup
 from pseudo8051.constants import dbg
 from pseudo8051.passes.patterns.base   import Pattern, Match, Simplify
 from pseudo8051.passes.patterns._utils import (
     VarInfo, _replace_pairs, _fold_into_stmt, _parse_int, _const_str, _type_bytes,
+    _walk_expr, _fold_into_node,
 )
 
 _RE_ASSIGN_IMM = re.compile(r"^(\w+) = (0x[0-9a-fA-F]+|\d+);$")
 _RE_ASSIGN_REG = re.compile(r"^(\w+) = (\w+);$")
 
 
+def _node_as_assign_imm(node: HIRNode):
+    """
+    If node assigns an immediate to a register (Assign or Statement), return
+    (dst_name, int_value).  Otherwise return None.
+    """
+    if isinstance(node, Assign):
+        lhs = node.lhs
+        rhs = node.rhs
+        if isinstance(lhs, Reg) and isinstance(rhs, Const):
+            return (lhs.name, rhs.value)
+        return None
+    if isinstance(node, Statement):
+        m = _RE_ASSIGN_IMM.match(node.text)
+        if m:
+            return (m.group(1), _parse_int(m.group(2)))
+    return None
+
+
+def _node_as_assign_reg(node: HIRNode):
+    """Return (dst_name, src_name) if node is a simple reg=reg assignment."""
+    if isinstance(node, Assign):
+        lhs = node.lhs
+        rhs = node.rhs
+        if isinstance(lhs, Reg) and isinstance(rhs, Reg):
+            return (lhs.name, rhs.name)
+        return None
+    if isinstance(node, Statement):
+        m = _RE_ASSIGN_REG.match(node.text)
+        if m:
+            return (m.group(1), m.group(2))
+    return None
+
+
 def _scan_const_group(nodes: List[HIRNode], start: int,
                       vinfo: VarInfo) -> Optional[Tuple[int, int]]:
     """
     Scan nodes[start:] for a byte-by-byte constant load into all of vinfo's
-    registers.  Understands:
-      Rn = literal;   — direct constant load
-      A  = literal;   — A used as a zero/constant carrier
-      Rn = A;         — forwarding A value to a register
-
-    Returns (combined_value, end_index) on success, None on failure.
-    end_index is the index of the first node after the matched sequence.
+    registers.  Returns (combined_value, end_index) on success, None on failure.
     """
     if len(vinfo.regs) < 2:
         return None
@@ -49,29 +71,27 @@ def _scan_const_group(nodes: List[HIRNode], start: int,
 
     while i < max_i and len(reg_values) < len(regs_needed):
         node = nodes[i]
-        if not isinstance(node, Statement):
-            break
 
-        m_imm = _RE_ASSIGN_IMM.match(node.text)
-        if m_imm:
-            dst, val = m_imm.group(1), _parse_int(m_imm.group(2))
+        imm_result = _node_as_assign_imm(node)
+        if imm_result is not None:
+            dst, val = imm_result
             if dst == "A":
                 a_value = val; i += 1; continue
             if dst in regs_needed and dst not in reg_values:
                 reg_values[dst] = val; i += 1; continue
-            break   # constant load to an unrelated register — stop
+            break
 
-        m_reg = _RE_ASSIGN_REG.match(node.text)
-        if m_reg:
-            dst, src = m_reg.group(1), m_reg.group(2)
+        reg_result = _node_as_assign_reg(node)
+        if reg_result is not None:
+            dst, src = reg_result
             if dst in regs_needed and src == "A" and a_value is not None \
                     and dst not in reg_values:
                 reg_values[dst] = a_value; i += 1; continue
             if dst == "A":
-                a_value = None   # A overwritten with unknown value
-            break   # unrecognised register move — stop
+                a_value = None
+            break
 
-        break   # any other statement — stop
+        break
 
     if regs_needed != set(reg_values.keys()):
         return None
@@ -93,7 +113,6 @@ class ConstGroupPattern(Pattern):
               i:        int,
               reg_map:  Dict[str, VarInfo],
               simplify: Simplify) -> Optional[Match]:
-        # Try largest register groups first to avoid a 2-byte match masking a 4-byte one
         candidates = sorted(
             {v for v in reg_map.values() if isinstance(v, VarInfo) and len(v.regs) >= 2},
             key=lambda v: len(v.regs), reverse=True,
@@ -104,24 +123,41 @@ class ConstGroupPattern(Pattern):
                 continue
             value, end_i = result
             const_s = _const_str(value, vinfo.type)
+            # Use Name(const_s) so type-padded format is preserved in both
+            # structural and text fold paths.
+            const_expr = Name(const_s)
             dbg("typesimp", f"  const-load: {vinfo.name} = {const_s}")
 
-            # Try to fold the constant directly into the immediately following
-            # statement when it references the pair name (handles return statements,
-            # assignment RHS, and standalone calls).
+            # Try to fold the constant into the immediately following statement
             next_node = nodes[end_i] if end_i < len(nodes) else None
-            next_text = next_node.text if isinstance(next_node, Statement) else ""
-            pair_in_next = (vinfo.pair_name in next_text or
-                            (vinfo.name != vinfo.pair_name and
-                             re.search(r"\b" + re.escape(vinfo.name) + r"\b", next_text)))
-            if pair_in_next:
-                folded = _fold_into_stmt(next_text, vinfo.pair_name, const_s, reg_map)
-                if folded is None and vinfo.name != vinfo.pair_name:
-                    folded = _fold_into_stmt(next_text, vinfo.name, const_s, reg_map)
-                if folded is not None:
-                    return ([Statement(nodes[i].ea, folded)], end_i + 1)
+            if next_node is not None:
+                # Try expr-tree fold first
+                pair_expr = Name(vinfo.pair_name) if vinfo.pair_name else None
+                name_expr = Name(vinfo.name) if vinfo.name != vinfo.pair_name else None
 
-            # Otherwise declare with type (synthetic 'retval' gets its type shown)
+                folded_node = None
+                if pair_expr is not None:
+                    folded_node = _fold_into_node(next_node, pair_expr, const_expr, reg_map)
+                if folded_node is None and name_expr is not None:
+                    folded_node = _fold_into_node(next_node, name_expr, const_expr, reg_map)
+
+                # Legacy text fold fallback
+                if folded_node is None and isinstance(next_node, Statement):
+                    next_text = next_node.text
+                    pair_in_next = (vinfo.pair_name in next_text or
+                                    (vinfo.name != vinfo.pair_name and
+                                     re.search(r"\b" + re.escape(vinfo.name) + r"\b", next_text)))
+                    if pair_in_next:
+                        folded = _fold_into_stmt(next_text, vinfo.pair_name, const_s, reg_map)
+                        if folded is None and vinfo.name != vinfo.pair_name:
+                            folded = _fold_into_stmt(next_text, vinfo.name, const_s, reg_map)
+                        if folded is not None:
+                            folded_node = Statement(nodes[i].ea, folded)
+
+                if folded_node is not None:
+                    return ([folded_node], end_i + 1)
+
+            # Declare with type
             return ([Statement(nodes[i].ea,
                                f"{vinfo.type} {vinfo.name} = {const_s};")], end_i)
         return None

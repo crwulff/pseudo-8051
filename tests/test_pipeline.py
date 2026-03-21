@@ -7,13 +7,19 @@ called directly; no run_all_passes() (which needs full IDA context).
 
 import pytest
 
-from pseudo8051.ir.hir import Statement, ForNode, WhileNode, IfNode
+from pseudo8051.ir.hir  import Statement, ForNode, WhileNode, IfNode
+from pseudo8051.ir.expr import Reg, Const, BinOp, UnaryOp
 from pseudo8051.passes.loops  import LoopStructurer
 from pseudo8051.passes.ifelse import IfElseStructurer
 from pseudo8051.passes.typesimplify import TypeAwareSimplifier
 from pseudo8051.prototypes import PROTOTYPES, FuncProto, Param
 
 from .helpers import FakeBlock, FakeFunction, connect, make_single_block_func
+
+
+def _cond_str(c) -> str:
+    """Render a condition that may be a str or Expr."""
+    return c.render() if hasattr(c, "render") else c
 
 
 # ── Fixture: clean PROTOTYPES between tests ───────────────────────────────────
@@ -63,9 +69,9 @@ class TestLoopStructurer:
         assert len(header.hir) == 1
         fn = header.hir[0]
         assert isinstance(fn, ForNode)
-        assert fn.init      == "R7 = 5"
-        assert fn.condition == "R7"
-        assert fn.update    == "--R7"
+        assert fn.init == "R7 = 5"
+        assert _cond_str(fn.condition) == "R7"
+        assert _cond_str(fn.update)    == "--R7"
         assert len(fn.body_nodes) == 1
         assert isinstance(fn.body_nodes[0], Statement)
         assert fn.body_nodes[0].text == "XRAM[S] = A;"
@@ -91,7 +97,7 @@ class TestLoopStructurer:
         assert len(header.hir) == 1
         wn = header.hir[0]
         assert isinstance(wn, WhileNode)
-        assert wn.condition == "--R7 != 0"
+        assert _cond_str(wn.condition) == "--R7 != 0"
 
     def test_while_self_loop(self):
         """
