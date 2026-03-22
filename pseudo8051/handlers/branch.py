@@ -73,8 +73,8 @@ class SjmpHandler(MnemonicHandler):
                 call_node = Call(tail, args)
                 if proto.return_type != "void":
                     return [ReturnStmt(insn.ea, call_node)]
-                return [ExprStmt(insn.ea, call_node)]
-            return [ExprStmt(insn.ea, Call(tail, []))]
+                return [ExprStmt(insn.ea, call_node), ReturnStmt(insn.ea, None)]
+            return [ExprStmt(insn.ea, Call(tail, [])), ReturnStmt(insn.ea, None)]
         label = _label_str(insn, 0, state)
         return [GotoStatement(insn.ea, label)]
 
