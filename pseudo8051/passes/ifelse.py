@@ -94,7 +94,7 @@ def _is_dead_end(block: BasicBlock, branch_ea: int) -> bool:
     # A dead-end arm reaches only itself (and possibly other absorbed blocks
     # that also have no forward exit).
     for ea in reach:
-        blk = block._func._block_map.get(ea)
+        blk = block._block_map.get(ea)
         if blk is None:
             continue
         for succ in blk.successors:

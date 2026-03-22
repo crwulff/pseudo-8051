@@ -239,6 +239,73 @@ class TestIfElseStructurer:
         assert node.then_nodes[0].text == "R7 = 0;"
         assert node.else_nodes == []
 
+    def test_dead_end_false_arm(self):
+        """
+        False arm is a terminal block (no successors) — the 'if-with-exit' pattern.
+        _is_dead_end(false_block) == True  →  merge_ea = true_block.start_ea,
+        arms swapped, condition inverted.
+
+        Topology:
+            A (0x1000): "if (A != 0) goto label_b;" → [B (true), C (false)]
+            C (0x1010): "return;"                    (dead-end, no successors)
+            B (0x1020): "R7 = 1;"                   (continuation, label_b)
+        """
+        A = FakeBlock(0x1000, hir=[Statement(0x1000, "if (A != 0) goto label_b;")])
+        C = FakeBlock(0x1010, hir=[Statement(0x1010, "return;")])
+        B = FakeBlock(0x1020, hir=[Statement(0x1020, "R7 = 1;")], label="label_b")
+
+        connect(A, B)   # true arm
+        connect(A, C)   # false arm (dead-end)
+        # C has no successors
+
+        func = FakeFunction("dead_end_f", [A, C, B])
+        IfElseStructurer().run(func)
+
+        node = A.hir[0]
+        assert isinstance(node, IfNode)
+        # Condition inverted because then was empty (true arm = merge = empty)
+        assert "A != 0" in (node.condition if isinstance(node.condition, str)
+                            else node.condition.render())
+        assert len(node.then_nodes) == 1
+        assert node.then_nodes[0].text == "return;"
+        assert node.else_nodes == []
+        assert C._absorbed
+
+    def test_dead_end_false_arm_multiblock(self):
+        """
+        False arm spans two blocks before terminating — multi-block dead-end path.
+        _is_dead_end(false_block) == True  →  merge_ea = true_block.start_ea,
+        both dead-end blocks absorbed into then_nodes after arm swap.
+
+        Topology:
+            A (0x1000): "if (A != 0) goto label_b;" → [B (true), C (false)]
+            C (0x1010): "R6 = 0;"                   → [D]
+            D (0x1020): "return;"                    (no successors)
+            B (0x1030): "R7 = 1;"                   (continuation, label_b)
+        """
+        A = FakeBlock(0x1000, hir=[Statement(0x1000, "if (A != 0) goto label_b;")])
+        C = FakeBlock(0x1010, hir=[Statement(0x1010, "R6 = 0;")])
+        D = FakeBlock(0x1020, hir=[Statement(0x1020, "return;")])
+        B = FakeBlock(0x1030, hir=[Statement(0x1030, "R7 = 1;")], label="label_b")
+
+        connect(A, B)   # true arm
+        connect(A, C)   # false arm (dead-end path: C → D, D has no successors)
+        connect(C, D)
+
+        func = FakeFunction("dead_end_multi_f", [A, C, D, B])
+        IfElseStructurer().run(func)
+
+        node = A.hir[0]
+        assert isinstance(node, IfNode)
+        assert "A != 0" in (node.condition if isinstance(node.condition, str)
+                            else node.condition.render())
+        texts = [n.text for n in node.then_nodes]
+        assert "R6 = 0;" in texts
+        assert "return;" in texts
+        assert node.else_nodes == []
+        assert C._absorbed
+        assert D._absorbed
+
 
 # ── End-to-end TypeAwareSimplifier pipeline test ─────────────────────────────
 

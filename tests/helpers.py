@@ -25,7 +25,7 @@ class FakeBlock:
         self._absorbed      = False
         self._preds: List[FakeBlock] = []
         self._succs: List[FakeBlock] = []
-        self._func          = None   # set by FakeFunction.__init__
+        self._block_map: dict = {}    # set by FakeFunction.__init__
 
     @property
     def predecessors(self) -> List[FakeBlock]:
@@ -47,7 +47,7 @@ class FakeFunction:
         self._block_map = {b.start_ea: b for b in blocks}
         self.hir        = list(hir or [])
         for b in blocks:
-            b._func = self
+            b._block_map = self._block_map
 
     @property
     def blocks(self) -> List[FakeBlock]:
