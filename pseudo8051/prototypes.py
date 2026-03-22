@@ -179,20 +179,22 @@ def _regs_from_argloc(aloc, type_size: int) -> Tuple[str, ...]:
     Extract register name(s) from an IDA argloc_t / retloc_t.
     For ALOC_REG1 the register number encodes a base register; consecutive
     registers are inferred from the type size (1→1 reg, 2→2, 4→4).
+    For ALOC_REG2 (explicit pair like R2:R1 in __usercall), both register
+    numbers are read directly.
     Returns () if the location is not a register location.
     """
     try:
         import ida_typeinf as _idt
         import ida_idp
         atype = aloc.atype()
+        regnames = ida_idp.ph.regnames
+
         if atype == _idt.ALOC_REG1:
             rn = aloc.reg1()
-            regnames = ida_idp.ph.regnames
             if 0 <= rn < len(regnames):
                 base = regnames[rn].upper()
                 # For multi-byte types, expand consecutive registers
                 if type_size > 1:
-                    # base should be e.g. "R4"; extract index
                     bm = re.match(r'^R(\d)$', base)
                     if bm:
                         idx = int(bm.group(1))
@@ -201,6 +203,27 @@ def _regs_from_argloc(aloc, type_size: int) -> Tuple[str, ...]:
                         if len(regs) == type_size:
                             return regs
                 return _regs_from_loc_str(base)
+
+        # ALOC_REG2 — explicit register pair, e.g. R2:R1 in __usercall
+        aloc_reg2 = getattr(_idt, 'ALOC_REG2', None)
+        if aloc_reg2 is not None and atype == aloc_reg2:
+            rn1 = aloc.reg1()
+            # Try multiple accessor names for the second register
+            rn2 = -1
+            for attr in ('reg2', 'regoff'):
+                try:
+                    rn2 = int(getattr(aloc, attr)())
+                    break
+                except Exception:
+                    pass
+            parts = []
+            for rn in [rn1, rn2]:
+                if 0 <= rn < len(regnames):
+                    name = regnames[rn].upper()
+                    if name in PARAM_REGS or name in ("A", "C", "DPTR"):
+                        parts.append(name)
+            if parts:
+                return tuple(parts)
     except Exception:
         pass
     return ()
@@ -321,6 +344,26 @@ def _proto_from_ida(name: str) -> Optional["FuncProto"]:
                              f"params=[{', '.join(f'{p.type} {p.name}' for p in params)}]")
     except Exception as e:
         dbg("proto", f"{name}: tinfo API error — {e}")
+
+    # ── Supplement missing regs from idc.get_type() string ───────────────
+    # If the tinfo path built a proto but some params have regs=() (e.g. because
+    # ALOC_REG2 isn't decoded), try to fill them in from the type string.
+    if proto and any(not p.regs for p in proto.params):
+        try:
+            type_str = idc.get_type(ea)
+            if type_str:
+                str_proto = _parse_type_string(type_str, name)
+                if str_proto and len(str_proto.params) == len(proto.params):
+                    new_params = list(proto.params)
+                    for i, (tp, sp) in enumerate(zip(proto.params, str_proto.params)):
+                        if not tp.regs and sp.regs:
+                            new_params[i] = Param(tp.name, tp.type, sp.regs)
+                            dbg("proto", f"{name}: arg{i} regs supplemented "
+                                        f"from string: {sp.regs}")
+                    proto = FuncProto(proto.return_type, proto.return_regs,
+                                      new_params)
+        except Exception as e:
+            dbg("proto", f"{name}: supplement error — {e}")
 
     if proto:
         return proto
