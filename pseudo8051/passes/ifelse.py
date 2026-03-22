@@ -203,10 +203,15 @@ def _collect_goto_targets(nodes: List[HIRNode]) -> set:
         elif isinstance(node, (WhileNode, ForNode)):
             targets |= _collect_goto_targets(node.body_nodes)
         elif isinstance(node, SwitchNode):
-            for _, label in node.cases:
-                targets.add(label)
+            for _, body in node.cases:
+                if isinstance(body, str):
+                    targets.add(body)
+                else:
+                    targets |= _collect_goto_targets(body)
             if node.default_label is not None:
                 targets.add(node.default_label)
+            if node.default_body is not None:
+                targets |= _collect_goto_targets(node.default_body)
     return targets
 
 

@@ -7,11 +7,11 @@ called directly; no run_all_passes() (which needs full IDA context).
 
 import pytest
 
-from pseudo8051.ir.hir  import Statement, ForNode, WhileNode, IfNode, IfGoto, Assign, CompoundAssign, SwitchNode, ExprStmt, Label
+from pseudo8051.ir.hir  import Statement, ForNode, WhileNode, IfNode, IfGoto, Assign, CompoundAssign, SwitchNode, ExprStmt, Label, GotoStatement
 from pseudo8051.ir.expr import Reg, Const, BinOp, UnaryOp, Name, XRAMRef
 from pseudo8051.passes.loops  import LoopStructurer
 from pseudo8051.passes.ifelse import IfElseStructurer
-from pseudo8051.passes.switch import SwitchStructurer
+from pseudo8051.passes.switch import SwitchStructurer, SwitchBodyAbsorber
 from pseudo8051.passes.typesimplify import TypeAwareSimplifier
 from pseudo8051.prototypes import PROTOTYPES, FuncProto, Param
 
@@ -1008,3 +1008,194 @@ class TestMultiByteIncDecPattern:
         assert len(replacement) == 1
         assert isinstance(replacement[0], Statement)
         assert replacement[0].text == "var32++;"
+
+
+# ── SwitchBodyAbsorber tests ──────────────────────────────────────────────────
+
+class TestSwitchBodyAbsorber:
+    """Tests for SwitchBodyAbsorber — inline case bodies into SwitchNode."""
+
+    def test_basic_absorption(self):
+        """
+        2-case switch + default: case bodies inlined, gotos replaced with break.
+
+        Topology:
+            b0 (0x1000): A=R7; A+=0xFE(-2); jz label_c2 → [b_c2, b1]
+            b1 (0x1010): A+=0xFE(-2); jnz label_def → [b_def, b_fall]
+            b_c2  (0x2000): label_c2: R7=2; goto label_merge  → [merge]
+            b_fall(0x2010): label_fall: R7=4; goto label_merge → [merge]
+            b_def (0x2020): label_def: R7=99; goto label_merge → [merge]
+            merge (0x2030): label_merge: return;
+        """
+        merge  = FakeBlock(0x2030, hir=[
+            Label(0x2030, "label_merge"),
+            Statement(0x2030, "return;"),
+        ], label="label_merge")
+        b_c2   = FakeBlock(0x2000, hir=[
+            Label(0x2000, "label_c2"),
+            Statement(0x2000, "R7 = 2;"),
+            GotoStatement(0x2002, "label_merge"),
+        ], label="label_c2")
+        b_fall = FakeBlock(0x2010, hir=[
+            Label(0x2010, "label_fall"),
+            Statement(0x2010, "R7 = 4;"),
+            GotoStatement(0x2012, "label_merge"),
+        ], label="label_fall")
+        b_def  = FakeBlock(0x2020, hir=[
+            Label(0x2020, "label_def"),
+            Statement(0x2020, "R7 = 99;"),
+            GotoStatement(0x2022, "label_merge"),
+        ], label="label_def")
+        b1     = FakeBlock(0x1010, hir=[
+            CompoundAssign(0x1010, Reg("A"), "+=", Const(0xFE)),
+            IfGoto(0x1012, BinOp(Reg("A"), "!=", Const(0)), "label_def"),
+        ])
+        b0     = FakeBlock(0x1000, hir=[
+            Assign(0x1000, Reg("A"), Reg("R7")),
+            CompoundAssign(0x1002, Reg("A"), "+=", Const(0xFE)),
+            IfGoto(0x1004, BinOp(Reg("A"), "==", Const(0)), "label_c2"),
+        ])
+
+        connect(b0, b_c2);   connect(b0, b1)
+        connect(b1, b_def);  connect(b1, b_fall)
+        connect(b_c2, merge); connect(b_fall, merge); connect(b_def, merge)
+
+        func = FakeFunction("sw_absorb", [b0, b1, b_c2, b_fall, b_def, merge])
+
+        # Run switch detection, then absorb
+        SwitchStructurer().run(func)
+        IfElseStructurer().run(func)
+        SwitchBodyAbsorber().run(func)
+
+        # b0 should have exactly 1 node: the SwitchNode
+        assert len(b0.hir) == 1
+        sw = b0.hir[0]
+        assert isinstance(sw, SwitchNode)
+
+        # Cases should now be inlined (list bodies, not strings)
+        for values, body in sw.cases:
+            assert isinstance(body, list), \
+                f"case {values} body should be inlined, got {body!r}"
+
+        # Default body should be inlined too
+        assert sw.default_label is None
+        assert sw.default_body is not None
+        assert isinstance(sw.default_body, list)
+
+        # Case body blocks absorbed
+        assert b_c2._absorbed
+        assert b_fall._absorbed
+        assert b_def._absorbed
+        # Merge block NOT absorbed
+        assert not merge._absorbed
+
+    def test_render_inline_bodies(self):
+        """
+        SwitchNode with inlined bodies renders correctly:
+        - case header on its own line
+        - body nodes indented at indent+2
+        - break; at end of each body
+        - no 'goto label' for cases
+        """
+        merge  = FakeBlock(0x2030, hir=[
+            Label(0x2030, "label_merge"),
+            Statement(0x2030, "return;"),
+        ], label="label_merge")
+        b_c2   = FakeBlock(0x2000, hir=[
+            Label(0x2000, "label_c2"),
+            Statement(0x2000, "R7 = 2;"),
+            GotoStatement(0x2002, "label_merge"),
+        ], label="label_c2")
+        b_fall = FakeBlock(0x2010, hir=[
+            Label(0x2010, "label_fall"),
+            Statement(0x2010, "R7 = 4;"),
+            GotoStatement(0x2012, "label_merge"),
+        ], label="label_fall")
+        b1     = FakeBlock(0x1010, hir=[
+            CompoundAssign(0x1010, Reg("A"), "+=", Const(0xFE)),
+            IfGoto(0x1012, BinOp(Reg("A"), "==", Const(0)), "label_fall"),
+        ])
+        b0     = FakeBlock(0x1000, hir=[
+            Assign(0x1000, Reg("A"), Reg("R7")),
+            CompoundAssign(0x1002, Reg("A"), "+=", Const(0xFE)),
+            IfGoto(0x1004, BinOp(Reg("A"), "==", Const(0)), "label_c2"),
+        ])
+
+        connect(b0, b_c2);   connect(b0, b1)
+        connect(b1, b_fall); connect(b1, merge)
+        connect(b_c2, merge); connect(b_fall, merge)
+
+        func = FakeFunction("sw_render", [b0, b1, b_c2, b_fall, merge])
+
+        SwitchStructurer().run(func)
+        IfElseStructurer().run(func)
+        SwitchBodyAbsorber().run(func)
+
+        sw = b0.hir[0]
+        assert isinstance(sw, SwitchNode)
+
+        lines = sw.render(indent=0)
+        texts = [t for _, t in lines]
+
+        assert texts[0] == "switch (R7) {"
+        assert texts[-1] == "}"
+        # No bare goto case targets
+        assert not any("goto label_c2" in t for t in texts)
+        assert not any("goto label_fall" in t for t in texts)
+        # Body content present
+        assert any("R7 = 2;" in t for t in texts)
+        assert any("R7 = 4;" in t for t in texts)
+        # break; present
+        assert any("break;" in t for t in texts)
+
+    def test_case_body_ends_with_return_no_break(self):
+        """
+        Case body ending with return; should NOT get a trailing break;.
+        """
+        merge  = FakeBlock(0x2030, hir=[
+            Label(0x2030, "label_merge"),
+            Statement(0x2030, "R6 = 0;"),
+        ], label="label_merge")
+        b_c2   = FakeBlock(0x2000, hir=[
+            Label(0x2000, "label_c2"),
+            Statement(0x2000, "return;"),
+        ], label="label_c2")
+        b_fall = FakeBlock(0x2010, hir=[
+            Label(0x2010, "label_fall"),
+            Statement(0x2010, "R7 = 4;"),
+            GotoStatement(0x2012, "label_merge"),
+        ], label="label_fall")
+        b1     = FakeBlock(0x1010, hir=[
+            CompoundAssign(0x1010, Reg("A"), "+=", Const(0xFE)),
+            IfGoto(0x1012, BinOp(Reg("A"), "==", Const(0)), "label_fall"),
+        ])
+        b0     = FakeBlock(0x1000, hir=[
+            Assign(0x1000, Reg("A"), Reg("R7")),
+            CompoundAssign(0x1002, Reg("A"), "+=", Const(0xFE)),
+            IfGoto(0x1004, BinOp(Reg("A"), "==", Const(0)), "label_c2"),
+        ])
+
+        connect(b0, b_c2);   connect(b0, b1)
+        connect(b1, b_fall); connect(b1, merge)
+        connect(b_c2, merge); connect(b_fall, merge)
+
+        func = FakeFunction("sw_return", [b0, b1, b_c2, b_fall, merge])
+
+        SwitchStructurer().run(func)
+        IfElseStructurer().run(func)
+        SwitchBodyAbsorber().run(func)
+
+        sw = b0.hir[0]
+        assert isinstance(sw, SwitchNode)
+
+        # Find the case body that contains return;
+        for values, body in sw.cases:
+            if isinstance(body, list):
+                texts = [n.text for n in body if isinstance(n, Statement)]
+                if "return;" in texts:
+                    # Must NOT have break; after return;
+                    assert texts[-1] == "return;", \
+                        f"Expected return; as last stmt, got {texts}"
+                    break
+        else:
+            pytest.fail("No case body with 'return;' found")

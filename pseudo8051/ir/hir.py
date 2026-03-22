@@ -251,27 +251,42 @@ class SwitchNode(HIRNode):
         default: goto label_default;
     }
 
-    cases is a list of (values_list, label) pairs.
+    cases is a list of (values_list, body) pairs where body is either:
+      - str: goto label (pre-absorption)
+      - List[HIRNode]: inlined body (post-absorption by SwitchBodyAbsorber)
+
     default_label is the target for unmatched values (from a trailing jnz), or None.
+    default_body is the inlined default body (post-absorption), or None.
     """
 
     def __init__(self, ea: int, subject: Expr,
-                 cases: List[Tuple[List[int], str]],
-                 default_label: Optional[str] = None):
+                 cases: List[Tuple[List[int], Union[str, List['HIRNode']]]],
+                 default_label: Optional[str] = None,
+                 default_body: Optional[List['HIRNode']] = None):
         super().__init__(ea)
         self.subject       = subject
         self.cases         = cases
         self.default_label = default_label
+        self.default_body  = default_body
 
     def render(self, indent: int = 0) -> List[Tuple[int, str]]:
         ind  = self._ind(indent)
         ind1 = self._ind(indent + 1)
         lines: List[Tuple[int, str]] = []
         lines.append((self.ea, f"{ind}switch ({_render_expr(self.subject)}) {{"))
-        for values, label in self.cases:
+        for values, body in self.cases:
             case_prefix = " ".join(f"case {v}:" for v in values)
-            lines.append((self.ea, f"{ind1}{case_prefix} goto {label};"))
-        if self.default_label is not None:
+            if isinstance(body, str):
+                lines.append((self.ea, f"{ind1}{case_prefix} goto {body};"))
+            else:
+                lines.append((self.ea, f"{ind1}{case_prefix}"))
+                for node in body:
+                    lines.extend(node.render(indent + 2))
+        if self.default_body is not None:
+            lines.append((self.ea, f"{ind1}default:"))
+            for node in self.default_body:
+                lines.extend(node.render(indent + 2))
+        elif self.default_label is not None:
             lines.append((self.ea, f"{ind1}default: goto {self.default_label};"))
         lines.append((self.ea, f"{ind}}}"))
         return lines

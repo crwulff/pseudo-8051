@@ -15,10 +15,11 @@ Each (add, jz/jnz) pair is a separate basic block. This pass detects chains of
 ≥ 2 such blocks and replaces the head block's HIR with a SwitchNode.
 """
 
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 from pseudo8051.ir.hir import (
-    HIRNode, Label, Assign, CompoundAssign, IfGoto, SwitchNode)
+    HIRNode, Label, Assign, CompoundAssign, IfGoto, SwitchNode,
+    Statement, GotoStatement, IfNode, WhileNode, ForNode, ReturnStmt)
 from pseudo8051.ir.expr import Reg, Const, BinOp, Expr, UnaryOp
 from pseudo8051.ir.function   import Function
 from pseudo8051.ir.basicblock import BasicBlock
@@ -211,3 +212,192 @@ class SwitchStructurer(OptimizationPass):
                 if _try_switch(func, block):
                     changed = True
                     break   # restart — absorbed-set has changed
+
+
+# ── SwitchBodyAbsorber helpers ────────────────────────────────────────────────
+
+def _find_switch_merge_ea(func: Function, switch_node: SwitchNode,
+                          branch_ea: int) -> Optional[int]:
+    """
+    Find the merge point (post-dominator) for a SwitchNode by forward BFS from
+    every case target block and the default.  Returns the smallest common EA,
+    or None if no common block is reachable from all arms.
+    """
+    # Import here to avoid circular imports at module load time
+    from pseudo8051.passes.ifelse import _reachable_eas
+
+    label_to_block = {_label_for(b): b for b in func.blocks}
+    all_labels: List[str] = [body for _, body in switch_node.cases
+                              if isinstance(body, str)]
+    if switch_node.default_label:
+        all_labels.append(switch_node.default_label)
+
+    if not all_labels:
+        return None
+
+    sets = []
+    for label in all_labels:
+        blk = label_to_block.get(label)
+        if blk is None:
+            return None
+        sets.append(_reachable_eas(blk, branch_ea))
+
+    common = sets[0]
+    for s in sets[1:]:
+        common &= s
+    return min(common) if common else None
+
+
+def _replace_goto_with_break(nodes: List[HIRNode],
+                              merge_label: str) -> List[HIRNode]:
+    """
+    Recursively replace 'goto merge_label' with 'break;' throughout nodes.
+    Does NOT recurse into WhileNode/ForNode bodies (break there targets the loop).
+    """
+    result: List[HIRNode] = []
+    for node in nodes:
+        if isinstance(node, GotoStatement) and node.label == merge_label:
+            result.append(Statement(node.ea, "break;"))
+        elif isinstance(node, IfGoto) and node.label == merge_label:
+            result.append(Statement(node.ea,
+                                    f"if ({node.cond.render()}) break;"))
+        elif isinstance(node, IfNode):
+            node.then_nodes = _replace_goto_with_break(node.then_nodes,
+                                                        merge_label)
+            node.else_nodes = _replace_goto_with_break(node.else_nodes,
+                                                        merge_label)
+            result.append(node)
+        else:
+            result.append(node)
+    return result
+
+
+def _needs_break(body_nodes: List[HIRNode]) -> bool:
+    """
+    True if a trailing 'break;' should be appended (body doesn't already end
+    with an unconditional exit).
+    """
+    if not body_nodes:
+        return True
+    last = body_nodes[-1]
+    if isinstance(last, ReturnStmt):
+        return False
+    if isinstance(last, GotoStatement):
+        return False
+    if isinstance(last, Statement):
+        if last.text in ("break;", "return;"):
+            return False
+        if last.text.startswith("goto "):
+            return False
+    return True
+
+
+class SwitchBodyAbsorber(OptimizationPass):
+    """
+    Absorb case body blocks directly into their SwitchNode.
+
+    Must run after IfElseStructurer so case bodies are already fully structured
+    (nested if/else built) before absorption.
+    """
+
+    def run(self, func: Function) -> None:
+        from pseudo8051.passes.ifelse import (
+            _arm_blocks, _build_arm_hir,
+            _collect_goto_targets, _drop_dead_labels,
+        )
+
+        label_to_block = {_label_for(b): b for b in func.blocks}
+        changed = False
+
+        for block in func.blocks:
+            if getattr(block, "_absorbed", False):
+                continue
+            for node in block.hir:
+                if not isinstance(node, SwitchNode):
+                    continue
+                if not any(isinstance(body, str) for _, body in node.cases):
+                    continue  # already absorbed
+                self._absorb(func, block, node, label_to_block,
+                             _arm_blocks, _build_arm_hir, _collect_goto_targets)
+                changed = True
+
+        if changed:
+            self._dead_label_cleanup(func, _collect_goto_targets, _drop_dead_labels)
+
+    def _absorb(self, func: Function, block, switch_node: SwitchNode,
+                label_to_block: dict,
+                _arm_blocks, _build_arm_hir, _collect_goto_targets) -> None:
+        merge_ea = _find_switch_merge_ea(func, switch_node, block.start_ea)
+        if merge_ea is None:
+            dbg("switch", "SwitchBodyAbsorber: no merge point found")
+            return
+
+        merge_block = next((b for b in func.blocks if b.start_ea == merge_ea), None)
+        merge_label = (_label_for(merge_block) if merge_block
+                       else f"label_{hex(merge_ea).removeprefix('0x')}")
+
+        # Pre-compute all arm block EAs for external-reference check
+        all_arm_eas: set = set()
+        for _, label in switch_node.cases:
+            if isinstance(label, str) and label in label_to_block:
+                for b in _arm_blocks(label_to_block[label], merge_ea):
+                    all_arm_eas.add(b.start_ea)
+        if switch_node.default_label and switch_node.default_label in label_to_block:
+            for b in _arm_blocks(label_to_block[switch_node.default_label], merge_ea):
+                all_arm_eas.add(b.start_ea)
+
+        # Collect external goto targets (blocks outside the switch block + arms)
+        external_targets: set = set()
+        for blk in func.blocks:
+            if (getattr(blk, "_absorbed", False)
+                    or blk is block
+                    or blk.start_ea in all_arm_eas):
+                continue
+            external_targets |= _collect_goto_targets(blk.hir)
+
+        all_body_blocks: List[BasicBlock] = []
+        label_body_cache: dict = {}  # label → List[HIRNode]
+
+        def _get_body(label: str) -> Union[str, List[HIRNode]]:
+            """Return inlined body HIR for label, or the label string if blocked."""
+            if label in label_body_cache:
+                return label_body_cache[label]
+            if label not in label_to_block or label in external_targets:
+                return label  # keep as goto label
+            body_blocks = _arm_blocks(label_to_block[label], merge_ea)
+            body_hir = _build_arm_hir(body_blocks, merge_label)
+            body_hir = _replace_goto_with_break(body_hir, merge_label)
+            if _needs_break(body_hir):
+                body_hir.append(Statement(switch_node.ea, "break;"))
+            label_body_cache[label] = body_hir
+            all_body_blocks.extend(body_blocks)
+            return body_hir
+
+        # Build new cases list
+        new_cases: List[Tuple[List[int], Union[str, List[HIRNode]]]] = []
+        for values, body in switch_node.cases:
+            if isinstance(body, str):
+                new_cases.append((values, _get_body(body)))
+            else:
+                new_cases.append((values, body))
+        switch_node.cases = new_cases
+
+        # Handle default body
+        if switch_node.default_label and isinstance(switch_node.default_label, str):
+            dbody = _get_body(switch_node.default_label)
+            if isinstance(dbody, list):
+                switch_node.default_body = dbody
+                switch_node.default_label = None
+
+        for blk in all_body_blocks:
+            blk._absorbed = True
+
+    def _dead_label_cleanup(self, func: Function,
+                            _collect_goto_targets, _drop_dead_labels) -> None:
+        live: set = set()
+        for blk in func.blocks:
+            if not getattr(blk, "_absorbed", False):
+                live |= _collect_goto_targets(blk.hir)
+        for blk in func.blocks:
+            if not getattr(blk, "_absorbed", False) and blk.hir:
+                blk.hir = _drop_dead_labels(blk.hir, live)
