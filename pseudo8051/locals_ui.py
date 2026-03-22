@@ -131,6 +131,22 @@ class _LocalListAction(ida_kernwin.action_handler_t):
         return ida_kernwin.AST_ENABLE_ALWAYS
 
 
+class _ExprTreeAction(ida_kernwin.action_handler_t):
+    """Toggle inline HIR node annotations on all pseudocode lines."""
+
+    def activate(self, ctx) -> int:
+        viewer  = _popup_ctx["viewer"]
+        func_ea = _popup_ctx["func_ea"]
+        if viewer is None or not func_ea:
+            return 1
+        viewer._annotate_nodes = not getattr(viewer, '_annotate_nodes', False)
+        viewer.Show(func_ea)
+        return 1
+
+    def update(self, ctx) -> int:
+        return ida_kernwin.AST_ENABLE_ALWAYS
+
+
 class _HexToggleAction(ida_kernwin.action_handler_t):
     """Toggle integer constants between hexadecimal and decimal display."""
 
@@ -169,6 +185,11 @@ def setup_popup(form, popup_handle,
     ida_kernwin.update_action_label("pseudo8051:toggle_hex", label)
     ida_kernwin.attach_action_to_popup(form, popup_handle,
                                        "pseudo8051:toggle_hex", "")
+    annotating = getattr(_popup_ctx["viewer"], '_annotate_nodes', False)
+    ann_label = "Hide HIR node annotations" if annotating else "Annotate HIR nodes"
+    ida_kernwin.update_action_label("pseudo8051:expr_tree", ann_label)
+    ida_kernwin.attach_action_to_popup(form, popup_handle,
+                                       "pseudo8051:expr_tree", "")
 
 
 def _register_local_actions() -> None:
@@ -178,6 +199,7 @@ def _register_local_actions() -> None:
         ("pseudo8051:local_del",  "Remove local variable\u2026",     _LocalDelAction()),
         ("pseudo8051:local_list", "List local variables",            _LocalListAction()),
         ("pseudo8051:toggle_hex", "View constants as decimal",       _HexToggleAction()),
+        ("pseudo8051:expr_tree",  "Annotate HIR nodes",              _ExprTreeAction()),
     ]
     for name, label, handler in _defs:
         ida_kernwin.unregister_action(name)
