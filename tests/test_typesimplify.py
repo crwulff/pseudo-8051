@@ -52,14 +52,15 @@ class TestSingleRegParam:
         texts = _texts(func)
         assert texts == ["XRAM[X] = count;"]
 
-    def test_no_proto_no_change(self):
-        """Without a prototype, TypeAwareSimplifier no-ops."""
+    def test_no_proto_structural_patterns_run(self):
+        """Without a prototype, structural patterns (AccumRelayPattern) still fire."""
         func = make_single_block_func("unknown_fn", ["A = R7;", "XRAM[X] = A;"])
         TypeAwareSimplifier().run(func)
         texts = _texts(func)
-        # No prototype and no callee calls → no reg_map → unchanged
-        assert "A = R7;" in texts
-        assert "XRAM[X] = A;" in texts
+        # AccumRelayPattern collapses A-relay even without reg_map
+        assert "XRAM[X] = R7;" in texts
+        assert "A = R7;" not in texts
+        assert "XRAM[X] = A;" not in texts
 
     def test_return_statement_preserved(self):
         """return; statement passes through unchanged."""

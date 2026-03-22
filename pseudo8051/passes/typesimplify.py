@@ -409,8 +409,7 @@ class TypeAwareSimplifier(OptimizationPass):
         reg_map = _augment_with_callee_regs(func.hir, reg_map)
 
         if not reg_map:
-            dbg("typesimp", f"{func.name}: no register mappings found, skipping")
-            return
+            dbg("typesimp", f"{func.name}: no register mappings found, running structural patterns only")
 
         dbg("typesimp", f"{func.name}: final reg_map={list(reg_map.keys())}")
         reg_map["__n__"] = [0]
