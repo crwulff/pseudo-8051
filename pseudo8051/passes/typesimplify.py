@@ -18,6 +18,7 @@ from pseudo8051.passes    import OptimizationPass
 from pseudo8051.constants import dbg
 
 from pseudo8051.passes.patterns         import _PATTERNS
+from pseudo8051.passes.patterns.mb_assign import collapse_mb_assigns
 from pseudo8051.passes.patterns._utils  import (
     VarInfo, _replace_pairs, _replace_xram_syms, _replace_single_regs,
     _replace_pairs_in_node, _replace_single_regs_in_node,
@@ -465,6 +466,8 @@ class TypeAwareSimplifier(OptimizationPass):
         dbg("typesimp", f"{func.name}: final reg_map={list(reg_map.keys())}")
         reg_map["__n__"] = [0]
         func.hir = _simplify(func.hir, reg_map)
+
+        func.hir = collapse_mb_assigns(func.hir)
 
         # Prepend C-style declarations for any XRAM local variables.
         seen: set = set()

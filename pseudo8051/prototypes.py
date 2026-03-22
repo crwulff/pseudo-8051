@@ -205,6 +205,11 @@ def _regs_from_argloc(aloc, type_size: int) -> Tuple[str, ...]:
                 return _regs_from_loc_str(base)
 
         # ALOC_REG2 — explicit register pair, e.g. R2:R1 in __usercall
+        #
+        # IDA stores reg1() as the lower-numbered register (e.g. R1 for R2:R1).
+        # The prototype notation "A:B" follows the DX:AX convention where A is
+        # more significant (hi byte), and A is the higher-numbered register.
+        # So we must reverse the [reg1, reg2] order to get [hi, lo].
         aloc_reg2 = getattr(_idt, 'ALOC_REG2', None)
         if aloc_reg2 is not None and atype == aloc_reg2:
             rn1 = aloc.reg1()
@@ -223,7 +228,7 @@ def _regs_from_argloc(aloc, type_size: int) -> Tuple[str, ...]:
                     if name in PARAM_REGS or name in ("A", "C", "DPTR"):
                         parts.append(name)
             if parts:
-                return tuple(parts)
+                return tuple(reversed(parts))  # higher-numbered reg first = hi byte
     except Exception:
         pass
     return ()

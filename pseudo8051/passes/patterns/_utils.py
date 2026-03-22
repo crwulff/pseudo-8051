@@ -113,9 +113,22 @@ def _replace_pairs(text: str, reg_map: Dict[str, VarInfo]) -> str:
 _RE_SINGLE_REG = re.compile(r'^R[0-7]$')
 
 
+def _param_byte_name(reg: str, vinfo: "VarInfo") -> str:
+    """Return the substitution name for a single register that is part of a
+    multi-byte parameter, appending the appropriate .hi/.lo/.bN suffix."""
+    if len(vinfo.regs) <= 1:
+        return vinfo.name
+    try:
+        idx = list(vinfo.regs).index(reg)
+    except ValueError:
+        return vinfo.name
+    return _byte_names(vinfo.name, len(vinfo.regs))[idx]
+
+
 def _replace_single_regs(text: str, reg_map: Dict[str, VarInfo]) -> str:
-    """Substitute single-register parameter names in read (RHS) positions."""
-    singles = [(k, v) for k, v in reg_map.items()
+    """Substitute single-register parameter names in read (RHS) positions.
+    For multi-byte parameters, appends .hi/.lo/.bN to identify the byte accessed."""
+    singles = [(k, _param_byte_name(k, v)) for k, v in reg_map.items()
                if _RE_SINGLE_REG.match(k)
                and isinstance(v, VarInfo)
                and not v.xram_sym
@@ -126,12 +139,12 @@ def _replace_single_regs(text: str, reg_map: Dict[str, VarInfo]) -> str:
     eq_pos = text.find(" = ")
     if eq_pos > 0:
         rhs = text[eq_pos + 3:]
-        for reg, vinfo in singles:
-            rhs = re.sub(r'\b' + re.escape(reg) + r'\b', vinfo.name, rhs)
+        for reg, name in singles:
+            rhs = re.sub(r'\b' + re.escape(reg) + r'\b', name, rhs)
         return text[:eq_pos + 3] + rhs
     else:
-        for reg, vinfo in singles:
-            text = re.sub(r'\b' + re.escape(reg) + r'\b', vinfo.name, text)
+        for reg, name in singles:
+            text = re.sub(r'\b' + re.escape(reg) + r'\b', name, text)
         return text
 
 
@@ -257,8 +270,9 @@ def _subst_pairs_in_expr(expr: Expr, reg_map: Dict[str, "VarInfo"]) -> Expr:
 
 
 def _subst_single_regs_in_expr(expr: Expr, reg_map: Dict[str, "VarInfo"]) -> Expr:
-    """Replace Reg(rx) → Name(param.name) for is_param entries."""
-    singles = {k: v.name for k, v in reg_map.items()
+    """Replace Reg(rx) → Name(param.name[.suffix]) for is_param entries.
+    For multi-byte parameters, appends .hi/.lo/.bN to identify the byte accessed."""
+    singles = {k: _param_byte_name(k, v) for k, v in reg_map.items()
                if _RE_SINGLE_REG.match(k)
                and isinstance(v, VarInfo)
                and not v.xram_sym
