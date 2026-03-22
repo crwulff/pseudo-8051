@@ -44,6 +44,7 @@ _RELOAD_ORDER = [
     "pseudo8051.passes.patterns.xram_group_read",
     "pseudo8051.passes.patterns.xram_local_write",
     "pseudo8051.passes.patterns.mb_add",
+    "pseudo8051.passes.patterns.mb_incdec",
     "pseudo8051.passes.patterns.retval",
     "pseudo8051.passes.patterns.reg_copy_group",
     "pseudo8051.passes.patterns.accum_relay",

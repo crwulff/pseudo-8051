@@ -17,6 +17,7 @@ from pseudo8051.passes.patterns.const_group      import ConstGroupPattern
 from pseudo8051.passes.patterns.xram_group_read  import XRAMGroupReadPattern
 from pseudo8051.passes.patterns.xram_local_write import XRAMLocalWritePattern
 from pseudo8051.passes.patterns.mb_add           import MultiByteAddPattern
+from pseudo8051.passes.patterns.mb_incdec        import MultiByteIncDecPattern
 from pseudo8051.passes.patterns.retval           import RetvalPattern
 from pseudo8051.passes.patterns.reg_copy_group   import RegCopyGroupPattern
 from pseudo8051.passes.patterns.accum_relay      import AccumRelayPattern
@@ -29,6 +30,7 @@ _PATTERNS: List[Pattern] = [
     AccumRelayPattern(),       # collapse A=expr; target=A; → target=expr;
     AccumFoldPattern(),        # collapse A-chain + IfGoto/IfNode/Assign terminal
     MultiByteAddPattern(),     # before XRAMLocalWrite: consumes the whole ADD+ADDC sequence
+    MultiByteIncDecPattern(),  # collapse multi-byte inc/dec chains into var++/var--
     XRAMLocalWritePattern(),   # before ConstGroup so locals are handled first
     ConstGroupPattern(),
     XRAMGroupReadPattern(),

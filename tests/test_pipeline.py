@@ -7,7 +7,7 @@ called directly; no run_all_passes() (which needs full IDA context).
 
 import pytest
 
-from pseudo8051.ir.hir  import Statement, ForNode, WhileNode, IfNode, IfGoto, Assign, CompoundAssign, SwitchNode
+from pseudo8051.ir.hir  import Statement, ForNode, WhileNode, IfNode, IfGoto, Assign, CompoundAssign, SwitchNode, ExprStmt, Label
 from pseudo8051.ir.expr import Reg, Const, BinOp, UnaryOp, Name, XRAMRef
 from pseudo8051.passes.loops  import LoopStructurer
 from pseudo8051.passes.ifelse import IfElseStructurer
@@ -802,3 +802,209 @@ class TestSwitchStructurer:
         assert any("case 16: goto label_c16;" in t for t in texts)
         assert any("default: goto label_def;" in t for t in texts)
         assert texts[-1] == "}"
+
+
+# ── MultiByteIncDecPattern tests ──────────────────────────────────────────────
+
+class TestMultiByteIncDecPattern:
+    """Unit tests for MultiByteIncDecPattern (called directly, no IDA context)."""
+
+    def _pat(self):
+        from pseudo8051.passes.patterns.mb_incdec import MultiByteIncDecPattern
+        return MultiByteIncDecPattern()
+
+    def _noop(self):
+        return lambda nodes, reg_map: nodes
+
+    def _xram_unit(self, sym: str, op: str, base_ea: int):
+        """Build the 3 HIR nodes for an XRAM-based unit."""
+        xr = XRAMRef(Name(sym))
+        return [
+            Assign(base_ea,     Reg("A"), xr),
+            ExprStmt(base_ea + 1, UnaryOp(op, Reg("A"), post=True)),
+            Assign(base_ea + 2, xr,       Reg("A")),
+        ]
+
+    def _carry_check(self, carry_expr, op: str, label: str, ea: int):
+        overflow = Const(0) if op == "++" else Const(0xFF)
+        return IfGoto(ea, BinOp(carry_expr, "!=", overflow), label)
+
+    def _xram_reg_map_16bit(self, var_name="var1",
+                             sym_lo="EXT_LO", sym_hi="EXT_HI"):
+        """reg_map for a 16-bit XRAM local with lo/hi byte fields."""
+        from pseudo8051.passes.patterns._utils import VarInfo
+        lo = VarInfo(f"{var_name}.lo", "uint8_t", (),
+                     xram_sym=sym_lo, is_byte_field=True, xram_addr=0xdc8b)
+        hi = VarInfo(f"{var_name}.hi", "uint8_t", (),
+                     xram_sym=sym_hi, is_byte_field=True, xram_addr=0xdc8a)
+        return {f"_byte_{sym_lo}": lo, f"_byte_{sym_hi}": hi}
+
+    # ── test_mb_inc_xram_16bit ────────────────────────────────────────────────
+
+    def test_mb_inc_xram_16bit(self):
+        """
+        8-node XRAM 16-bit increment sequence collapses to 'var1++;'.
+
+        Nodes:
+          A = XRAM[EXT_LO];  A++;  XRAM[EXT_LO] = A;
+          if (A != 0) goto skip;
+          A = XRAM[EXT_HI];  A++;  XRAM[EXT_HI] = A;
+          skip:
+        """
+        nodes = (
+            self._xram_unit("EXT_LO", "++", 0x1000)
+            + [self._carry_check(Reg("A"), "++", "skip", 0x1006)]
+            + self._xram_unit("EXT_HI", "++", 0x1008)
+            + [Label(0x100e, "skip")]
+        )
+        reg_map = self._xram_reg_map_16bit()
+        result = self._pat().match(nodes, 0, reg_map, self._noop())
+        assert result is not None
+        replacement, new_i = result
+        assert new_i == len(nodes)
+        assert len(replacement) == 1
+        assert isinstance(replacement[0], Statement)
+        assert replacement[0].text == "var1++;"
+
+    def test_mb_dec_xram_16bit(self):
+        """16-bit XRAM decrement collapses to 'var1--;'."""
+        nodes = (
+            self._xram_unit("EXT_LO", "--", 0x1000)
+            + [self._carry_check(Reg("A"), "--", "skip", 0x1006)]
+            + self._xram_unit("EXT_HI", "--", 0x1008)
+            + [Label(0x100e, "skip")]
+        )
+        reg_map = self._xram_reg_map_16bit()
+        result = self._pat().match(nodes, 0, reg_map, self._noop())
+        assert result is not None
+        assert result[0][0].text == "var1--;"
+
+    def test_mb_inc_xram_16bit_dptr_prefix(self):
+        """
+        Same as test_mb_inc_xram_16bit but with DPTR setup nodes included,
+        matching the actual 8051 MOVX @DPTR addressing pattern:
+
+          DPTR = EXT_LO;  A = XRAM[EXT_LO];  A++;  XRAM[EXT_LO] = A;
+          if (A != 0) goto skip;
+          DPTR = EXT_HI;  A = XRAM[EXT_HI];  A++;  XRAM[EXT_HI] = A;
+          skip:
+        """
+        from pseudo8051.ir.expr import Name as IRName
+        lo_xr = XRAMRef(Name("EXT_LO"))
+        hi_xr = XRAMRef(Name("EXT_HI"))
+        nodes = [
+            # Unit 1 with DPTR prefix
+            Assign(0x1000, Reg("DPTR"), Name("EXT_LO")),
+            Assign(0x1003, Reg("A"), lo_xr),
+            ExprStmt(0x1004, UnaryOp("++", Reg("A"), post=True)),
+            Assign(0x1005, lo_xr, Reg("A")),
+            # Carry check
+            self._carry_check(Reg("A"), "++", "skip", 0x1006),
+            # Unit 2 with DPTR prefix
+            Assign(0x1008, Reg("DPTR"), Name("EXT_HI")),
+            Assign(0x100b, Reg("A"), hi_xr),
+            ExprStmt(0x100c, UnaryOp("++", Reg("A"), post=True)),
+            Assign(0x100d, hi_xr, Reg("A")),
+            # Terminal label
+            Label(0x100e, "skip"),
+        ]
+        reg_map = self._xram_reg_map_16bit()
+        result = self._pat().match(nodes, 0, reg_map, self._noop())
+        assert result is not None
+        replacement, new_i = result
+        assert new_i == len(nodes)
+        assert len(replacement) == 1
+        assert isinstance(replacement[0], Statement)
+        assert replacement[0].text == "var1++;"
+
+    # ── test_mb_inc_reg_16bit ─────────────────────────────────────────────────
+
+    def test_mb_inc_reg_16bit(self):
+        """
+        4-node register 16-bit increment: R7++;  if (R7 != 0) goto skip;  R6++;  skip:
+        → 'count++;' (via VarInfo lookup).
+        """
+        from pseudo8051.passes.patterns._utils import VarInfo
+        vinfo = VarInfo("count", "uint16_t", ("R6", "R7"))
+        reg_map = {"R6R7": vinfo, "R6": vinfo, "R7": vinfo}
+
+        nodes = [
+            ExprStmt(0x1000, UnaryOp("++", Reg("R7"), post=True)),
+            self._carry_check(Reg("R7"), "++", "skip", 0x1002),
+            ExprStmt(0x1004, UnaryOp("++", Reg("R6"), post=True)),
+            Label(0x1006, "skip"),
+        ]
+        result = self._pat().match(nodes, 0, reg_map, self._noop())
+        assert result is not None
+        replacement, new_i = result
+        assert new_i == 4
+        assert len(replacement) == 1
+        assert isinstance(replacement[0], Statement)
+        assert replacement[0].text == "count++;"
+
+    def test_mb_inc_reg_16bit_no_varinfo(self):
+        """
+        Without a VarInfo entry, fall back to concatenated register name 'R7R6'.
+        Note: lo-byte (R7) is listed first in the unit order.
+        """
+        nodes = [
+            ExprStmt(0x1000, UnaryOp("++", Reg("R7"), post=True)),
+            self._carry_check(Reg("R7"), "++", "skip", 0x1002),
+            ExprStmt(0x1004, UnaryOp("++", Reg("R6"), post=True)),
+            Label(0x1006, "skip"),
+        ]
+        result = self._pat().match(nodes, 0, {}, self._noop())
+        assert result is not None
+        assert result[0][0].text == "R7R6++;"
+
+    # ── test_mb_inc_single_unit_no_match ─────────────────────────────────────
+
+    def test_mb_inc_single_unit_no_match(self):
+        """A single XRAM unit without a carry check → pattern must not fire."""
+        nodes = self._xram_unit("EXT_LO", "++", 0x1000)
+        reg_map = self._xram_reg_map_16bit()
+        result = self._pat().match(nodes, 0, reg_map, self._noop())
+        assert result is None
+
+    def test_mb_inc_two_units_no_label_no_match(self):
+        """Two units with carry check but no trailing Label → pattern must not fire."""
+        nodes = (
+            self._xram_unit("EXT_LO", "++", 0x1000)
+            + [self._carry_check(Reg("A"), "++", "skip", 0x1006)]
+            + self._xram_unit("EXT_HI", "++", 0x1008)
+            # Label intentionally omitted
+        )
+        reg_map = self._xram_reg_map_16bit()
+        result = self._pat().match(nodes, 0, reg_map, self._noop())
+        assert result is None
+
+    # ── test_mb_inc_xram_32bit ────────────────────────────────────────────────
+
+    def test_mb_inc_xram_32bit(self):
+        """
+        4-unit XRAM 32-bit increment: 4×3 nodes + 3 carry checks + label = 16 nodes
+        → 'var32++;'.
+        """
+        from pseudo8051.passes.patterns._utils import VarInfo
+        syms = ["EXT_B0", "EXT_B1", "EXT_B2", "EXT_B3"]  # lo → hi order
+        reg_map = {}
+        for idx, sym in enumerate(syms):
+            vinfo = VarInfo(f"var32.b{idx}", "uint8_t", (),
+                            xram_sym=sym, is_byte_field=True, xram_addr=0xdc80 + idx)
+            reg_map[f"_byte_{sym}"] = vinfo
+
+        nodes = []
+        for k, sym in enumerate(syms):
+            nodes += self._xram_unit(sym, "++", 0x1000 + k * 4)
+            if k < len(syms) - 1:
+                nodes.append(self._carry_check(Reg("A"), "++", "skip32",
+                                               0x1003 + k * 4))
+        nodes.append(Label(0x1100, "skip32"))
+
+        result = self._pat().match(nodes, 0, reg_map, self._noop())
+        assert result is not None
+        replacement, new_i = result
+        assert new_i == len(nodes)
+        assert len(replacement) == 1
+        assert isinstance(replacement[0], Statement)
+        assert replacement[0].text == "var32++;"
