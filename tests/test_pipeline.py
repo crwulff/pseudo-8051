@@ -306,6 +306,75 @@ class TestIfElseStructurer:
         assert C._absorbed
         assert D._absorbed
 
+    def test_arm_goto_stripped_with_ida_label(self):
+        """
+        Else arm ends with 'goto code_7_2cfa;' to the merge block.
+        When the merge block has an IDA-assigned label (not label_XXXX format),
+        the goto must still be stripped from the arm HIR.
+
+        Topology:
+            A (0x1000): "if (A != 0) goto code_7_2cf8;" → [C (true), B (false)]
+            B (0x1010): "R7 = 1;" + "goto code_7_2cfa;"  → [E]
+            C (0x1020): "R7 = 0;"  (label code_7_2cf8)   → [E]
+            E (0x1030): "A = R7;"  (label code_7_2cfa)    (merge)
+        """
+        A = FakeBlock(0x1000, hir=[Statement(0x1000,
+                                             "if (A != 0) goto code_7_2cf8;")])
+        B = FakeBlock(0x1010, hir=[Statement(0x1010, "R7 = 1;"),
+                                   Statement(0x1012, "goto code_7_2cfa;")])
+        C = FakeBlock(0x1020, hir=[Statement(0x1020, "R7 = 0;")],
+                      label="code_7_2cf8")
+        E = FakeBlock(0x1030, hir=[Statement(0x1030, "A = R7;")],
+                      label="code_7_2cfa")
+
+        connect(A, C)   # true arm
+        connect(A, B)   # false arm
+        connect(B, E)
+        connect(C, E)
+
+        func = FakeFunction("ida_label_f", [A, B, C, E])
+        IfElseStructurer().run(func)
+
+        node = A.hir[0]
+        assert isinstance(node, IfNode)
+        # else body: R7=1 only — goto code_7_2cfa must have been stripped
+        assert len(node.else_nodes) == 1
+        assert node.else_nodes[0].text == "R7 = 1;"
+
+    def test_dead_end_arm_skipped_if_externally_referenced(self):
+        """
+        E's dead-end false arm (F, label 'label_f') is also the target of A's
+        goto.  E must NOT be structured (F cannot be absorbed), but A can be
+        structured using F as the merge point.
+
+        Topology:
+            A (0x1000): "if (X == 0) goto label_f;"       → [F (true), B (false)]
+            B (0x1010): "R7 = 1;"                          → [E]
+            E (0x1020): "if (R7 != 0) goto label_g;"      → [G (true), F (false)]
+            F (0x1030): "return;"   (label_f, no succ.)    — dead-end, external ref
+            G (0x1040): "R7 = 2;"
+        """
+        A = FakeBlock(0x1000, hir=[Statement(0x1000, "if (X == 0) goto label_f;")])
+        B = FakeBlock(0x1010, hir=[Statement(0x1010, "R7 = 1;")])
+        E = FakeBlock(0x1020, hir=[Statement(0x1020, "if (R7 != 0) goto label_g;")])
+        F = FakeBlock(0x1030, hir=[Statement(0x1030, "return;")], label="label_f")
+        G = FakeBlock(0x1040, hir=[Statement(0x1040, "R7 = 2;")])
+
+        connect(A, F)   # true arm (goto label_f)
+        connect(A, B)   # false arm
+        connect(B, E)
+        connect(E, G)   # true arm (goto label_g)
+        connect(E, F)   # false arm (dead-end fall-through)
+
+        func = FakeFunction("ext_ref_f", [A, B, E, F, G])
+        IfElseStructurer().run(func)
+
+        # F must NOT have been absorbed (its label is externally referenced by A)
+        assert not F._absorbed
+        # A's false arm [B, E] has no externally-referenced labels → A is structured
+        assert B._absorbed
+        assert E._absorbed
+
 
 # ── End-to-end TypeAwareSimplifier pipeline test ─────────────────────────────
 

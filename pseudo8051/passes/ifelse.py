@@ -152,14 +152,13 @@ def _arm_blocks(start: BasicBlock, merge_ea: int) -> List[BasicBlock]:
     return sorted(result, key=lambda b: b.start_ea)
 
 
-def _build_arm_hir(blocks: List[BasicBlock], merge_ea: int) -> List[HIRNode]:
+def _build_arm_hir(blocks: List[BasicBlock], merge_label: str) -> List[HIRNode]:
     """
     Concatenate HIR from all arm blocks, stripping:
       • the block's own Label node (it becomes internal to the IfNode)
       • any 'goto merge_label;' statement or GotoStatement to merge
       • any conditional branch whose target is the merge label
     """
-    merge_label = f"label_{hex(merge_ea).removeprefix('0x')}"
     nodes: List[HIRNode] = []
 
     for blk in blocks:
@@ -308,6 +307,12 @@ class IfElseStructurer(OptimizationPass):
 
         dbg("ifelse", f"  merge={hex(merge_ea)}")
 
+        # Resolve the real label for the merge block (may be an IDA symbol,
+        # not the synthetic "label_XXXX" format).
+        merge_block = block._block_map.get(merge_ea)
+        merge_label = (_label_for(merge_block) if merge_block
+                       else f"label_{hex(merge_ea).removeprefix('0x')}")
+
         # Collect blocks and build HIR for each arm
         true_arm  = _arm_blocks(true_block,  merge_ea)
         false_arm = _arm_blocks(false_block, merge_ea)
@@ -315,8 +320,26 @@ class IfElseStructurer(OptimizationPass):
         dbg("ifelse", f"  true-arm  blocks: {[hex(b.start_ea) for b in true_arm]}")
         dbg("ifelse", f"  false-arm blocks: {[hex(b.start_ea) for b in false_arm]}")
 
-        then_nodes = _build_arm_hir(true_arm,  merge_ea)
-        else_nodes = _build_arm_hir(false_arm, merge_ea)
+        # Do not absorb arm blocks whose labels are still referenced by gotos
+        # in blocks outside the arms — those labels must remain in the output.
+        arm_labels = {b.label for b in true_arm + false_arm if b.label}
+        if arm_labels:
+            arm_eas = {b.start_ea for b in true_arm + false_arm}
+            external_targets: set = set()
+            for blk in func.blocks:
+                if (getattr(blk, "_absorbed", False)
+                        or blk is block
+                        or blk.start_ea in arm_eas):
+                    continue
+                external_targets |= _collect_goto_targets(blk.hir)
+            if arm_labels & external_targets:
+                dbg("ifelse", f"  → skipping: arm labels "
+                              f"{arm_labels & external_targets} still referenced "
+                              f"externally")
+                return False
+
+        then_nodes = _build_arm_hir(true_arm,  merge_label)
+        else_nodes = _build_arm_hir(false_arm, merge_label)
 
         # ── Canonical form: then-body should be non-empty ─────────────────
         # When the true arm jumps straight to the merge (empty then), swap
