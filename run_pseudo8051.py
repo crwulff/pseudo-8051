@@ -34,6 +34,7 @@ _RELOAD_ORDER = [
     "pseudo8051.passes",           # defines OptimizationPass ABC
     "pseudo8051.passes.rmw",
     "pseudo8051.passes.loops",
+    "pseudo8051.passes.switch",
     "pseudo8051.passes.ifelse",
     "pseudo8051.passes.patterns.base",
     "pseudo8051.passes.patterns._utils",

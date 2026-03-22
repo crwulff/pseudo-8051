@@ -25,6 +25,7 @@ def run_all_passes(func: Function) -> None:
     from pseudo8051.analysis.liveness   import LivenessAnalysis
     from pseudo8051.passes.rmw          import RMWCollapser
     from pseudo8051.passes.loops        import LoopStructurer
+    from pseudo8051.passes.switch       import SwitchStructurer
     from pseudo8051.passes.ifelse       import IfElseStructurer
 
     ConstantPropagation().run(func)
@@ -36,4 +37,5 @@ def run_all_passes(func: Function) -> None:
 
     RMWCollapser().run(func)
     LoopStructurer().run(func)
+    SwitchStructurer().run(func)
     IfElseStructurer().run(func)

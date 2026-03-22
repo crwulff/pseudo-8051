@@ -241,3 +241,37 @@ class ForNode(HIRNode):
             lines.extend(node.render(indent + 1))
         lines.append((self.ea, f"{ind}}}"))
         return lines
+
+
+class SwitchNode(HIRNode):
+    """
+    switch (subject) {
+        case 2: goto label_a;
+        case 4: case 8: goto label_b;
+        default: goto label_default;
+    }
+
+    cases is a list of (values_list, label) pairs.
+    default_label is the target for unmatched values (from a trailing jnz), or None.
+    """
+
+    def __init__(self, ea: int, subject: Expr,
+                 cases: List[Tuple[List[int], str]],
+                 default_label: Optional[str] = None):
+        super().__init__(ea)
+        self.subject       = subject
+        self.cases         = cases
+        self.default_label = default_label
+
+    def render(self, indent: int = 0) -> List[Tuple[int, str]]:
+        ind  = self._ind(indent)
+        ind1 = self._ind(indent + 1)
+        lines: List[Tuple[int, str]] = []
+        lines.append((self.ea, f"{ind}switch ({_render_expr(self.subject)}) {{"))
+        for values, label in self.cases:
+            case_prefix = " ".join(f"case {v}:" for v in values)
+            lines.append((self.ea, f"{ind1}{case_prefix} goto {label};"))
+        if self.default_label is not None:
+            lines.append((self.ea, f"{ind1}default: goto {self.default_label};"))
+        lines.append((self.ea, f"{ind}}}"))
+        return lines

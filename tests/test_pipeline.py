@@ -7,10 +7,11 @@ called directly; no run_all_passes() (which needs full IDA context).
 
 import pytest
 
-from pseudo8051.ir.hir  import Statement, ForNode, WhileNode, IfNode, IfGoto, Assign, CompoundAssign
+from pseudo8051.ir.hir  import Statement, ForNode, WhileNode, IfNode, IfGoto, Assign, CompoundAssign, SwitchNode
 from pseudo8051.ir.expr import Reg, Const, BinOp, UnaryOp, Name, XRAMRef
 from pseudo8051.passes.loops  import LoopStructurer
 from pseudo8051.passes.ifelse import IfElseStructurer
+from pseudo8051.passes.switch import SwitchStructurer
 from pseudo8051.passes.typesimplify import TypeAwareSimplifier
 from pseudo8051.prototypes import PROTOTYPES, FuncProto, Param
 
@@ -550,3 +551,254 @@ class TestAccumFoldPattern:
         ]
         result = self._match(nodes)
         assert result is None
+
+
+# ── SwitchStructurer tests ────────────────────────────────────────────────────
+
+class TestSwitchStructurer:
+    """Tests for the SwitchStructurer pass."""
+
+    def test_switch_basic_jz_chain(self):
+        """
+        3-block jz chain → SwitchNode with 2 cases, no default.
+
+        Topology:
+            b0 (0x1000): A=R7; A+=0xFE(-2); jz label_c2 → [b_c2, b1]
+            b1 (0x1010): A+=0xFE(-2);        jz label_c4 → [b_c4, b_fall]
+            b_c2 (0x1020): label_c2 (case target)
+            b_c4 (0x1030): label_c4 (case target)
+            b_fall (0x1040): (fall-through after switch)
+
+        Case values: cumulative after b0 = 0xFE → case 2;
+                     cumulative after b1 = 0xFC → case 4.
+        """
+        b_c2   = FakeBlock(0x1020, hir=[Statement(0x1020, "return;")], label="label_c2")
+        b_c4   = FakeBlock(0x1030, hir=[Statement(0x1030, "return;")], label="label_c4")
+        b_fall = FakeBlock(0x1040, hir=[Statement(0x1040, "return;")])
+        b1     = FakeBlock(0x1010, hir=[
+            CompoundAssign(0x1010, Reg("A"), "+=", Const(0xFE)),
+            IfGoto(0x1012, BinOp(Reg("A"), "==", Const(0)), "label_c4"),
+        ])
+        b0     = FakeBlock(0x1000, hir=[
+            Assign(0x1000, Reg("A"), Reg("R7")),
+            CompoundAssign(0x1002, Reg("A"), "+=", Const(0xFE)),
+            IfGoto(0x1004, BinOp(Reg("A"), "==", Const(0)), "label_c2"),
+        ])
+
+        connect(b0, b_c2)
+        connect(b0, b1)
+        connect(b1, b_c4)
+        connect(b1, b_fall)
+
+        func = FakeFunction("sw_basic", [b0, b1, b_c2, b_c4, b_fall])
+        SwitchStructurer().run(func)
+
+        assert len(b0.hir) == 1
+        sw = b0.hir[0]
+        assert isinstance(sw, SwitchNode)
+        assert sw.subject == Reg("R7")
+        assert sw.default_label is None
+        # Two case entries
+        assert len(sw.cases) == 2
+        all_cases = {v: lbl for vals, lbl in sw.cases for v in vals}
+        assert all_cases[2] == "label_c2"
+        assert all_cases[4] == "label_c4"
+        # b1 absorbed; case targets and fall-through left alone
+        assert b1._absorbed
+        assert not b_c2._absorbed
+        assert not b_c4._absorbed
+
+    def test_switch_jnz_terminator(self):
+        """
+        2-block chain: jz + jnz → SwitchNode with case for jz, case for
+        fall-through, and default_label from jnz.
+
+        Topology:
+            b0 (0x1000): A=R7; A+=0xFE(-2); jz label_c2 → [b_c2, b1]
+            b1 (0x1010): A+=0xFC(-4);        jnz label_def → [b_def, b_fall]
+            b_c2   (0x1020): label_c2
+            b_def  (0x1030): label_def
+            b_fall (0x1040): (fall-through, case_val = 6)
+
+        After b0: cumulative=0xFE → case 2 → label_c2
+        After b1: cumulative=(0xFE+0xFC)&FF=0xFA(-6) → case_val=6 → fall-through
+        default → label_def
+        """
+        b_c2   = FakeBlock(0x1020, hir=[Statement(0x1020, "return;")], label="label_c2")
+        b_def  = FakeBlock(0x1030, hir=[Statement(0x1030, "return;")], label="label_def")
+        b_fall = FakeBlock(0x1040, hir=[Statement(0x1040, "return;")], label="label_fall")
+        b1     = FakeBlock(0x1010, hir=[
+            CompoundAssign(0x1010, Reg("A"), "+=", Const(0xFC)),
+            IfGoto(0x1012, BinOp(Reg("A"), "!=", Const(0)), "label_def"),
+        ])
+        b0     = FakeBlock(0x1000, hir=[
+            Assign(0x1000, Reg("A"), Reg("R7")),
+            CompoundAssign(0x1002, Reg("A"), "+=", Const(0xFE)),
+            IfGoto(0x1004, BinOp(Reg("A"), "==", Const(0)), "label_c2"),
+        ])
+
+        connect(b0, b_c2)
+        connect(b0, b1)
+        connect(b1, b_def)
+        connect(b1, b_fall)
+
+        func = FakeFunction("sw_jnz", [b0, b1, b_c2, b_def, b_fall])
+        SwitchStructurer().run(func)
+
+        assert len(b0.hir) == 1
+        sw = b0.hir[0]
+        assert isinstance(sw, SwitchNode)
+        assert sw.subject == Reg("R7")
+        assert sw.default_label == "label_def"
+        all_cases = {v: lbl for vals, lbl in sw.cases for v in vals}
+        assert all_cases[2] == "label_c2"
+        assert all_cases[6] == "label_fall"   # fall-through case
+        assert b1._absorbed
+
+    def test_single_step_not_converted(self):
+        """
+        A single (jz) step does NOT become a SwitchNode — chain must be ≥ 2.
+        """
+        b_c2   = FakeBlock(0x1020, hir=[Statement(0x1020, "return;")], label="label_c2")
+        b_fall = FakeBlock(0x1030, hir=[Statement(0x1030, "return;")])
+        b0     = FakeBlock(0x1000, hir=[
+            Assign(0x1000, Reg("A"), Reg("R7")),
+            CompoundAssign(0x1002, Reg("A"), "+=", Const(0xFE)),
+            IfGoto(0x1004, BinOp(Reg("A"), "==", Const(0)), "label_c2"),
+        ])
+
+        connect(b0, b_c2)
+        connect(b0, b_fall)
+
+        func = FakeFunction("sw_single", [b0, b_c2, b_fall])
+        SwitchStructurer().run(func)
+
+        # HIR should be unchanged (IfGoto still present)
+        assert any(isinstance(n, IfGoto) for n in b0.hir)
+        assert not isinstance(b0.hir[-1], SwitchNode)
+
+    def test_duplicate_labels_merged(self):
+        """
+        When two steps jump to the same label, they are merged into one case entry.
+
+        b0: A=R7; A+=0xFE(-2); jz label_x → [b_x, b1]
+        b1: A+=0xFE(-2);        jz label_x → [b_x, b_fall]
+
+        Both case 2 and case 4 go to label_x → merged into one entry.
+        """
+        b_x    = FakeBlock(0x1020, hir=[Statement(0x1020, "return;")], label="label_x")
+        b_fall = FakeBlock(0x1030, hir=[Statement(0x1030, "return;")])
+        b1     = FakeBlock(0x1010, hir=[
+            CompoundAssign(0x1010, Reg("A"), "+=", Const(0xFE)),
+            IfGoto(0x1012, BinOp(Reg("A"), "==", Const(0)), "label_x"),
+        ])
+        b0     = FakeBlock(0x1000, hir=[
+            Assign(0x1000, Reg("A"), Reg("R7")),
+            CompoundAssign(0x1002, Reg("A"), "+=", Const(0xFE)),
+            IfGoto(0x1004, BinOp(Reg("A"), "==", Const(0)), "label_x"),
+        ])
+
+        connect(b0, b_x)
+        connect(b0, b1)
+        connect(b1, b_x)
+        connect(b1, b_fall)
+
+        func = FakeFunction("sw_merge", [b0, b1, b_x, b_fall])
+        SwitchStructurer().run(func)
+
+        sw = b0.hir[-1]
+        assert isinstance(sw, SwitchNode)
+        # Only one case entry (label_x) with both values
+        assert len(sw.cases) == 1
+        vals, lbl = sw.cases[0]
+        assert lbl == "label_x"
+        assert set(vals) == {2, 4}
+
+    def test_five_block_chain_from_plan(self):
+        """
+        Full 5-block example from the plan (the user's assembly snippet).
+
+        b0: A=R7; A+=0xFE; jz L2  → case 2
+        b1: A+=0xFE;        jz L4  → case 4
+        b2: A+=0xF4(-12);   jz L16 → case 16
+        b3: A+=0xF0(-16);   jz L32 → case 32
+        b4: A+=0x18(+24);   jnz Ld → default Ld; case 8 → fall-through
+        """
+        b_L2   = FakeBlock(0x2000, hir=[Statement(0x2000, "f2();")],  label="label_c2")
+        b_L4   = FakeBlock(0x2010, hir=[Statement(0x2010, "f4();")],  label="label_c4")
+        b_L16  = FakeBlock(0x2020, hir=[Statement(0x2020, "f16();")], label="label_c16")
+        b_L32  = FakeBlock(0x2030, hir=[Statement(0x2030, "f32();")], label="label_c32")
+        b_def  = FakeBlock(0x2040, hir=[Statement(0x2040, "fdef();")], label="label_def")
+        b_fall = FakeBlock(0x2050, hir=[Statement(0x2050, "f8();")],  label="label_fall")
+
+        b4 = FakeBlock(0x1040, hir=[
+            CompoundAssign(0x1040, Reg("A"), "+=", Const(0x18)),
+            IfGoto(0x1042, BinOp(Reg("A"), "!=", Const(0)), "label_def"),
+        ])
+        b3 = FakeBlock(0x1030, hir=[
+            CompoundAssign(0x1030, Reg("A"), "+=", Const(0xF0)),
+            IfGoto(0x1032, BinOp(Reg("A"), "==", Const(0)), "label_c32"),
+        ])
+        b2 = FakeBlock(0x1020, hir=[
+            CompoundAssign(0x1020, Reg("A"), "+=", Const(0xF4)),
+            IfGoto(0x1022, BinOp(Reg("A"), "==", Const(0)), "label_c16"),
+        ])
+        b1 = FakeBlock(0x1010, hir=[
+            CompoundAssign(0x1010, Reg("A"), "+=", Const(0xFE)),
+            IfGoto(0x1012, BinOp(Reg("A"), "==", Const(0)), "label_c4"),
+        ])
+        b0 = FakeBlock(0x1000, hir=[
+            Assign(0x1000, Reg("A"), Reg("R7")),
+            CompoundAssign(0x1002, Reg("A"), "+=", Const(0xFE)),
+            IfGoto(0x1004, BinOp(Reg("A"), "==", Const(0)), "label_c2"),
+        ])
+
+        connect(b0, b_L2);  connect(b0, b1)
+        connect(b1, b_L4);  connect(b1, b2)
+        connect(b2, b_L16); connect(b2, b3)
+        connect(b3, b_L32); connect(b3, b4)
+        connect(b4, b_def); connect(b4, b_fall)
+
+        func = FakeFunction("sw_5", [b0, b1, b2, b3, b4,
+                                      b_L2, b_L4, b_L16, b_L32, b_def, b_fall])
+        SwitchStructurer().run(func)
+
+        sw = b0.hir[-1]
+        assert isinstance(sw, SwitchNode)
+        assert sw.subject == Reg("R7")
+        assert sw.default_label == "label_def"
+
+        all_cases = {v: lbl for vals, lbl in sw.cases for v in vals}
+        assert all_cases[2]  == "label_c2"
+        assert all_cases[4]  == "label_c4"
+        assert all_cases[16] == "label_c16"
+        assert all_cases[32] == "label_c32"
+        assert all_cases[8]  == "label_fall"
+
+        # Intermediate blocks absorbed; case targets and fall-through preserved
+        assert b1._absorbed
+        assert b2._absorbed
+        assert b3._absorbed
+        assert b4._absorbed
+        assert not b_L2._absorbed
+        assert not b_L4._absorbed
+        assert not b_L16._absorbed
+        assert not b_L32._absorbed
+        assert not b_def._absorbed
+        assert not b_fall._absorbed
+
+    def test_switch_render(self):
+        """SwitchNode.render() produces correct switch statement text."""
+        sw = SwitchNode(
+            ea=0x1000,
+            subject=Reg("R7"),
+            cases=[([2, 4], "label_c2"), ([16], "label_c16")],
+            default_label="label_def",
+        )
+        lines = sw.render(indent=0)
+        texts = [t for _, t in lines]
+        assert texts[0] == "switch (R7) {"
+        assert any("case 2: case 4: goto label_c2;" in t for t in texts)
+        assert any("case 16: goto label_c16;" in t for t in texts)
+        assert any("default: goto label_def;" in t for t in texts)
+        assert texts[-1] == "}"

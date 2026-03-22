@@ -177,6 +177,11 @@ def _hir_node_tree(node) -> list:
         expr_field("cond", node.condition)
         expr_field("update", node.update)
         out.append(f"  body: {len(node.body_nodes)} nodes")
+    elif cls == 'SwitchNode':
+        expr_field("subject", node.subject)
+        out.append(f"  cases: {len(node.cases)}")
+        if node.default_label is not None:
+            out.append(f"  default: {node.default_label!r}")
     return out
 
 
@@ -204,6 +209,7 @@ def _collect_line_chains(nodes, node_map: dict, offset: int, ancestors: tuple) -
                 sub = _collect_line_chains(node.else_nodes, node_map, sub, chain)
         elif name in ('WhileNode', 'ForNode'):
             _collect_line_chains(node.body_nodes, node_map, sub, chain)
+        # SwitchNode has no child HIR nodes to recurse into
         offset += len(node_lines)
     return offset
 
