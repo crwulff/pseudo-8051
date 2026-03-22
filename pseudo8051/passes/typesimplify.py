@@ -13,7 +13,7 @@ import re
 from typing import Dict, List, Optional, Tuple
 
 from pseudo8051.ir.hir    import (HIRNode, Statement, Assign, CompoundAssign,
-                                   ExprStmt, ReturnStmt, IfNode, WhileNode, ForNode)
+                                   ExprStmt, ReturnStmt, IfGoto, IfNode, WhileNode, ForNode)
 from pseudo8051.passes    import OptimizationPass
 from pseudo8051.constants import dbg
 
@@ -23,7 +23,9 @@ from pseudo8051.passes.patterns._utils  import (
     _replace_pairs_in_node, _replace_single_regs_in_node,
     _subst_all_expr, _subst_xram_in_expr,
     _type_bytes, _byte_names,
+    _walk_expr,
 )
+from pseudo8051.ir.expr import Expr, UnaryOp, BinOp
 
 from pseudo8051.ir.function import Function
 from pseudo8051.prototypes  import FuncProto
@@ -221,6 +223,47 @@ def _augment_with_callee_regs(hir: List[HIRNode],
     return result
 
 
+# ── Boolean condition simplification ─────────────────────────────────────────
+
+_NEGATE_OP = {
+    "==": "!=", "!=": "==",
+    "<":  ">=", ">":  "<=",
+    "<=": ">",  ">=": "<",
+}
+
+_RE_NOT_CMP = re.compile(r'^!\((.+?)\s+(!=|==|>=|<=|>|<)\s+(.+)\)$')
+
+
+def _simplify_bool_expr(expr: Expr) -> Expr:
+    """Push `!` inward through comparisons; eliminate double negation.
+
+    !(lhs op rhs)  →  lhs ~op rhs   (e.g. !(A != 0) → A == 0)
+    !!x            →  x
+    """
+    def _fn(e: Expr) -> Expr:
+        if isinstance(e, UnaryOp) and e.op == "!":
+            inner = e.operand
+            if isinstance(inner, BinOp) and inner.op in _NEGATE_OP:
+                return BinOp(inner.lhs, _NEGATE_OP[inner.op], inner.rhs)
+            if isinstance(inner, UnaryOp) and inner.op == "!":
+                return inner.operand
+        return e
+    return _walk_expr(expr, _fn)
+
+
+def _simplify_bool_str(cond: str) -> str:
+    """String-condition version of boolean simplification."""
+    m = _RE_NOT_CMP.match(cond)
+    if m:
+        lhs, op, rhs = m.group(1), m.group(2), m.group(3)
+        if op in _NEGATE_OP:
+            return f"{lhs} {_NEGATE_OP[op]} {rhs}"
+    # !(!(expr)) → expr
+    if cond.startswith("!(!(") and cond.endswith("))"):
+        return cond[2:-1]
+    return cond
+
+
 # ── Default node transformation ───────────────────────────────────────────────
 
 _RE_DPTR_SETUP = re.compile(r'^DPTR = (.+?);')
@@ -292,12 +335,18 @@ def _transform_default(node: HIRNode,
                 return ReturnStmt(node.ea, new_val)
         return node
 
+    if isinstance(node, IfGoto):
+        new_cond = _simplify_bool_expr(_subst_expr(node.cond, reg_map))
+        if new_cond is not node.cond:
+            return IfGoto(node.ea, new_cond, node.label)
+        return node
+
     if isinstance(node, IfNode):
         cond = node.condition
         if isinstance(cond, str):
-            new_cond = _subst_text(cond, reg_map)
+            new_cond = _simplify_bool_str(_subst_text(cond, reg_map))
         else:
-            new_cond = _subst_expr(cond, reg_map)
+            new_cond = _simplify_bool_expr(_subst_expr(cond, reg_map))
         return IfNode(
             ea         = node.ea,
             condition  = new_cond,
@@ -307,9 +356,9 @@ def _transform_default(node: HIRNode,
     if isinstance(node, WhileNode):
         cond = node.condition
         if isinstance(cond, str):
-            new_cond = _subst_text(cond, reg_map)
+            new_cond = _simplify_bool_str(_subst_text(cond, reg_map))
         else:
-            new_cond = _subst_expr(cond, reg_map)
+            new_cond = _simplify_bool_expr(_subst_expr(cond, reg_map))
         return WhileNode(
             ea         = node.ea,
             condition  = new_cond,
@@ -327,9 +376,9 @@ def _transform_default(node: HIRNode,
         else:
             new_init = init
         if isinstance(cond, str):
-            new_cond = _subst_text(cond, reg_map)
+            new_cond = _simplify_bool_str(_subst_text(cond, reg_map))
         else:
-            new_cond = _subst_expr(cond, reg_map)
+            new_cond = _simplify_bool_expr(_subst_expr(cond, reg_map))
         if isinstance(update, str):
             new_update = _subst_text(update, reg_map)
         else:
@@ -347,7 +396,7 @@ def _transform_default(node: HIRNode,
 # ── Core simplifier walk ──────────────────────────────────────────────────────
 
 def _simplify_once(nodes: List[HIRNode], reg_map: Dict[str, VarInfo]) -> List[HIRNode]:
-    """Apply one round of pattern matching to each node."""
+    """Apply one round of pattern matching + default transforms to each node."""
     out: List[HIRNode] = []
     for node in nodes:
         for pat in _PATTERNS:
@@ -356,7 +405,9 @@ def _simplify_once(nodes: List[HIRNode], reg_map: Dict[str, VarInfo]) -> List[HI
                 out.extend(result[0])
                 break
         else:
-            out.append(node)
+            transformed = _transform_default(node, reg_map)
+            if transformed is not None:
+                out.append(transformed)
     return out
 
 
