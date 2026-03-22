@@ -160,7 +160,8 @@ def _try_switch(func: Function, head_block: BasicBlock) -> bool:
                 cases_order.append(label)
             cases_dict[label].append(case_val)
 
-    cases = [(cases_dict[lbl], lbl) for lbl in cases_order]
+    cases = [(sorted(cases_dict[lbl]), lbl) for lbl in cases_order]
+    cases.sort(key=lambda pair: min(pair[0]))
 
     dbg("switch", f"block {hex(head_block.start_ea)}: "
                   f"SwitchNode subj={subj.render()!r} "
