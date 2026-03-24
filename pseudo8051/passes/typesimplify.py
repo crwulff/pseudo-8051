@@ -26,7 +26,7 @@ from pseudo8051.passes.patterns._utils  import (
     _type_bytes, _byte_names,
     _walk_expr,
 )
-from pseudo8051.ir.expr import Expr, UnaryOp, BinOp
+from pseudo8051.ir.expr import Expr, UnaryOp, BinOp, Reg as RegExpr, RegGroup as RegGroupExpr
 
 from pseudo8051.ir.function import Function
 from pseudo8051.prototypes  import FuncProto
@@ -210,8 +210,14 @@ def _augment_with_local_vars(func_ea: int,
 
 def _augment_with_callee_regs(hir: List[HIRNode],
                                reg_map: Dict[str, VarInfo]) -> Dict[str, VarInfo]:
-    """Scan the HIR for function calls and add callee parameter register mappings."""
+    """Scan the HIR for function calls and add callee parameter register mappings.
+
+    Only Rn registers (R0-R7) are added.  Address/accumulator registers such as
+    DPTR, DPH, DPL, A, and SP are excluded: they are used as scratch pointers
+    throughout 8051 code and a global rename would produce wrong output.
+    """
     from pseudo8051.prototypes import get_proto
+    _SKIP = re.compile(r'^(?:DPTR|DPH|DPL|SP|PC)$')
     result = dict(reg_map)
     for name in _collect_call_names(hir):
         proto = get_proto(name)
@@ -219,7 +225,7 @@ def _augment_with_callee_regs(hir: List[HIRNode],
             continue
         callee_reg_map = _build_reg_map(proto)
         for r, info in callee_reg_map.items():
-            if r not in result:
+            if r not in result and not _SKIP.match(r):
                 result[r] = info
     return result
 
@@ -270,6 +276,30 @@ def _simplify_bool_str(cond: str) -> str:
 _RE_DPTR_SETUP = re.compile(r'^DPTR = (.+?);')
 
 
+def _get_written_regs(node: HIRNode) -> frozenset:
+    """Return the set of register names written as the primary LHS of this node."""
+    if isinstance(node, (Assign, CompoundAssign)):
+        lhs = node.lhs
+        if isinstance(lhs, RegExpr):
+            return frozenset({lhs.name})
+        if isinstance(lhs, RegGroupExpr):
+            return frozenset(lhs.regs)
+    return frozenset()
+
+
+def _kill_params(reg_map: Dict[str, VarInfo], killed: set) -> Dict[str, VarInfo]:
+    """Return reg_map with entries whose param registers overlap *killed* removed."""
+    if not killed:
+        return reg_map
+    result = {}
+    for k, v in reg_map.items():
+        if isinstance(v, VarInfo) and v.is_param and v.regs:
+            if any(r in killed for r in v.regs):
+                continue
+        result[k] = v
+    return result
+
+
 def _subst_text(text: str, reg_map: Dict[str, VarInfo]) -> str:
     """Apply XRAM-symbol, register-pair, and single-reg-param substitutions to text."""
     text = _replace_xram_syms(text, reg_map)
@@ -284,7 +314,8 @@ def _subst_expr(expr, reg_map: Dict[str, VarInfo]):
 
 
 def _transform_default(node: HIRNode,
-                       reg_map: Dict[str, VarInfo]) -> Optional[HIRNode]:
+                       reg_map: Dict[str, VarInfo],
+                       simplify_fn=None) -> Optional[HIRNode]:
     """
     Fallback for nodes not consumed by any pattern.
 
@@ -293,7 +324,12 @@ def _transform_default(node: HIRNode,
     • Recurses into children of structured nodes.
 
     Returns None to signal that the node should be dropped.
+
+    simplify_fn is called for nested node lists (IfNode/WhileNode/ForNode bodies)
+    so that the caller's flow-sensitive kill state propagates inward.
     """
+    if simplify_fn is None:
+        simplify_fn = _simplify
     if isinstance(node, Statement):
         m = _RE_DPTR_SETUP.match(node.text)
         if m:
@@ -351,8 +387,8 @@ def _transform_default(node: HIRNode,
         return IfNode(
             ea         = node.ea,
             condition  = new_cond,
-            then_nodes = _simplify(node.then_nodes, reg_map),
-            else_nodes = _simplify(node.else_nodes, reg_map),
+            then_nodes = simplify_fn(node.then_nodes, reg_map),
+            else_nodes = simplify_fn(node.else_nodes, reg_map),
         )
     if isinstance(node, WhileNode):
         cond = node.condition
@@ -363,7 +399,7 @@ def _transform_default(node: HIRNode,
         return WhileNode(
             ea         = node.ea,
             condition  = new_cond,
-            body_nodes = _simplify(node.body_nodes, reg_map),
+            body_nodes = simplify_fn(node.body_nodes, reg_map),
         )
     if isinstance(node, ForNode):
         init = node.init
@@ -389,47 +425,77 @@ def _transform_default(node: HIRNode,
             init       = new_init,
             condition  = new_cond,
             update     = new_update,
-            body_nodes = _simplify(node.body_nodes, reg_map),
+            body_nodes = simplify_fn(node.body_nodes, reg_map),
         )
     return node
 
 
 # ── Core simplifier walk ──────────────────────────────────────────────────────
 
-def _simplify_once(nodes: List[HIRNode], reg_map: Dict[str, VarInfo]) -> List[HIRNode]:
+def _simplify_once(nodes: List[HIRNode], reg_map: Dict[str, VarInfo],
+                   simplify_fn=None) -> List[HIRNode]:
     """Apply one round of pattern matching + default transforms to each node."""
+    if simplify_fn is None:
+        simplify_fn = _simplify
     out: List[HIRNode] = []
     for node in nodes:
         for pat in _PATTERNS:
-            result = pat.match([node], 0, reg_map, _simplify)
+            result = pat.match([node], 0, reg_map, simplify_fn)
             if result is not None:
                 out.extend(result[0])
                 break
         else:
-            transformed = _transform_default(node, reg_map)
+            transformed = _transform_default(node, reg_map, simplify_fn)
             if transformed is not None:
                 out.append(transformed)
     return out
 
 
-def _simplify(nodes: List[HIRNode], reg_map: Dict[str, VarInfo]) -> List[HIRNode]:
+def _simplify(nodes: List[HIRNode], reg_map: Dict[str, VarInfo],
+              _killed: Optional[set] = None) -> List[HIRNode]:
     """
     Walk nodes, trying each registered Pattern in turn.  Falls back to
     _transform_default for nodes not consumed by any pattern.
+
+    Flow-sensitive kill tracking: when a node assigns to a register that
+    carries an is_param mapping, that mapping is suppressed for all
+    subsequent nodes (including nested IfNode/WhileNode/ForNode bodies).
     """
     out: List[HIRNode] = []
     i = 0
+    killed: set = set() if _killed is None else set(_killed)
+
+    def _sub_simplify(ns: List[HIRNode], rm: Dict[str, VarInfo]) -> List[HIRNode]:
+        """Recursive simplify that carries the current kill-set inward."""
+        return _simplify(ns, rm, killed)
+
+    def _update_killed(node: HIRNode) -> None:
+        for r in _get_written_regs(node):
+            v = reg_map.get(r)
+            if isinstance(v, VarInfo) and v.is_param:
+                killed.add(r)
+
     while i < len(nodes):
+        eff = _kill_params(reg_map, killed)
+
         for pat in _PATTERNS:
-            result = pat.match(nodes, i, reg_map, _simplify)
+            result = pat.match(nodes, i, eff, _sub_simplify)
             if result is not None:
-                replacement, i = result
-                out.extend(_simplify_once(replacement, reg_map))
+                replacement, new_i = result
+                # Gather kills from the consumed range, then recompute eff
+                for j in range(i, new_i):
+                    _update_killed(nodes[j])
+                eff = _kill_params(reg_map, killed)
+                i = new_i
+                out.extend(_simplify_once(replacement, eff, _sub_simplify))
                 break
         else:
-            transformed = _transform_default(nodes[i], reg_map)
+            # Transform BEFORE killing so the node's own RHS uses its old mapping
+            transformed = _transform_default(nodes[i], eff, _sub_simplify)
             if transformed is not None:
                 out.append(transformed)
+            # Kill AFTER transform
+            _update_killed(nodes[i])
             i += 1
     return out
 
