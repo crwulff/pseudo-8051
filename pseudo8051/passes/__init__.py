@@ -35,6 +35,9 @@ def run_all_passes(func: Function) -> None:
     for block in func.blocks:
         block.hir = block.initial_hir()
 
+    from pseudo8051.passes.chunk_inline import ChunkInliner
+    ChunkInliner().run(func)
+
     RMWCollapser().run(func)
     LoopStructurer().run(func)
     SwitchStructurer().run(func)

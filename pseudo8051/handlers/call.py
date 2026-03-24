@@ -15,6 +15,22 @@ def _op_expr(insn, n: int, state=None):
     return Operand(insn, n).to_expr(state)
 
 
+def _is_chunk_call(insn) -> bool:
+    """Return True if insn is an lcall/acall/call to a tail chunk of the same function."""
+    import ida_ua, ida_funcs
+    op = insn.ops[0]
+    if op.type not in (ida_ua.o_near, ida_ua.o_far):
+        return False
+    page_base  = insn.ea & ~0xFFFF
+    target_ea  = page_base | (op.addr & 0xFFFF)
+    target_fn  = ida_funcs.get_func(target_ea)
+    current_fn = ida_funcs.get_func(insn.ea)
+    return (target_fn is not None
+            and current_fn is not None
+            and target_fn.start_ea == current_fn.start_ea  # same function owner
+            and target_ea != current_fn.start_ea)          # not the entry = is a chunk
+
+
 class LcallHandler(MnemonicHandler):
     """LCALL / ACALL / CALL — subroutine call."""
 
@@ -23,9 +39,14 @@ class LcallHandler(MnemonicHandler):
 
     def defs(self, insn) -> frozenset:
         # Conservative: called function may clobber any tracked register.
+        # Chunk calls are inlined; their defs flow through naturally.
+        if _is_chunk_call(insn):
+            return frozenset()
         return frozenset(PARAM_REGS)
 
     def lift(self, insn, state=None) -> List[HIRNode]:
+        if _is_chunk_call(insn):
+            return []
         from pseudo8051.prototypes import get_proto, return_expr, param_regs
         callee_expr = _op_expr(insn, 0, state)
         callee = callee_expr.name if isinstance(callee_expr, Name) else callee_expr.render()
