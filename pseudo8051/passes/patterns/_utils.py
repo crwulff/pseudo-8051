@@ -100,12 +100,16 @@ def _replace_xram_syms(text: str, reg_map: Dict[str, "VarInfo"]) -> str:
 
 
 def _replace_pairs(text: str, reg_map: Dict[str, VarInfo]) -> str:
-    """Replace register-pair tokens (e.g. R6R7) with the variable name."""
-    for key in sorted((k for k in reg_map
-                       if len(k) > 2 and isinstance(reg_map[k], VarInfo)),
-                      key=len, reverse=True):
-        if reg_map[key].xram_sym:
-            continue
+    """Replace register-pair tokens (e.g. R6R7) with the variable name.
+    Also replaces single-register consolidated XRAM local tokens (len==2, regs=(r,))."""
+    for key in sorted(
+            (k for k in reg_map
+             if isinstance(reg_map[k], VarInfo)
+             and not reg_map[k].xram_sym
+             and (len(k) > 2 or
+                  (len(k) == 2 and len(reg_map[k].regs) == 1
+                   and not reg_map[k].is_param))),
+            key=len, reverse=True):
         text = re.sub(r"\b" + re.escape(key) + r"\b", reg_map[key].name, text)
     return text
 
@@ -248,8 +252,12 @@ def _subst_pairs_in_expr(expr: Expr, reg_map: Dict[str, "VarInfo"]) -> Expr:
     # Build lookup: pair_name → VarInfo  (skip XRAM locals)
     pair_map: Dict[str, str] = {}
     for key, vinfo in reg_map.items():
-        if (isinstance(vinfo, VarInfo) and len(key) > 2
-                and not vinfo.xram_sym):
+        if not isinstance(vinfo, VarInfo) or vinfo.xram_sym:
+            continue
+        if len(key) > 2:
+            pair_map[key] = vinfo.name
+        elif len(key) == 2 and len(vinfo.regs) == 1 and not vinfo.is_param:
+            # Single-register consolidated XRAM local (e.g. R3 → "_src_type")
             pair_map[key] = vinfo.name
 
     if not pair_map:
@@ -282,6 +290,8 @@ def _subst_single_regs_in_expr(expr: Expr, reg_map: Dict[str, "VarInfo"]) -> Exp
 
     def _fn(e: Expr) -> Expr:
         if isinstance(e, Reg) and e.name in singles:
+            return Name(singles[e.name])
+        if isinstance(e, Name) and e.name in singles:   # covers Name("R3") call args
             return Name(singles[e.name])
         return e
 

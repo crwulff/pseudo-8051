@@ -7,7 +7,7 @@ from typing import List
 from pseudo8051.ir.instruction import MnemonicHandler
 from pseudo8051.ir.operand     import Operand
 from pseudo8051.ir.hir         import HIRNode, Assign, ExprStmt, ReturnStmt
-from pseudo8051.ir.expr        import Reg, Name, RegGroup, Call
+from pseudo8051.ir.expr        import Reg, Name, RegGroup, Call, Const
 from pseudo8051.constants      import PARAM_REGS
 
 
@@ -57,6 +57,12 @@ class LcallHandler(MnemonicHandler):
             args = []
             for p, regs in zip(proto.params, p_regs):
                 if regs:
+                    # Use CPState constant for single-register params when available
+                    if state is not None and len(regs) == 1:
+                        val = state.get(regs[0])
+                        if val is not None:
+                            args.append(Const(val))
+                            continue
                     args.append(Name("".join(regs)))
                 else:
                     args.append(Name(p.name))
