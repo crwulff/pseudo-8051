@@ -178,6 +178,57 @@ def _resolve_var_name(byte_exprs: List[Expr], op: str,
     return parent
 
 
+class IfNodeIncDecPattern(Pattern):
+    """Collapse IfNode-based 16-bit inc/dec (produced by multi-tail loop structuring)."""
+
+    def match(self,
+              nodes:    List[HIRNode],
+              i:        int,
+              reg_map:  Dict[str, VarInfo],
+              simplify: Simplify) -> Optional[Match]:
+        from pseudo8051.ir.hir import IfNode as _IfNode
+
+        # 1. Outer (lo-byte) unit
+        unit = _try_unit(nodes, i, None)
+        if unit is None:
+            return None
+        lo_expr, op, j = unit
+
+        # 2. Must be followed by IfNode with empty else
+        if j >= len(nodes) or not isinstance(nodes[j], _IfNode):
+            return None
+        ifn = nodes[j]
+        if ifn.else_nodes:
+            return None
+
+        # 3. IfNode condition must be the carry check: A == 0 (for ++) or A == 0xFF (--)
+        expected_overflow = Const(0) if op == "++" else Const(0xFF)
+        cond = ifn.condition
+        if not (isinstance(cond, BinOp)
+                and cond.op == "=="
+                and cond.lhs == Reg("A")
+                and cond.rhs == expected_overflow):
+            return None
+
+        # 4. Inner (hi-byte) unit must be at position 0 of then_nodes, with nothing after
+        inner = _try_unit(ifn.then_nodes, 0, op)
+        if inner is None:
+            return None
+        hi_expr, _, inner_j = inner
+        if inner_j != len(ifn.then_nodes):   # unexpected trailing nodes
+            return None
+
+        # 5. Resolve variable name from both byte exprs
+        byte_exprs = [lo_expr, hi_expr]
+        var_name = _resolve_var_name(byte_exprs, op, reg_map)
+        if var_name is None:
+            return None
+
+        ea = nodes[i].ea
+        dbg("typesimp", f"  ifnode-incdec: {var_name}{op};  (nodes {i}–{j}, ea={ea:#x})")
+        return ([Statement(ea, f"{var_name}{op};")], j + 1)
+
+
 class MultiByteIncDecPattern(Pattern):
     """Collapse 8051 multi-byte increment/decrement sequences into var++/var--."""
 

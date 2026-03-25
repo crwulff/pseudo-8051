@@ -1,4 +1,4 @@
-from pseudo8051.ir.hir import Statement, ExprStmt, IfGoto, Assign, Label
+from pseudo8051.ir.hir import Statement, ExprStmt, IfGoto, Assign, Label, IfNode
 from pseudo8051.ir.expr import Reg, Const, BinOp, UnaryOp, XRAMRef, Name
 
 
@@ -164,3 +164,110 @@ class TestMultiByteIncDecPattern:
         assert len(replacement) == 1
         assert isinstance(replacement[0], Statement)
         assert replacement[0].text == "var32++;"
+
+
+class TestIfNodeIncDecPattern:
+
+    def _noop(self):
+        return lambda nodes, reg_map: nodes
+
+    def _xram_unit(self, sym: str, op: str, base_ea: int):
+        xr = XRAMRef(Name(sym))
+        return [
+            Assign(base_ea,     Reg("A"), xr),
+            ExprStmt(base_ea + 1, UnaryOp(op, Reg("A"), post=True)),
+            Assign(base_ea + 2, xr,       Reg("A")),
+        ]
+
+    def _xram_reg_map_16bit(self, var_name="var1",
+                             sym_lo="EXT_LO", sym_hi="EXT_HI"):
+        from pseudo8051.passes.patterns._utils import VarInfo
+        lo = VarInfo(f"{var_name}.lo", "uint8_t", (),
+                     xram_sym=sym_lo, is_byte_field=True, xram_addr=0xdc8b)
+        hi = VarInfo(f"{var_name}.hi", "uint8_t", (),
+                     xram_sym=sym_hi, is_byte_field=True, xram_addr=0xdc8a)
+        return {f"_byte_{sym_lo}": lo, f"_byte_{sym_hi}": hi}
+
+    def _pat(self):
+        from pseudo8051.passes.patterns.mb_incdec import IfNodeIncDecPattern
+        return IfNodeIncDecPattern()
+
+    def _ifnode_carry(self, op, then_nodes, ea=0x1006):
+        overflow = Const(0) if op == "++" else Const(0xFF)
+        return IfNode(ea, BinOp(Reg("A"), "==", overflow), then_nodes, [])
+
+    def test_16bit_inc_ifnode(self):
+        """16-bit XRAM ++ via IfNode carry → 'var1++;'."""
+        nodes = (
+            self._xram_unit("EXT_LO", "++", 0x1000)
+            + [self._ifnode_carry("++", self._xram_unit("EXT_HI", "++", 0x1008))]
+        )
+        result = self._pat().match(nodes, 0, self._xram_reg_map_16bit(), self._noop())
+        assert result is not None
+        replacement, new_i = result
+        assert new_i == 4
+        assert replacement[0].text == "var1++;"
+
+    def test_16bit_dec_ifnode(self):
+        """16-bit XRAM -- via IfNode carry → 'var1--;'."""
+        nodes = (
+            self._xram_unit("EXT_LO", "--", 0x1000)
+            + [self._ifnode_carry("--", self._xram_unit("EXT_HI", "--", 0x1008))]
+        )
+        result = self._pat().match(nodes, 0, self._xram_reg_map_16bit(), self._noop())
+        assert result is not None
+        assert result[0][0].text == "var1--;"
+
+    def test_16bit_inc_ifnode_dptr_prefix(self):
+        """DPTR prefix inside IfNode then_nodes is consumed transparently."""
+        lo_xr = XRAMRef(Name("EXT_LO"))
+        hi_xr = XRAMRef(Name("EXT_HI"))
+        then_nodes = [
+            Assign(0x1008, Reg("DPTR"), Name("EXT_HI")),
+            Assign(0x100b, Reg("A"), hi_xr),
+            ExprStmt(0x100c, UnaryOp("++", Reg("A"), post=True)),
+            Assign(0x100d, hi_xr, Reg("A")),
+        ]
+        nodes = (
+            self._xram_unit("EXT_LO", "++", 0x1000)
+            + [self._ifnode_carry("++", then_nodes)]
+        )
+        result = self._pat().match(nodes, 0, self._xram_reg_map_16bit(), self._noop())
+        assert result is not None
+        assert result[0][0].text == "var1++;"
+
+    def test_single_unit_no_ifnode(self):
+        """A single XRAM unit not followed by IfNode → no match."""
+        nodes = self._xram_unit("EXT_LO", "++", 0x1000)
+        result = self._pat().match(nodes, 0, self._xram_reg_map_16bit(), self._noop())
+        assert result is None
+
+    def test_ifnode_wrong_cond_no_match(self):
+        """IfNode condition is A != 0 (not the carry form) → no match."""
+        nodes = (
+            self._xram_unit("EXT_LO", "++", 0x1000)
+            + [IfNode(0x1006, BinOp(Reg("A"), "!=", Const(0)),
+                      self._xram_unit("EXT_HI", "++", 0x1008), [])]
+        )
+        result = self._pat().match(nodes, 0, self._xram_reg_map_16bit(), self._noop())
+        assert result is None
+
+    def test_ifnode_nonempty_else_no_match(self):
+        """IfNode with non-empty else_nodes → no match."""
+        nodes = (
+            self._xram_unit("EXT_LO", "++", 0x1000)
+            + [IfNode(0x1006, BinOp(Reg("A"), "==", Const(0)),
+                      self._xram_unit("EXT_HI", "++", 0x1008),
+                      [Statement(0x1010, "extra;")])]
+        )
+        result = self._pat().match(nodes, 0, self._xram_reg_map_16bit(), self._noop())
+        assert result is None
+
+    def test_no_varinfo_no_match(self):
+        """Without reg_map byte-field entries, pattern returns None."""
+        nodes = (
+            self._xram_unit("EXT_LO", "++", 0x1000)
+            + [self._ifnode_carry("++", self._xram_unit("EXT_HI", "++", 0x1008))]
+        )
+        result = self._pat().match(nodes, 0, {}, self._noop())
+        assert result is None
