@@ -109,11 +109,22 @@ def _consolidate_xram_local_loads(nodes: List[HIRNode],
                             reg_map[pair_key] = new_vinfo
                             for r in regs:
                                 reg_map[r] = new_vinfo
-                            out.append(Assign(node.ea,
-                                              RegGroupExpr(tuple(regs)),
-                                              NameExpr(parent_nm)))
-                            dbg("typesimp",
-                                f"  xram-pair-consolidate: {pair_key} = {parent_nm}")
+                            # If lo byte landed in DPL and the next node is DPH = Rhi,
+                            # collapse to DPTR = var instead of RegGroup = var.
+                            if (regs[-1] == "DPL" and j < len(nodes)
+                                    and _as_dph_assign(nodes[j]) == regs[0]):
+                                out.append(Assign(node.ea, RegExpr("DPTR"),
+                                                  NameExpr(parent_nm)))
+                                j += 1
+                                dbg("typesimp",
+                                    f"  xram-pair-consolidate: DPTR = {parent_nm}"
+                                    f" (via {pair_key} + DPH)")
+                            else:
+                                out.append(Assign(node.ea,
+                                                  RegGroupExpr(tuple(regs)),
+                                                  NameExpr(parent_nm)))
+                                dbg("typesimp",
+                                    f"  xram-pair-consolidate: {pair_key} = {parent_nm}")
                             i = j
                             continue
             else:
