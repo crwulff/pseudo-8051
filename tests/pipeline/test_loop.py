@@ -1,4 +1,5 @@
-from pseudo8051.ir.hir import Statement, ForNode, WhileNode
+from pseudo8051.ir.hir import Statement, ForNode, WhileNode, IfNode, IfGoto, GotoStatement
+from pseudo8051.ir.expr import BinOp, Const, Reg
 from pseudo8051.passes.loops import LoopStructurer
 
 from ..helpers import FakeBlock, FakeFunction, connect
@@ -108,3 +109,63 @@ class TestLoopStructurer:
         LoopStructurer().run(func)
         assert b0.hir[0].text == "A = R7;"
         assert b1.hir[0].text == "return;"
+
+    def test_multi_tail_loop_produces_single_while_with_if(self):
+        """
+        Two back-edges to the same header:
+          body (0x1010): R7=1; IfGoto(R7!=0 → header)  — conditional early-continue
+          tail (0x1020): R6=1; GotoStatement(→ header)  — normal loop end
+
+        Expected: one WhileNode whose body is [Statement("R7 = 1;"),
+                                               IfNode(R7==0, ["R6 = 1;"])]
+        Topology:
+            header(0x1000): if(cond) goto exit  → [exit(0x2000), body(0x1010)]
+            body  (0x1010): R7=1; jnz→header   → [header(back-edge), tail(0x1020)]
+            tail  (0x1020): R6=1; sjmp→header  → [header(back-edge)]
+            exit  (0x2000): return;
+        """
+        exit_b = FakeBlock(0x2000, hir=[Statement(0x2000, "return;")], label="label_exit")
+        tail   = FakeBlock(0x1020, hir=[
+            Statement(0x1020, "R6 = 1;"),
+            GotoStatement(0x1022, "label_1000"),
+        ])
+        body   = FakeBlock(0x1010, hir=[
+            Statement(0x1010, "R7 = 1;"),
+            IfGoto(0x1012, BinOp(Reg("R7"), "!=", Const(0)), "label_1000"),
+        ])
+        header = FakeBlock(0x1000, hir=[
+            IfGoto(0x1000, BinOp(Reg("A"), "!=", Const(4)), "label_exit"),
+        ], label="label_1000")
+
+        connect(header, exit_b)   # if-taken → exit
+        connect(header, body)     # fall-through → loop body
+        connect(body,   header)   # back-edge (conditional jnz)
+        connect(body,   tail)     # fall-through to tail
+        connect(tail,   header)   # back-edge (unconditional sjmp)
+
+        func = FakeFunction("multi_tail_f", [header, body, tail, exit_b])
+        LoopStructurer().run(func)
+
+        # Exactly one WhileNode in header (plus a Label node for label_1000)
+        while_nodes = [n for n in header.hir if isinstance(n, WhileNode)]
+        assert len(while_nodes) == 1
+        wn = while_nodes[0]
+
+        # body_nodes: [Statement("R7 = 1;"), IfNode(R7==0, ["R6 = 1;"])]
+        body_texts = [n.text for n in wn.body_nodes if isinstance(n, Statement)]
+        assert "R7 = 1;" in body_texts
+
+        if_node = wn.body_nodes[-1]
+        assert isinstance(if_node, IfNode)
+        assert len(if_node.then_nodes) == 1
+        assert if_node.then_nodes[0].text == "R6 = 1;"
+        assert if_node.else_nodes == []
+
+        # Condition is inverted: R7 != 0 → R7 == 0
+        cond = if_node.condition
+        assert isinstance(cond, BinOp) and cond.op == "=="
+
+        # Both inner blocks absorbed; exit block not
+        assert body._absorbed
+        assert tail._absorbed
+        assert not exit_b._absorbed
