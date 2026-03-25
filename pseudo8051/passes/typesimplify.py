@@ -623,6 +623,106 @@ def _consolidate_xram_local_loads(nodes: List[HIRNode],
     return out
 
 
+# ── DPL/DPH → DPTR collapsing ────────────────────────────────────────────────
+
+def _as_dph_assign(n) -> Optional[str]:
+    """Return Rhi name if n is Assign(Reg('DPH'), Reg(Rhi)); else None."""
+    if (isinstance(n, Assign)
+            and isinstance(n.lhs, RegExpr) and n.lhs.name == "DPH"
+            and isinstance(n.rhs, RegExpr)):
+        return n.rhs.name
+    return None
+
+
+def _as_dpl_assign(n) -> Optional[str]:
+    """Return Rlo name if n is Assign(Reg('DPL'), Reg(Rlo)); else None."""
+    if (isinstance(n, Assign)
+            and isinstance(n.lhs, RegExpr) and n.lhs.name == "DPL"
+            and isinstance(n.rhs, RegExpr)):
+        return n.rhs.name
+    return None
+
+
+def _collapse_dpl_dph(nodes: List[HIRNode],
+                       reg_map: Dict[str, VarInfo]) -> List[HIRNode]:
+    """
+    Collapse paired DPH/DPL byte assignments into a single DPTR assignment.
+
+    DPH = Rhi; [skippable...] DPL = Rlo;  →  DPTR = RhiRlo;  (or DPTR = var;)
+    DPL = Rlo; [skippable...] DPH = Rhi;  →  same
+
+    Skippable = _is_call_setup_assign or _is_dptr_inc_node.
+    """
+    # Recurse into structured nodes first.
+    recursed: List[HIRNode] = []
+    for node in nodes:
+        if isinstance(node, IfNode):
+            recursed.append(IfNode(node.ea, node.condition,
+                _collapse_dpl_dph(node.then_nodes, reg_map),
+                _collapse_dpl_dph(node.else_nodes, reg_map)))
+        elif isinstance(node, WhileNode):
+            recursed.append(WhileNode(node.ea, node.condition,
+                _collapse_dpl_dph(node.body_nodes, reg_map)))
+        elif isinstance(node, ForNode):
+            recursed.append(ForNode(node.ea, node.init, node.condition, node.update,
+                _collapse_dpl_dph(node.body_nodes, reg_map)))
+        else:
+            recursed.append(node)
+
+    out: List[HIRNode] = []
+    dead: set = set()   # indices consumed as the partner half of a pair
+
+    for i, node in enumerate(recursed):
+        if i in dead:
+            continue
+
+        rhi = _as_dph_assign(node)   # DPH = Rhi case
+        rlo = _as_dpl_assign(node)   # DPL = Rlo case
+        if rhi is None and rlo is None:
+            out.append(node)
+            continue
+
+        # Search forward for the partner, skipping setup/dptr++ nodes.
+        partner_idx = None
+        partner_val = None
+        for k in range(i + 1, len(recursed)):
+            if k in dead:
+                continue
+            if rhi is not None:
+                rlo2 = _as_dpl_assign(recursed[k])
+                if rlo2 is not None:
+                    partner_idx, partner_val = k, rlo2
+                    break
+            else:
+                rhi2 = _as_dph_assign(recursed[k])
+                if rhi2 is not None:
+                    partner_idx, partner_val = k, rhi2
+                    break
+            if not (_is_call_setup_assign(recursed[k]) or _is_dptr_inc_node(recursed[k])):
+                break   # non-skippable node blocks the search
+
+        if partner_idx is None:
+            out.append(node)
+            continue
+
+        # Build the collapsed DPTR assignment.
+        if rhi is not None:
+            reg_hi, reg_lo = rhi, partner_val
+        else:
+            reg_hi, reg_lo = partner_val, rlo
+
+        pair_key = reg_hi + reg_lo
+        vinfo = reg_map.get(pair_key)
+        rhs: Expr = (NameExpr(vinfo.name)
+                     if isinstance(vinfo, VarInfo)
+                     else RegGroupExpr((reg_hi, reg_lo)))
+        out.append(Assign(node.ea, RegExpr("DPTR"), rhs))
+        dead.add(partner_idx)
+        dbg("typesimp", f"  dpl-dph-collapse: DPTR = {pair_key}")
+
+    return out
+
+
 # ── Post-simplify call-arg fold and dead-setup pruning ────────────────────────
 
 _RE_REG_TOKEN = re.compile(r'\b(R[0-7]+|DPTR|DPH|DPL|A)\b')
@@ -818,6 +918,7 @@ class TypeAwareSimplifier(OptimizationPass):
         func.hir = _simplify(func.hir, reg_map)
         func.hir = _consolidate_xram_local_loads(func.hir, reg_map)
         func.hir = _simplify_once(func.hir, reg_map)
+        func.hir = _collapse_dpl_dph(func.hir, reg_map)
         func.hir = _fold_and_prune_setups(func.hir, reg_map)
 
         func.hir = collapse_mb_assigns(func.hir)
