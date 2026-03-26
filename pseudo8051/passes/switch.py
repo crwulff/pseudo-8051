@@ -217,6 +217,28 @@ class SwitchStructurer(OptimizationPass):
 
 # ── SwitchBodyAbsorber helpers ────────────────────────────────────────────────
 
+def _merge_ea_from_labels(labels: List[str], label_to_block: dict,
+                          branch_ea: int) -> Optional[int]:
+    """
+    Forward-BFS intersection over the given arm labels.
+    Returns the smallest common reachable EA, or None.
+    """
+    from pseudo8051.passes.ifelse import _reachable_eas
+
+    if not labels:
+        return None
+    sets = []
+    for label in labels:
+        blk = label_to_block.get(label)
+        if blk is None:
+            return None
+        sets.append(_reachable_eas(blk, branch_ea))
+    common = sets[0]
+    for s in sets[1:]:
+        common &= s
+    return min(common) if common else None
+
+
 def _find_switch_merge_ea(func: Function, switch_node: SwitchNode,
                           branch_ea: int) -> Optional[int]:
     """
@@ -224,29 +246,12 @@ def _find_switch_merge_ea(func: Function, switch_node: SwitchNode,
     every case target block and the default.  Returns the smallest common EA,
     or None if no common block is reachable from all arms.
     """
-    # Import here to avoid circular imports at module load time
-    from pseudo8051.passes.ifelse import _reachable_eas
-
     label_to_block = {_label_for(b): b for b in func.blocks}
     all_labels: List[str] = [body for _, body in switch_node.cases
                               if isinstance(body, str)]
     if switch_node.default_label:
         all_labels.append(switch_node.default_label)
-
-    if not all_labels:
-        return None
-
-    sets = []
-    for label in all_labels:
-        blk = label_to_block.get(label)
-        if blk is None:
-            return None
-        sets.append(_reachable_eas(blk, branch_ea))
-
-    common = sets[0]
-    for s in sets[1:]:
-        common &= s
-    return min(common) if common else None
+    return _merge_ea_from_labels(all_labels, label_to_block, branch_ea)
 
 
 def _replace_goto_with_break(nodes: List[HIRNode],
@@ -328,23 +333,75 @@ class SwitchBodyAbsorber(OptimizationPass):
     def _absorb(self, func: Function, block, switch_node: SwitchNode,
                 label_to_block: dict,
                 _arm_blocks, _build_arm_hir, _collect_goto_targets) -> None:
-        merge_ea = _find_switch_merge_ea(func, switch_node, block.start_ea)
-        if merge_ea is None:
-            dbg("switch", "SwitchBodyAbsorber: no merge point found")
-            return
+        from pseudo8051.passes.ifelse import _reachable_eas
+        from collections import Counter
 
-        merge_block = next((b for b in func.blocks if b.start_ea == merge_ea), None)
-        merge_label = (_label_for(merge_block) if merge_block
-                       else f"label_{hex(merge_ea).removeprefix('0x')}")
+        all_labels_here = [body for _, body in switch_node.cases if isinstance(body, str)]
+        if switch_node.default_label:
+            all_labels_here.append(switch_node.default_label)
+
+        sentinel_ea = max(b.start_ea for b in func.blocks) + 1
+
+        merge_ea = _find_switch_merge_ea(func, switch_node, block.start_ea)
+
+        if merge_ea is None:
+            # Find the merge EA by looking for any EA reachable from 2+ arms.
+            # Arms that reach the merge EA are "live" (they goto merge → break);
+            # arms that don't are "dead-end" (they terminate directly → return).
+            # This correctly handles the case where the merge block itself is a
+            # dead-end (e.g. it ends with ret) — `_is_dead_end` would wrongly
+            # classify live arms as dead in that situation.
+            arm_reach: dict = {}
+            for label in all_labels_here:
+                blk = label_to_block.get(label)
+                if blk is not None:
+                    arm_reach[label] = _reachable_eas(blk, block.start_ea)
+
+            ea_count: Counter = Counter()
+            for reach in arm_reach.values():
+                for ea in reach:
+                    ea_count[ea] += 1
+            shared = {ea for ea, cnt in ea_count.items() if cnt >= 2}
+
+            if shared:
+                merge_ea = min(shared)
+                dead_end_labels = {label for label, reach in arm_reach.items()
+                                   if merge_ea not in reach}
+                dbg("switch",
+                    f"SwitchBodyAbsorber: mixed arms — {len(dead_end_labels)} dead-end, "
+                    f"{len(all_labels_here) - len(dead_end_labels)} live")
+            else:
+                # No shared successors — all arms truly terminate
+                dbg("switch", "SwitchBodyAbsorber: all arms terminate — absorbing without merge")
+                merge_ea = sentinel_ea
+                dead_end_labels = set(all_labels_here)
+        else:
+            dead_end_labels: set = set()
+
+        # Resolve the merge label (used only by live arms)
+        if merge_ea == sentinel_ea:
+            merge_label = ""
+        else:
+            merge_block = next((b for b in func.blocks if b.start_ea == merge_ea), None)
+            merge_label = (_label_for(merge_block) if merge_block
+                           else f"label_{hex(merge_ea).removeprefix('0x')}")
+
+        def _arm_merge(label: str) -> Tuple[int, str]:
+            """Return (effective_merge_ea, effective_merge_label) for an arm."""
+            if label in dead_end_labels:
+                return sentinel_ea, ""
+            return merge_ea, merge_label
 
         # Pre-compute all arm block EAs for external-reference check
         all_arm_eas: set = set()
         for _, label in switch_node.cases:
             if isinstance(label, str) and label in label_to_block:
-                for b in _arm_blocks(label_to_block[label], merge_ea):
+                arm_me, _ = _arm_merge(label)
+                for b in _arm_blocks(label_to_block[label], arm_me):
                     all_arm_eas.add(b.start_ea)
         if switch_node.default_label and switch_node.default_label in label_to_block:
-            for b in _arm_blocks(label_to_block[switch_node.default_label], merge_ea):
+            arm_me, _ = _arm_merge(switch_node.default_label)
+            for b in _arm_blocks(label_to_block[switch_node.default_label], arm_me):
                 all_arm_eas.add(b.start_ea)
 
         # Collect external goto targets (blocks outside the switch block + arms)
@@ -365,9 +422,10 @@ class SwitchBodyAbsorber(OptimizationPass):
                 return label_body_cache[label]
             if label not in label_to_block or label in external_targets:
                 return label  # keep as goto label
-            body_blocks = _arm_blocks(label_to_block[label], merge_ea)
-            body_hir = _build_arm_hir(body_blocks, merge_label)
-            body_hir = _replace_goto_with_break(body_hir, merge_label)
+            arm_me, arm_ml = _arm_merge(label)
+            body_blocks = _arm_blocks(label_to_block[label], arm_me)
+            body_hir = _build_arm_hir(body_blocks, arm_ml)
+            body_hir = _replace_goto_with_break(body_hir, arm_ml)
             if _needs_break(body_hir):
                 body_hir.append(Statement(switch_node.ea, "break;"))
             label_body_cache[label] = body_hir

@@ -368,3 +368,135 @@ class TestSwitchBodyAbsorber:
                     break
         else:
             pytest.fail("No case body with 'return;' found")
+
+    def test_all_arms_terminate(self):
+        """Switch where every case arm ends with ret (no merge point) → bodies still inlined."""
+        from pseudo8051.ir.hir import ReturnStmt
+        b_c2   = FakeBlock(0x2000, hir=[
+            Label(0x2000, "label_c2"),
+            Statement(0x2000, "R7 = 2;"),
+            ReturnStmt(0x2002),
+        ], label="label_c2")
+        b_fall = FakeBlock(0x2010, hir=[
+            Label(0x2010, "label_fall"),
+            Statement(0x2010, "R7 = 4;"),
+            ReturnStmt(0x2012),
+        ], label="label_fall")
+        b_def  = FakeBlock(0x2020, hir=[
+            Label(0x2020, "label_def"),
+            Statement(0x2020, "R7 = 99;"),
+            ReturnStmt(0x2022),
+        ], label="label_def")
+        b1     = FakeBlock(0x1010, hir=[
+            CompoundAssign(0x1010, Reg("A"), "+=", Const(0xFE)),
+            IfGoto(0x1012, BinOp(Reg("A"), "!=", Const(0)), "label_def"),
+        ])
+        b0     = FakeBlock(0x1000, hir=[
+            Assign(0x1000, Reg("A"), Reg("R7")),
+            CompoundAssign(0x1002, Reg("A"), "+=", Const(0xFE)),
+            IfGoto(0x1004, BinOp(Reg("A"), "==", Const(0)), "label_c2"),
+        ])
+
+        connect(b0, b_c2);  connect(b0, b1)
+        connect(b1, b_def); connect(b1, b_fall)
+        # No merge block; all arms terminate with ret
+
+        func = FakeFunction("sw_terminate", [b0, b1, b_c2, b_fall, b_def])
+
+        SwitchStructurer().run(func)
+        IfElseStructurer().run(func)
+        SwitchBodyAbsorber().run(func)
+
+        sw = b0.hir[0]
+        assert isinstance(sw, SwitchNode)
+
+        for values, body in sw.cases:
+            assert isinstance(body, list), \
+                f"case {values} body should be inlined, got {body!r}"
+            texts = [n.text for n in body if isinstance(n, Statement)]
+            assert "break;" not in texts, "no break; expected (arm ends with return)"
+
+        assert sw.default_label is None
+        assert isinstance(sw.default_body, list)
+        assert b_c2._absorbed
+        assert b_fall._absorbed
+        assert b_def._absorbed
+
+    def test_mixed_arms_some_terminate_some_break(self):
+        """Switch where one arm returns and two arms fall through to a merge → all bodies inlined.
+
+        Layout:
+          b0: switch head  (case 2 → label_c2, falls into b1)
+          b1: switch step  (case 4 → label_fall, default → label_def)
+          b_c2:   R7 = 2; return;          ← dead-end arm
+          b_fall: R7 = 4; goto label_merge ← live arm
+          b_def:  R7 = 99; goto label_merge ← live arm (default)
+          merge:  return;                  ← shared merge point for live arms
+        """
+        from pseudo8051.ir.hir import ReturnStmt
+        merge  = FakeBlock(0x3000, hir=[
+            Label(0x3000, "label_merge"),
+            Statement(0x3000, "return;"),
+        ], label="label_merge")
+        b_c2   = FakeBlock(0x2000, hir=[
+            Label(0x2000, "label_c2"),
+            Statement(0x2000, "R7 = 2;"),
+            ReturnStmt(0x2002),
+        ], label="label_c2")
+        b_fall = FakeBlock(0x2010, hir=[
+            Label(0x2010, "label_fall"),
+            Statement(0x2010, "R7 = 4;"),
+            GotoStatement(0x2012, "label_merge"),
+        ], label="label_fall")
+        b_def  = FakeBlock(0x2020, hir=[
+            Label(0x2020, "label_def"),
+            Statement(0x2020, "R7 = 99;"),
+            GotoStatement(0x2022, "label_merge"),
+        ], label="label_def")
+        b1     = FakeBlock(0x1010, hir=[
+            CompoundAssign(0x1010, Reg("A"), "+=", Const(0xFE)),
+            IfGoto(0x1012, BinOp(Reg("A"), "!=", Const(0)), "label_def"),
+        ])
+        b0     = FakeBlock(0x1000, hir=[
+            Assign(0x1000, Reg("A"), Reg("R7")),
+            CompoundAssign(0x1002, Reg("A"), "+=", Const(0xFE)),
+            IfGoto(0x1004, BinOp(Reg("A"), "==", Const(0)), "label_c2"),
+        ])
+
+        connect(b0, b_c2);  connect(b0, b1)
+        connect(b1, b_def); connect(b1, b_fall)
+        connect(b_fall, merge); connect(b_def, merge)
+
+        func = FakeFunction("sw_mixed", [b0, b1, b_c2, b_fall, b_def, merge])
+
+        SwitchStructurer().run(func)
+        IfElseStructurer().run(func)
+        SwitchBodyAbsorber().run(func)
+
+        sw = b0.hir[0]
+        assert isinstance(sw, SwitchNode)
+
+        # All case bodies must be inlined (no dangling goto-label strings)
+        for values, body in sw.cases:
+            assert isinstance(body, list), \
+                f"case {values} body should be inlined, got {body!r}"
+
+        # default must be inlined too
+        assert sw.default_label is None
+        assert isinstance(sw.default_body, list)
+
+        # The returning arm (case 2) must end with return, not break
+        case_map = {v: body for vals, body in sw.cases for v in vals}
+        c2_texts = [n.text for n in case_map[2] if isinstance(n, Statement)]
+        assert "break;" not in c2_texts, "returning arm should not have break;"
+
+        # The live arms (case 4 and default) must end with break (goto→merge replaced)
+        c4_texts = [n.text for n in case_map[4] if isinstance(n, Statement)]
+        assert "break;" in c4_texts, "live arm should end with break;"
+        def_texts = [n.text for n in sw.default_body if isinstance(n, Statement)]
+        assert "break;" in def_texts, "default live arm should end with break;"
+
+        assert b_c2._absorbed
+        assert b_fall._absorbed
+        assert b_def._absorbed
+        assert not merge._absorbed
