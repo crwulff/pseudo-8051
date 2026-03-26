@@ -780,3 +780,53 @@ def _simplify_orl_zero_check(nodes: List[HIRNode]) -> List[HIRNode]:
         result.append(node)
         i += 1
     return result
+
+
+def _dptr_live_after(nodes: List[HIRNode]) -> bool:
+    """
+    Return True if the current DPTR value is read by any downstream node,
+    stopping early when an assignment kills it (Assign(DPTR, ...) or DPTR++).
+
+    Flow-sensitive: unlike _collect_hir_name_refs, a DPTR write (e.g.
+    DPTR = _dest) stops the scan — the old value is dead past that point.
+    Recurses into IfNode/WhileNode/ForNode bodies conservatively.
+    """
+    for node in nodes:
+        if (isinstance(node, Assign)
+                and isinstance(node.lhs, RegExpr) and node.lhs.name == "DPTR"):
+            return False  # DPTR overwritten; old value dead
+        if _is_dptr_inc_node(node):
+            return False  # Another DPTR++ also overwrites the old value
+        if isinstance(node, IfNode):
+            if (_dptr_live_after(node.then_nodes)
+                    or _dptr_live_after(node.else_nodes)):
+                return True
+        elif isinstance(node, (WhileNode, ForNode)):
+            if _dptr_live_after(node.body_nodes):
+                return True
+        else:
+            if "DPTR" in _collect_hir_name_refs([node]):
+                return True
+    return False
+
+
+def _prune_orphaned_dptr_inc(nodes: List[HIRNode]) -> List[HIRNode]:
+    """
+    Remove DPTR++ nodes that have no downstream DPTR reference.
+
+    Must run after _propagate_values so that XRAM[DPTR] expressions have
+    been resolved to XRAM[name] before we check for surviving references.
+    Recurses into IfNode/WhileNode/ForNode bodies first so nested orphans
+    are eliminated before outer nodes are evaluated.
+
+    Uses _dptr_live_after (flow-sensitive) so that an intervening
+    DPTR = sym assignment correctly kills a previous DPTR++ value.
+    """
+    nodes = recurse_bodies(nodes, _prune_orphaned_dptr_inc)
+    result: List[HIRNode] = []
+    for i, node in enumerate(nodes):
+        if _is_dptr_inc_node(node) and not _dptr_live_after(nodes[i + 1:]):
+            dbg("typesimp", "  prune-orphaned-dptr++")
+            continue
+        result.append(node)
+    return result

@@ -17,6 +17,7 @@ from pseudo8051.passes.typesimplify._post     import (
     _fold_and_prune_setups, _propagate_values,
     _simplify_carry_comparison,
     _simplify_orl_zero_check,
+    _prune_orphaned_dptr_inc,
 )
 from pseudo8051.constants import dbg
 
@@ -56,7 +57,10 @@ class TypeAwareSimplifier(OptimizationPass):
         func.hir = _collapse_dpl_dph(func.hir, reg_map)
         func.hir = _fold_and_prune_setups(func.hir, reg_map)
         func.hir = _propagate_values(func.hir, reg_map)
+        func.hir = _prune_orphaned_dptr_inc(func.hir)
+        func.hir = _fold_and_prune_setups(func.hir, reg_map)
         func.hir = _simplify_carry_comparison(func.hir)
+        func.hir = _fold_and_prune_setups(func.hir, reg_map)  # clean up setups dead after SUBB16 collapse
         func.hir = _simplify_orl_zero_check(func.hir)
 
         func.hir = collapse_mb_assigns(func.hir)
