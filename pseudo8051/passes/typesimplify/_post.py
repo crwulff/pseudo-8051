@@ -6,7 +6,8 @@ import re
 from typing import Callable, Dict, List, Optional
 
 from pseudo8051.ir.hir    import (HIRNode, Statement, Assign, CompoundAssign,
-                                   ExprStmt, ReturnStmt, IfGoto, IfNode, WhileNode, ForNode)
+                                   ExprStmt, ReturnStmt, IfGoto, IfNode, WhileNode, ForNode,
+                                   SwitchNode)
 from pseudo8051.constants import dbg
 from pseudo8051.passes.patterns._utils  import (
     VarInfo, _type_bytes, _byte_names, _walk_expr,
@@ -18,7 +19,7 @@ from pseudo8051.ir.expr import (Expr, UnaryOp, BinOp, Const, Call,
 # ── Shared traversal helper ───────────────────────────────────────────────────
 
 def recurse_bodies(nodes: List[HIRNode], fn: Callable) -> List[HIRNode]:
-    """Recurse fn into IfNode/WhileNode/ForNode bodies; pass other nodes through."""
+    """Recurse fn into IfNode/WhileNode/ForNode/SwitchNode bodies; pass other nodes through."""
     result = []
     for node in nodes:
         if isinstance(node, IfNode):
@@ -29,6 +30,15 @@ def recurse_bodies(nodes: List[HIRNode], fn: Callable) -> List[HIRNode]:
         elif isinstance(node, ForNode):
             result.append(ForNode(node.ea, node.init, node.condition, node.update,
                 fn(node.body_nodes)))
+        elif isinstance(node, SwitchNode):
+            new_cases = [
+                (vals, fn(body) if isinstance(body, list) else body)
+                for vals, body in node.cases
+            ]
+            new_default = fn(node.default_body) if isinstance(node.default_body, list) \
+                          else node.default_body
+            result.append(SwitchNode(node.ea, node.subject, new_cases,
+                                     node.default_label, new_default))
         else:
             result.append(node)
     return result
@@ -375,6 +385,52 @@ def _fold_and_prune_setups(nodes: List[HIRNode],
     return out
 
 
+# ── Return-chain folding ──────────────────────────────────────────────────────
+
+def _fold_return_chains(hir: List[HIRNode], ret_regs: tuple) -> List[HIRNode]:
+    """Fold Assign(ret_reg, expr); ReturnStmt(ret_reg | None) → ReturnStmt(expr)."""
+    ret_reg_set = set(ret_regs)
+
+    def _fold(nodes: List[HIRNode]) -> List[HIRNode]:
+        out: List[HIRNode] = []
+        i = 0
+        while i < len(nodes):
+            node = nodes[i]
+            if (isinstance(node, Assign)
+                    and isinstance(node.lhs, RegExpr)
+                    and node.lhs.name in ret_reg_set
+                    and i + 1 < len(nodes)
+                    and isinstance(nodes[i + 1], ReturnStmt)
+                    and (nodes[i + 1].value is None
+                         or nodes[i + 1].value == RegExpr(node.lhs.name))):
+                out.append(ReturnStmt(node.ea, node.rhs))
+                i += 2
+                continue
+            # Recurse into structured bodies
+            if isinstance(node, IfNode):
+                node = IfNode(node.ea, node.condition,
+                              _fold(node.then_nodes), _fold(node.else_nodes))
+            elif isinstance(node, WhileNode):
+                node = WhileNode(node.ea, node.condition, _fold(node.body_nodes))
+            elif isinstance(node, ForNode):
+                node = ForNode(node.ea, node.init, node.condition,
+                               node.update, _fold(node.body_nodes))
+            elif isinstance(node, SwitchNode):
+                new_cases = [
+                    (vals, _fold(body) if isinstance(body, list) else body)
+                    for vals, body in node.cases
+                ]
+                new_default = _fold(node.default_body) \
+                    if isinstance(node.default_body, list) else node.default_body
+                node = SwitchNode(node.ea, node.subject, new_cases,
+                                  node.default_label, new_default)
+            out.append(node)
+            i += 1
+        return out
+
+    return _fold(hir)
+
+
 # ── Forward single-use propagation ────────────────────────────────────────────
 
 _RE_RETVAL_STMT = re.compile(
@@ -506,6 +562,19 @@ def _count_name_uses_in_nodes(name: str, nodes: List[HIRNode]) -> int:
     return total
 
 
+def _is_reg_free(expr: Expr) -> bool:
+    """True if expr contains no Reg() leaf — safe to forward-substitute."""
+    found_reg = [False]
+
+    def _fn(e: Expr) -> Expr:
+        if isinstance(e, RegExpr):
+            found_reg[0] = True
+        return e
+
+    _walk_expr(expr, _fn)
+    return not found_reg[0]
+
+
 def _propagate_values(nodes: List[HIRNode],
                        reg_map: Dict[str, VarInfo]) -> List[HIRNode]:
     """
@@ -536,7 +605,8 @@ def _propagate_values(nodes: List[HIRNode],
             node = live[i]
             if not (isinstance(node, Assign)
                     and isinstance(node.lhs, RegExpr)
-                    and isinstance(node.rhs, (NameExpr, Const))):
+                    and (isinstance(node.rhs, (NameExpr, Const))
+                         or _is_reg_free(node.rhs))):
                 i += 1
                 continue
             r = node.lhs.name

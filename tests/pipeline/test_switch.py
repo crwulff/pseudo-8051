@@ -1,10 +1,12 @@
 import pytest
 
 from pseudo8051.ir.hir import (Statement, IfGoto, Assign, CompoundAssign,
-                                SwitchNode, GotoStatement, Label)
-from pseudo8051.ir.expr import Reg, Const, BinOp
+                                SwitchNode, GotoStatement, Label, ReturnStmt)
+from pseudo8051.ir.expr import Reg, Const, BinOp, Name
 from pseudo8051.passes.switch import SwitchStructurer, SwitchBodyAbsorber
 from pseudo8051.passes.ifelse import IfElseStructurer
+from pseudo8051.passes.typesimplify import TypeAwareSimplifier
+from pseudo8051.prototypes import PROTOTYPES, FuncProto, Param
 
 from ..helpers import FakeBlock, FakeFunction, connect
 
@@ -500,3 +502,82 @@ class TestSwitchBodyAbsorber:
         assert b_fall._absorbed
         assert b_def._absorbed
         assert not merge._absorbed
+
+
+class TestSwitchNodeTypeSimplify:
+    """TypeAwareSimplifier should substitute the SwitchNode subject and simplify case bodies."""
+
+    def setup_method(self):
+        PROTOTYPES.clear()
+
+    def teardown_method(self):
+        PROTOTYPES.clear()
+
+    def test_subject_substituted_with_proto(self):
+        """SwitchNode(R7, ...) with proto arg1→R7 → subject becomes Name("arg1")."""
+        PROTOTYPES["sw_proto"] = FuncProto(
+            return_type="void",
+            params=[Param("arg1", "uint8_t", ("R7",))],
+        )
+        sw = SwitchNode(
+            ea=0x1000,
+            subject=Reg("R7"),
+            cases=[([2], "label_c2"), ([4], "label_c4")],
+            default_label="label_def",
+        )
+        block = FakeBlock(0x1000, hir=[sw], live_in=frozenset({"R7"}))
+        func = FakeFunction("sw_proto", [block], hir=[sw])
+
+        TypeAwareSimplifier().run(func)
+
+        assert len(func.hir) == 1
+        sw_out = func.hir[0]
+        assert isinstance(sw_out, SwitchNode)
+        assert sw_out.subject == Name("arg1"), \
+            f"Expected Name('arg1'), got {sw_out.subject!r}"
+
+    def test_subject_substituted_from_liveness(self):
+        """Without proto, SwitchNode(R7, ...) with R7 live-in → subject becomes Name('arg1')."""
+        sw = SwitchNode(
+            ea=0x1000,
+            subject=Reg("R7"),
+            cases=[([1], "label_c1"), ([3], "label_c3")],
+            default_label=None,
+        )
+        block = FakeBlock(0x1000, hir=[sw], live_in=frozenset({"R7"}))
+        func = FakeFunction("sw_noproto", [block], hir=[sw])
+
+        TypeAwareSimplifier().run(func)
+
+        assert len(func.hir) == 1
+        sw_out = func.hir[0]
+        assert isinstance(sw_out, SwitchNode)
+        assert sw_out.subject == Name("arg1"), \
+            f"Expected Name('arg1'), got {sw_out.subject!r}"
+
+    def test_case_body_simplified(self):
+        """Case body containing A = R7 relay gets simplified when R7 live-in."""
+        case_body = [
+            Label(0x2000, "label_c2"),
+            Assign(0x2002, Reg("A"), Reg("R7")),
+            Assign(0x2004, Reg("R6"), Reg("A")),
+            Statement(0x2006, "break;"),
+        ]
+        sw = SwitchNode(
+            ea=0x1000,
+            subject=Reg("R7"),
+            cases=[([2], case_body)],
+            default_label=None,
+        )
+        block = FakeBlock(0x1000, hir=[sw], live_in=frozenset({"R7"}))
+        func = FakeFunction("sw_body_simp", [block], hir=[sw])
+
+        TypeAwareSimplifier().run(func)
+
+        sw_out = func.hir[0]
+        assert isinstance(sw_out, SwitchNode)
+        _vals, body = sw_out.cases[0]
+        # A = R7 relay should be absorbed (R6 = R7 or R6 = arg1, not two separate nodes)
+        assigns = [n for n in body if isinstance(n, Assign)]
+        a_assigns = [n for n in assigns if n.lhs == Reg("A")]
+        assert not a_assigns, "A = R7 relay should be collapsed"

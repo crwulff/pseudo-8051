@@ -182,25 +182,38 @@ class Function:
         """
         If this function has a prototype with a non-void return type, replace
         every 'return;' Statement in the HIR with 'return <expr>;' where expr
-        is derived from the prototype's return_regs.
+        is derived from the prototype's return_regs, and fill every
+        ReturnStmt(None) with ReturnStmt(Reg(return_regs[0])).
         """
         from pseudo8051.prototypes import get_proto, return_expr
         proto = get_proto(self.name)
         if proto is None or not proto.return_regs:
             return
-        expr = return_expr(proto)
-        self._walk_fix_returns(self.hir, expr)
+        expr_str = return_expr(proto)
+        ret_reg  = proto.return_regs[0]
+        self._walk_fix_returns(self.hir, expr_str, ret_reg)
 
-    def _walk_fix_returns(self, nodes: List[HIRNode], ret_expr: str) -> None:
-        from pseudo8051.ir.hir import Statement, IfNode, WhileNode, ForNode
+    def _walk_fix_returns(self, nodes: List[HIRNode],
+                          ret_expr: str, ret_reg: str) -> None:
+        from pseudo8051.ir.hir import (Statement, ReturnStmt,
+                                       IfNode, WhileNode, ForNode, SwitchNode)
+        from pseudo8051.ir.expr import Reg
         for node in nodes:
             if isinstance(node, Statement) and node.text == "return;":
                 node.text = f"return {ret_expr};"
+            elif isinstance(node, ReturnStmt) and node.value is None:
+                node.value = Reg(ret_reg)
             elif isinstance(node, IfNode):
-                self._walk_fix_returns(node.then_nodes, ret_expr)
-                self._walk_fix_returns(node.else_nodes, ret_expr)
+                self._walk_fix_returns(node.then_nodes, ret_expr, ret_reg)
+                self._walk_fix_returns(node.else_nodes, ret_expr, ret_reg)
             elif isinstance(node, (WhileNode, ForNode)):
-                self._walk_fix_returns(node.body_nodes, ret_expr)
+                self._walk_fix_returns(node.body_nodes, ret_expr, ret_reg)
+            elif isinstance(node, SwitchNode):
+                for _vals, body in node.cases:
+                    if isinstance(body, list):
+                        self._walk_fix_returns(body, ret_expr, ret_reg)
+                if isinstance(node.default_body, list):
+                    self._walk_fix_returns(node.default_body, ret_expr, ret_reg)
 
     # ── Rendering ─────────────────────────────────────────────────────────
 

@@ -6,7 +6,8 @@ import re
 from typing import Dict, List, Optional
 
 from pseudo8051.ir.hir    import (HIRNode, Statement, Assign, CompoundAssign,
-                                   ExprStmt, ReturnStmt, IfGoto, IfNode, WhileNode, ForNode)
+                                   ExprStmt, ReturnStmt, IfGoto, IfNode, WhileNode, ForNode,
+                                   SwitchNode)
 from pseudo8051.passes.patterns         import _PATTERNS
 from pseudo8051.passes.patterns._utils  import (
     VarInfo, _replace_pairs, _replace_xram_syms, _replace_single_regs,
@@ -212,6 +213,18 @@ def _transform_default(node: HIRNode,
             update     = new_update,
             body_nodes = simplify_fn(node.body_nodes, reg_map),
         )
+    if isinstance(node, SwitchNode):
+        new_subject = _subst_expr(node.subject, reg_map)
+        new_cases = [
+            (vals, simplify_fn(body, reg_map) if isinstance(body, list) else body)
+            for vals, body in node.cases
+        ]
+        new_default_body = (
+            simplify_fn(node.default_body, reg_map)
+            if isinstance(node.default_body, list) else node.default_body
+        )
+        return SwitchNode(node.ea, new_subject, new_cases,
+                          node.default_label, new_default_body)
     return node
 
 

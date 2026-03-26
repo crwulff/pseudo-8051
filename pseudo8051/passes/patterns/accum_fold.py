@@ -21,7 +21,7 @@ import re
 from typing import Dict, List, Optional
 
 from pseudo8051.ir.hir import HIRNode, Assign, CompoundAssign, ReturnStmt, IfGoto, IfNode
-from pseudo8051.ir.expr import Expr, Reg, Name, XRAMRef, BinOp
+from pseudo8051.ir.expr import Expr, Reg, Name, XRAMRef, BinOp, RegGroup, Const, Cast
 from pseudo8051.constants import dbg
 from pseudo8051.passes.patterns.base   import Pattern, Match, Simplify
 from pseudo8051.passes.patterns._utils import (
@@ -110,6 +110,35 @@ class AccumFoldPattern(Pattern):
         num_compound = 0
         while j < len(nodes):
             cn = nodes[j]
+
+            # Normalize A += A → A *= 2 for chain purposes (issue 2.2)
+            if (isinstance(cn, CompoundAssign)
+                    and cn.lhs == Reg("A")
+                    and cn.op == "+=" and cn.rhs == Reg("A")):
+                a_expr = BinOp(a_expr, "*", Const(2))
+                num_compound += 1
+                j += 1
+                continue
+
+            # MUL AB: Assign(B, b_val) + Assign({B,A}, A*B) → Cast(uint8_t, a_expr*b_val) (issue 2.1)
+            if (isinstance(cn, Assign)
+                    and isinstance(cn.lhs, Reg) and cn.lhs.name == "B"
+                    and not _contains_a(cn.rhs)
+                    and j + 1 < len(nodes)):
+                nxt = nodes[j + 1]
+                if (isinstance(nxt, Assign)
+                        and isinstance(nxt.lhs, RegGroup)
+                        and set(nxt.lhs.regs) == {"B", "A"}
+                        and isinstance(nxt.rhs, BinOp)
+                        and nxt.rhs.lhs == Reg("A")
+                        and nxt.rhs.op == "*"
+                        and nxt.rhs.rhs == Reg("B")):
+                    b_val = _subst_all_expr(cn.rhs, reg_map)
+                    a_expr = Cast("uint8_t", BinOp(a_expr, "*", b_val))
+                    j += 2
+                    num_compound += 1
+                    continue
+
             if not (isinstance(cn, CompoundAssign)
                     and cn.lhs == Reg("A")
                     and not _contains_a(cn.rhs)):

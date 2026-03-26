@@ -7,6 +7,7 @@ from pseudo8051.passes    import OptimizationPass
 from pseudo8051.passes.patterns.mb_assign import collapse_mb_assigns
 from pseudo8051.passes.patterns._utils  import VarInfo
 from pseudo8051.ir.function import Function
+from pseudo8051.constants import PARAM_REG_ORDER
 
 from pseudo8051.passes.typesimplify._regmap   import (
     _build_reg_map, _augment_with_local_vars, _augment_with_callee_regs,
@@ -18,6 +19,7 @@ from pseudo8051.passes.typesimplify._post     import (
     _simplify_carry_comparison,
     _simplify_orl_zero_check,
     _prune_orphaned_dptr_inc,
+    _fold_return_chains,
 )
 from pseudo8051.constants import dbg
 
@@ -40,6 +42,10 @@ class TypeAwareSimplifier(OptimizationPass):
                             f"reg_map keys={list(reg_map.keys())}")
         else:
             reg_map = {}
+            # Synthesize parameter entries from liveness when no prototype exists (issue 2.3)
+            for idx, reg in enumerate(r for r in PARAM_REG_ORDER if r in live_in):
+                info = VarInfo(f"arg{idx + 1}", "uint8_t", (reg,), is_param=True)
+                reg_map[reg] = info
             dbg("typesimp", f"{func.name}: no caller proto, "
                             "scanning callee prototypes for register mappings")
 
@@ -83,3 +89,9 @@ class TypeAwareSimplifier(OptimizationPass):
                              if v.xram_addr else ""))
                 for v in local_decls
             ] + func.hir
+
+        # Fold Assign(ret_reg, expr); ReturnStmt(ret_reg) → ReturnStmt(expr) (issue 1)
+        ret_regs = tuple(proto.return_regs) if proto and proto.return_regs \
+                   else tuple(getattr(func, "return_registers", []))
+        if ret_regs:
+            func.hir = _fold_return_chains(func.hir, ret_regs)
