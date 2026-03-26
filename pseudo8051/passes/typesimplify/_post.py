@@ -12,7 +12,8 @@ from pseudo8051.passes.patterns._utils  import (
     VarInfo, _type_bytes, _byte_names, _walk_expr,
 )
 from pseudo8051.ir.expr import (Expr, UnaryOp, BinOp, Const, Call,
-                                 Reg as RegExpr, RegGroup as RegGroupExpr, Name as NameExpr)
+                                 Reg as RegExpr, RegGroup as RegGroupExpr, Name as NameExpr,
+                                 XRAMRef, IRAMRef)
 
 # ── Shared traversal helper ───────────────────────────────────────────────────
 
@@ -371,3 +372,242 @@ def _fold_and_prune_setups(nodes: List[HIRNode],
                 continue
         out.append(node)
     return out
+
+
+# ── Forward single-use propagation ────────────────────────────────────────────
+
+_RE_RETVAL_STMT = re.compile(
+    r'^(?:\w[\w\s*]*?\s+)?(\w*retval\d+)\s*=\s*(.+?);$'
+)
+
+
+def _get_written_regs(node: HIRNode) -> frozenset:
+    """Return the set of register/name strings written (defined) by node."""
+    if isinstance(node, (Assign, CompoundAssign)):
+        lhs = node.lhs
+        if isinstance(lhs, RegExpr):
+            return frozenset({lhs.name})
+        if isinstance(lhs, RegGroupExpr):
+            names = set(lhs.regs)
+            names.add("".join(lhs.regs))
+            return frozenset(names)
+    if isinstance(node, Statement):
+        # Written reg is the LHS token before " = "
+        eq = node.text.find(" = ")
+        if eq > 0:
+            lhs_tok = node.text[:eq].split()[-1]
+            return frozenset({lhs_tok})
+    return frozenset()
+
+
+def _count_reg_uses_in_node(r: str, node: HIRNode) -> int:
+    """Count read-position occurrences of Reg/Name(r) in node."""
+    count = [0]
+
+    def _fn(e: Expr) -> Expr:
+        if isinstance(e, (RegExpr, NameExpr)) and e.name == r:
+            count[0] += 1
+        return e
+
+    if isinstance(node, Assign):
+        _walk_expr(node.rhs, _fn)
+        # Also count in compound LHS (e.g. XRAMRef inner)
+        if not isinstance(node.lhs, (RegExpr, RegGroupExpr)):
+            _walk_expr(node.lhs, _fn)
+    elif isinstance(node, CompoundAssign):
+        _walk_expr(node.rhs, _fn)
+    elif isinstance(node, ExprStmt):
+        _walk_expr(node.expr, _fn)
+    elif isinstance(node, ReturnStmt) and node.value is not None:
+        _walk_expr(node.value, _fn)
+    elif isinstance(node, IfGoto):
+        _walk_expr(node.cond, _fn)
+    elif isinstance(node, Statement):
+        return len(re.findall(r'\b' + re.escape(r) + r'\b', node.text))
+    return count[0]
+
+
+def _subst_reg_in_node(node: HIRNode, r: str,
+                        replacement: Expr) -> Optional[HIRNode]:
+    """
+    Replace Reg/Name(r) → replacement in read positions of node.
+    Returns updated node, or None if r does not appear.
+    """
+    def _fn(e: Expr) -> Expr:
+        if isinstance(e, (RegExpr, NameExpr)) and e.name == r:
+            return replacement
+        return e
+
+    if isinstance(node, Assign):
+        new_rhs = _walk_expr(node.rhs, _fn)
+        new_lhs = node.lhs
+        if not isinstance(node.lhs, (RegExpr, RegGroupExpr)):
+            new_lhs = _walk_expr(node.lhs, _fn)
+        if new_rhs is node.rhs and new_lhs is node.lhs:
+            return None
+        return Assign(node.ea, new_lhs, new_rhs)
+
+    if isinstance(node, CompoundAssign):
+        new_rhs = _walk_expr(node.rhs, _fn)
+        if new_rhs is node.rhs:
+            return None
+        return CompoundAssign(node.ea, node.lhs, node.op, new_rhs)
+
+    if isinstance(node, ExprStmt):
+        new_expr = _walk_expr(node.expr, _fn)
+        if new_expr is node.expr:
+            return None
+        return ExprStmt(node.ea, new_expr)
+
+    if isinstance(node, ReturnStmt) and node.value is not None:
+        new_val = _walk_expr(node.value, _fn)
+        if new_val is node.value:
+            return None
+        return ReturnStmt(node.ea, new_val)
+
+    if isinstance(node, IfGoto):
+        new_cond = _walk_expr(node.cond, _fn)
+        if new_cond is node.cond:
+            return None
+        return IfGoto(node.ea, new_cond, node.target)
+
+    if isinstance(node, Statement):
+        pat = re.compile(r'\b' + re.escape(r) + r'\b')
+        if not pat.search(node.text):
+            return None
+        repl_str = replacement.render() if isinstance(replacement, Expr) else str(replacement)
+        eq = node.text.find(" = ")
+        if eq > 0:
+            rhs = node.text[eq + 3:]
+            if pat.search(rhs):
+                return Statement(node.ea, node.text[:eq + 3] + pat.sub(repl_str, rhs))
+            return None
+        return Statement(node.ea, pat.sub(repl_str, node.text))
+
+    return None
+
+
+def _as_retval_stmt(node: HIRNode) -> Optional[tuple]:
+    """Return (retval_name, call_expr_str) if node is a retval Statement; else None."""
+    if not isinstance(node, Statement):
+        return None
+    m = _RE_RETVAL_STMT.match(node.text)
+    if m:
+        return (m.group(1), m.group(2))
+    return None
+
+
+def _count_name_uses_in_nodes(name: str, nodes: List[HIRNode]) -> int:
+    """Count total occurrences of Name/Reg(name) in read positions across nodes."""
+    total = 0
+    for node in nodes:
+        total += _count_reg_uses_in_node(name, node)
+    return total
+
+
+def _propagate_values(nodes: List[HIRNode],
+                       reg_map: Dict[str, VarInfo]) -> List[HIRNode]:
+    """
+    Forward single-use propagation pass.
+
+    Sub-pass A: For each Assign(Reg(r), Name/Const(n)) at index i with exactly
+    one downstream use before r is written again, substitute n into that use
+    and remove the assignment.
+
+    Sub-pass B: For each retval Statement with exactly one downstream use of
+    retval_name, inline the call expression into the target and remove the
+    Statement.
+
+    Recurses into IfNode/WhileNode/ForNode bodies first.
+    """
+    # Recurse into structured nodes first.
+    work = recurse_bodies(nodes, lambda ns: _propagate_values(ns, reg_map))
+
+    # Iterate until stable (multiple passes may be needed).
+    changed = True
+    while changed:
+        changed = False
+
+        # Sub-pass A: register copy propagation.
+        live = list(work)
+        i = 0
+        while i < len(live):
+            node = live[i]
+            if not (isinstance(node, Assign)
+                    and isinstance(node.lhs, RegExpr)
+                    and isinstance(node.rhs, (NameExpr, Const))):
+                i += 1
+                continue
+            r = node.lhs.name
+            replacement = node.rhs
+
+            # Scan forward counting uses, stopping when r is written.
+            total_uses = 0
+            use_idx = None
+            for j in range(i + 1, len(live)):
+                written = _get_written_regs(live[j])
+                uses_here = _count_reg_uses_in_node(r, live[j])
+                total_uses += uses_here
+                if uses_here > 0 and use_idx is None:
+                    use_idx = j
+                if r in written:
+                    break
+
+            if total_uses == 1 and use_idx is not None:
+                new_node = _subst_reg_in_node(live[use_idx], r, replacement)
+                if new_node is not None:
+                    live[use_idx] = new_node
+                    live[i] = None
+                    dbg("typesimp", f"  prop-values: folded {r} into node {use_idx}")
+                    changed = True
+
+            i += 1
+
+        live = [n for n in live if n is not None]
+
+        # Sub-pass B: retval statement inlining.
+        i = 0
+        while i < len(live):
+            rv = _as_retval_stmt(live[i])
+            if rv is None:
+                i += 1
+                continue
+            retval_name, call_expr_str = rv
+            remaining = live[i + 1:]
+            total_uses = _count_name_uses_in_nodes(retval_name, remaining)
+
+            if total_uses == 1:
+                # Find the target node.
+                for j, tgt in enumerate(remaining):
+                    if _count_reg_uses_in_node(retval_name, tgt) == 1:
+                        abs_j = i + 1 + j
+                        # Inline: build new node.
+                        if (isinstance(tgt, Assign)
+                                and isinstance(tgt.rhs, (NameExpr, RegExpr))
+                                and tgt.rhs.name == retval_name):
+                            lhs_str = tgt.lhs.render() if isinstance(tgt.lhs, Expr) else str(tgt.lhs)
+                            live[abs_j] = Statement(tgt.ea,
+                                                    f"{lhs_str} = {call_expr_str};")
+                        else:
+                            # Text substitution for Statement targets.
+                            new_node = _subst_reg_in_node(
+                                tgt, retval_name, NameExpr(call_expr_str))
+                            if new_node is not None:
+                                # Fix up: NameExpr renders with no parens; re-render
+                                # by doing a text sub on the resulting text.
+                                if isinstance(new_node, Statement):
+                                    live[abs_j] = new_node
+                                else:
+                                    live[abs_j] = new_node
+                        live[i] = None
+                        dbg("typesimp",
+                            f"  prop-values: inlined {retval_name} into node {abs_j}")
+                        changed = True
+                        break
+
+            i += 1
+
+        live = [n for n in live if n is not None]
+        work = live
+
+    return work

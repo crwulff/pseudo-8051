@@ -219,20 +219,35 @@ def _transform_default(node: HIRNode,
 
 def _simplify_once(nodes: List[HIRNode], reg_map: Dict[str, VarInfo],
                    simplify_fn=None) -> List[HIRNode]:
-    """Apply one round of pattern matching + default transforms to each node."""
+    """Apply one round of pattern matching + default transforms to each node.
+
+    Tracks registers written by previous nodes so that non-param callee-return
+    placeholder mappings (e.g. R7 → "retval") are suppressed once the register
+    has been overwritten.
+    """
     if simplify_fn is None:
         simplify_fn = _simplify
     out: List[HIRNode] = []
+    written: set = set()   # registers overwritten so far in this pass
     for node in nodes:
+        # Suppress non-param entries for registers already written in this pass.
+        if written:
+            eff = {k: v for k, v in reg_map.items()
+                   if not (isinstance(v, VarInfo) and not v.is_param
+                           and not v.xram_sym and v.regs
+                           and any(r in written for r in v.regs))}
+        else:
+            eff = reg_map
         for pat in _PATTERNS:
-            result = pat.match([node], 0, reg_map, simplify_fn)
+            result = pat.match([node], 0, eff, simplify_fn)
             if result is not None:
                 out.extend(result[0])
                 break
         else:
-            transformed = _transform_default(node, reg_map, simplify_fn)
+            transformed = _transform_default(node, eff, simplify_fn)
             if transformed is not None:
                 out.append(transformed)
+        written.update(_get_written_regs(node))
     return out
 
 
@@ -267,6 +282,17 @@ def _simplify(nodes: List[HIRNode], reg_map: Dict[str, VarInfo],
             result = pat.match(nodes, i, eff, _sub_simplify)
             if result is not None:
                 replacement, new_i = result
+                # Propagate new/changed keys from eff back to the original reg_map
+                # (patterns mutate their reg_map arg, which may be a _kill_params copy).
+                # Skip keys that _kill_params intentionally removed (killed params).
+                if eff is not reg_map:
+                    for k, v in eff.items():
+                        if reg_map.get(k) is not v:
+                            orig_v = reg_map.get(k)
+                            if not (isinstance(orig_v, VarInfo) and orig_v.is_param
+                                    and orig_v.regs
+                                    and any(r in killed for r in orig_v.regs)):
+                                reg_map[k] = v
                 # Gather kills from the consumed range, then recompute eff
                 for j in range(i, new_i):
                     _update_killed(nodes[j])

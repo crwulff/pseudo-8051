@@ -259,6 +259,9 @@ def _subst_pairs_in_expr(expr: Expr, reg_map: Dict[str, "VarInfo"]) -> Expr:
         elif len(key) == 2 and len(vinfo.regs) == 1 and not vinfo.is_param:
             # Single-register consolidated XRAM local (e.g. R3 → "_src_type")
             pair_map[key] = vinfo.name
+        elif len(key) == 1 and len(vinfo.regs) == 1 and not vinfo.is_param:
+            # Single-char register (e.g. "A" → "retval1")
+            pair_map[key] = vinfo.name
 
     if not pair_map:
         return expr
