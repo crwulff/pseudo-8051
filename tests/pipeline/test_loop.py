@@ -1,5 +1,5 @@
 from pseudo8051.ir.hir import Statement, ForNode, WhileNode, IfNode, IfGoto, GotoStatement
-from pseudo8051.ir.expr import BinOp, Const, Reg
+from pseudo8051.ir.expr import BinOp, Const, Reg, UnaryOp
 from pseudo8051.passes.loops import LoopStructurer
 
 from ..helpers import FakeBlock, FakeFunction, connect
@@ -169,3 +169,26 @@ class TestLoopStructurer:
         assert body._absorbed
         assert tail._absorbed
         assert not exit_b._absorbed
+
+    def test_forward_exit_condition_inverted(self):
+        """JNC-style forward exit: while condition should be inverted (C, not !C)."""
+        exit_b = FakeBlock(0x2020, hir=[Statement(0x2020, "return;")], label="label_exit")
+        body   = FakeBlock(0x1010, hir=[
+            Statement(0x1010, "A = R5;"),
+            GotoStatement(0x1012, "label_1000"),
+        ])
+        header = FakeBlock(0x1000, hir=[
+            IfGoto(0x1000, UnaryOp("!", Reg("C")), "label_exit"),
+        ], label="label_1000")
+        connect(header, exit_b)   # branch-taken → exit
+        connect(header, body)     # fall-through → body
+        connect(body,   header)   # back-edge
+
+        func = FakeFunction("jnc_f", [header, body, exit_b])
+        LoopStructurer().run(func)
+
+        while_nodes = [n for n in header.hir if isinstance(n, WhileNode)]
+        assert len(while_nodes) == 1
+        wn = while_nodes[0]
+        # !C inverted to C
+        assert isinstance(wn.condition, Reg) and wn.condition.name == "C"

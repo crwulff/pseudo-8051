@@ -611,3 +611,110 @@ def _propagate_values(nodes: List[HIRNode],
         work = live
 
     return work
+
+
+# ── 16-bit SUBB comparison collapsing ────────────────────────────────────────
+
+def _match_subb16(nodes: List[HIRNode], k: int):
+    """Try to match CLR C + SUBB lo + MOV A,Rhi + SUBB hi starting at index k.
+    Returns (Rlo_sub, Rhi_min, Rhi_sub) or None."""
+    if k + 3 >= len(nodes):
+        return None
+    n0, n1, n2, n3 = nodes[k], nodes[k+1], nodes[k+2], nodes[k+3]
+    # CLR C: Assign(Reg("C"), Const(0))
+    if not (isinstance(n0, Assign) and isinstance(n0.lhs, RegExpr) and n0.lhs.name == "C"
+            and isinstance(n0.rhs, Const) and n0.rhs.value == 0):
+        return None
+    # SUBB lo: CompoundAssign(Reg("A"), "-=", BinOp(Reg(Rlo_sub), "+", Reg("C")))
+    if not (isinstance(n1, CompoundAssign) and isinstance(n1.lhs, RegExpr) and n1.lhs.name == "A"
+            and n1.op == "-=" and isinstance(n1.rhs, BinOp) and n1.rhs.op == "+"
+            and isinstance(n1.rhs.lhs, RegExpr) and isinstance(n1.rhs.rhs, RegExpr)
+            and n1.rhs.rhs.name == "C"):
+        return None
+    Rlo_sub = n1.rhs.lhs.name
+    # MOV A, Rhi_min: Assign(Reg("A"), Reg(Rhi_min))
+    if not (isinstance(n2, Assign) and isinstance(n2.lhs, RegExpr) and n2.lhs.name == "A"
+            and isinstance(n2.rhs, RegExpr)):
+        return None
+    Rhi_min = n2.rhs.name
+    # SUBB hi: CompoundAssign(Reg("A"), "-=", BinOp(Reg(Rhi_sub), "+", Reg("C")))
+    if not (isinstance(n3, CompoundAssign) and isinstance(n3.lhs, RegExpr) and n3.lhs.name == "A"
+            and n3.op == "-=" and isinstance(n3.rhs, BinOp) and n3.rhs.op == "+"
+            and isinstance(n3.rhs.lhs, RegExpr) and isinstance(n3.rhs.rhs, RegExpr)
+            and n3.rhs.rhs.name == "C"):
+        return None
+    Rhi_sub = n3.rhs.lhs.name
+    return (Rlo_sub, Rhi_min, Rhi_sub)
+
+
+def _find_reggroup_name(nodes: List[HIRNode], before_idx: int, target_reg: str) -> Optional[str]:
+    """Search nodes[:before_idx] backward for Assign(RegGroup, Name) containing target_reg."""
+    for node in reversed(nodes[:before_idx]):
+        if (isinstance(node, Assign) and isinstance(node.lhs, RegGroupExpr)
+                and target_reg in node.lhs.regs and isinstance(node.rhs, NameExpr)):
+            return node.rhs.name
+    return None
+
+
+def _simplify_carry_comparison(nodes: List[HIRNode]) -> List[HIRNode]:
+    """
+    For each WhileNode with condition Reg("C"), scan body_nodes for the 4-node
+    CLR C + SUBB lo + MOV A + SUBB hi sequence. If found and both operand names
+    can be resolved via preceding RegGroup assignments, replace the condition with
+    BinOp(Name(minuend), "<", Name(subtrahend)) and remove the 4 nodes.
+    Recurses into nested structured nodes.
+    """
+    result: List[HIRNode] = []
+    for node in nodes:
+        if isinstance(node, WhileNode):
+            # Recurse into body first
+            new_body = _simplify_carry_comparison(node.body_nodes)
+            # Check if condition is Reg("C")
+            if isinstance(node.condition, RegExpr) and node.condition.name == "C":
+                transformed = _try_collapse_subb16(node.condition, new_body)
+                if transformed is not None:
+                    new_cond, new_body = transformed
+                    result.append(WhileNode(node.ea, new_cond, new_body))
+                    continue
+            result.append(WhileNode(node.ea, node.condition, new_body))
+        elif isinstance(node, IfNode):
+            result.append(IfNode(node.ea, node.condition,
+                _simplify_carry_comparison(node.then_nodes),
+                _simplify_carry_comparison(node.else_nodes)))
+        elif isinstance(node, ForNode):
+            result.append(ForNode(node.ea, node.init, node.condition, node.update,
+                _simplify_carry_comparison(node.body_nodes)))
+        else:
+            result.append(node)
+    return result
+
+
+def _try_collapse_subb16(cond, body: List[HIRNode]):
+    """
+    Scan body for the 4-node SUBB16 sequence and resolve names from preceding
+    RegGroup assigns. Returns (new_cond, new_body) or None.
+    """
+    for k in range(len(body)):
+        match = _match_subb16(body, k)
+        if match is None:
+            continue
+        Rlo_sub, Rhi_min, Rhi_sub = match
+
+        # Resolve subtrahend (register pair containing Rhi_sub)
+        subtrahend = _find_reggroup_name(body, k, Rhi_sub)
+        if subtrahend is None:
+            continue
+
+        # Resolve minuend (register pair containing Rhi_min)
+        minuend = _find_reggroup_name(body, k, Rhi_min)
+        if minuend is None:
+            continue
+
+        # Remove the 4-node SUBB sequence from body
+        new_body = body[:k] + body[k+4:]
+        new_cond = BinOp(NameExpr(minuend), "<", NameExpr(subtrahend))
+        dbg("typesimp",
+            f"  subb16-collapse: {minuend} < {subtrahend}"
+            f" (via {Rhi_min},{Rlo_sub} - {Rhi_sub},{Rlo_sub})")
+        return (new_cond, new_body)
+    return None

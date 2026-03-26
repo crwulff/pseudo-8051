@@ -199,17 +199,26 @@ class LoopStructurer(OptimizationPass):
         elif branch_node is not None:
             if isinstance(branch_node, IfGoto):
                 cond: object = branch_node.cond  # Expr
+                branch_target = branch_node.label
             elif isinstance(branch_node, Statement):
-                m = re.match(r'^if \((.+)\) goto \S+;$', branch_node.text)
+                m = re.match(r'^if \((.+)\) goto (\S+?);$', branch_node.text)
                 if m:
                     cond = m.group(1)
+                    branch_target = m.group(2)
                 else:
                     dbg("loops", f"  → can't parse branch {branch_node.text!r}, skipping")
                     return
             else:
                 dbg("loops", f"  → unhandled branch node type, skipping")
                 return
-            dbg("loops", f"  → WhileNode  cond={cond!r}")
+
+            # Determine direction: forward exit (invert) vs back-edge continue (use directly).
+            label_map = {b.label: b.start_ea for b in func._block_map.values() if b.label}
+            target_ea = label_map.get(branch_target)
+            is_exit = (target_ea is not None) and (target_ea not in body_eas)
+            if is_exit:
+                cond = _invert_cond(cond)
+            dbg("loops", f"  → WhileNode  cond={cond!r}  exit_inverted={is_exit}")
             # Body HIR = header_stmts body + loop body
             loop_node = WhileNode(
                 loop_ea,
