@@ -44,6 +44,9 @@ def _is_dptr_inc_node(node: HIRNode) -> bool:
             and node.expr.operand == RegExpr("DPTR"))
 
 
+_RE_BYTE_FIELD = re.compile(r'^(.+)\.(?:hi|lo|b\d+)$')
+
+
 # ── XRAM local load consolidation ────────────────────────────────────────────
 
 def _consolidate_xram_local_loads(nodes: List[HIRNode],
@@ -57,8 +60,6 @@ def _consolidate_xram_local_loads(nodes: List[HIRNode],
     2. Rn=Name("local") where "local" is a 1-byte XRAM local (no byte-field suffix)
        Kept as-is; mutates reg_map[Rn] = VarInfo("local", type, (Rn,), is_param=True).
     """
-    _RE_BYTE_FIELD = re.compile(r'^(.+)\.(?:hi|lo|b\d+)$')
-
     def _parent_name(s):
         m = _RE_BYTE_FIELD.match(s)
         return m.group(1) if m else None
@@ -718,3 +719,64 @@ def _try_collapse_subb16(cond, body: List[HIRNode]):
             f" (via {Rhi_min},{Rlo_sub} - {Rhi_sub},{Rlo_sub})")
         return (new_cond, new_body)
     return None
+
+
+# ── ORL + JZ zero-check simplification ───────────────────────────────────────
+
+def _extract_zero_cond(node: HIRNode, parent: str) -> Optional[BinOp]:
+    """Return BinOp(Name(parent), op, 0) if node tests something against 0; else None."""
+    cond = None
+    if isinstance(node, IfNode):
+        cond = node.condition
+    elif isinstance(node, IfGoto):
+        cond = node.cond
+    if (isinstance(cond, BinOp)
+            and cond.op in ("==", "!=")
+            and isinstance(cond.rhs, Const) and cond.rhs.value == 0):
+        return BinOp(NameExpr(parent), cond.op, Const(0))
+    return None
+
+
+def _replace_cond(node: HIRNode, new_cond) -> HIRNode:
+    """Return a copy of node (IfNode or IfGoto) with new_cond substituted."""
+    if isinstance(node, IfNode):
+        return IfNode(node.ea, new_cond, node.then_nodes, node.else_nodes)
+    if isinstance(node, IfGoto):
+        return IfGoto(node.ea, new_cond, node.target)
+    return node
+
+
+def _simplify_orl_zero_check(nodes: List[HIRNode]) -> List[HIRNode]:
+    """
+    Recognise the 8051 ORL + JZ idiom for 16-bit zero tests.
+
+    Pattern (consecutive):
+      CompoundAssign(Reg("A"), "|=", Name(v))   where v has .hi/.lo/.bN suffix
+      IfNode or IfGoto with BinOp(anything, "==" | "!=", Const(0)) condition
+
+    Removes the ORL node and replaces the condition with
+    BinOp(Name(parent_of_v), op, Const(0)).
+    Recurses into WhileNode / IfNode / ForNode bodies first.
+    """
+    nodes = recurse_bodies(nodes, _simplify_orl_zero_check)
+    result: List[HIRNode] = []
+    i = 0
+    while i < len(nodes):
+        node = nodes[i]
+        if (isinstance(node, CompoundAssign)
+                and isinstance(node.lhs, RegExpr) and node.lhs.name == "A"
+                and node.op == "|="
+                and isinstance(node.rhs, NameExpr)):
+            m = _RE_BYTE_FIELD.match(node.rhs.name)
+            if m and i + 1 < len(nodes):
+                parent = m.group(1)
+                new_cond = _extract_zero_cond(nodes[i + 1], parent)
+                if new_cond is not None:
+                    result.append(_replace_cond(nodes[i + 1], new_cond))
+                    dbg("typesimp",
+                        f"  orl-zero-check: A|={node.rhs.name} → {parent} {new_cond.op} 0")
+                    i += 2
+                    continue
+        result.append(node)
+        i += 1
+    return result

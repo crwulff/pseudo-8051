@@ -197,7 +197,7 @@ def _augment_with_callee_regs(hir: List[HIRNode],
     throughout 8051 code and a global rename would produce wrong output.
     """
     from pseudo8051.prototypes import get_proto
-    _SKIP = re.compile(r'^(?:DPTR|DPH|DPL|SP|PC)$')
+    _SKIP = re.compile(r'^(?:DPTR|DPH|DPL|A|SP|PC)$')
     result = dict(reg_map)
     for name in _collect_call_names(hir):
         proto = get_proto(name)

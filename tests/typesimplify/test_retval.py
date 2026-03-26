@@ -24,7 +24,7 @@ class TestRetvalRenaming:
         assert texts[0] == "uint32_t retval1 = callee(arg);"
 
     def test_u8_retval(self):
-        """A = getter(); with caller return → uint8_t retval1 = getter();"""
+        """A = getter(); with no caller proto → A stays as-is (A excluded from callee regmap)."""
         PROTOTYPES["getter"] = FuncProto(
             return_type="uint8_t",
             return_regs=("A",),
@@ -33,4 +33,4 @@ class TestRetvalRenaming:
         func = make_single_block_func("user", ["A = getter();"])
         TypeAwareSimplifier().run(func)
         texts = _texts(func)
-        assert texts[0] == "uint8_t retval1 = getter();"
+        assert texts[0] == "A = getter();"

@@ -16,6 +16,7 @@ from pseudo8051.passes.typesimplify._post     import (
     _consolidate_xram_local_loads, _collapse_dpl_dph,
     _fold_and_prune_setups, _propagate_values,
     _simplify_carry_comparison,
+    _simplify_orl_zero_check,
 )
 from pseudo8051.constants import dbg
 
@@ -56,6 +57,7 @@ class TypeAwareSimplifier(OptimizationPass):
         func.hir = _fold_and_prune_setups(func.hir, reg_map)
         func.hir = _propagate_values(func.hir, reg_map)
         func.hir = _simplify_carry_comparison(func.hir)
+        func.hir = _simplify_orl_zero_check(func.hir)
 
         func.hir = collapse_mb_assigns(func.hir)
 
