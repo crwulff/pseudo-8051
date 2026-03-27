@@ -1,6 +1,7 @@
 from pseudo8051.passes.typesimplify import TypeAwareSimplifier
 from pseudo8051.prototypes import PROTOTYPES, FuncProto, Param
-from pseudo8051.ir.hir import Statement
+from pseudo8051.ir.hir import Statement, Assign
+from pseudo8051.ir.expr import Reg, XRAMRef, Name
 
 from ..helpers import make_single_block_func
 
@@ -74,3 +75,70 @@ class TestUsercallParamSubst:
         TypeAwareSimplifier().run(func)
         texts = _texts(func)
         assert "XRAM[X] = val;" in texts
+
+
+class TestParamKillOnOverwrite:
+    """Param-register substitution must stop after the register is overwritten."""
+
+    def _rendered(self, func):
+        """Return flat list of rendered text lines from all HIR nodes."""
+        lines = []
+        for node in func.hir:
+            lines.extend(text for _, text in node.render())
+        return lines
+
+    def test_basic_overwrite_kills_param_name(self):
+        """
+        Proto: flags1→R7, osd_addr→R2R3
+        HIR:  A = R7; R7 = A; XRAM[X] = R7
+        After AccumRelay collapses A = R7; R7 = A to R7 = R7 (no-op), then
+        the explicit Assign(R7, Reg("R2")) overwrite means XRAM[X] = R7 should
+        NOT be substituted with flags1.
+        """
+        PROTOTYPES["f_kill1"] = FuncProto(
+            return_type="void",
+            params=[
+                Param("flags1", "uint8_t", ("R7",)),
+                Param("osd_addr", "uint16_t", ("R2", "R3")),
+            ],
+        )
+        # Simulate: R7 gets overwritten with R2 (osd_addr.hi), then used
+        nodes = [
+            Assign(0x1000, Reg("R7"), Reg("R2")),          # R7 = osd_addr.hi
+            Assign(0x1002, XRAMRef(Name("OSD_ADDR_MSB")), Reg("R7")),  # use R7
+        ]
+        func = make_single_block_func("f_kill1", nodes)
+        TypeAwareSimplifier().run(func)
+        lines = self._rendered(func)
+        # R7 store should use osd_addr name, not flags1
+        assert not any("flags1" in l for l in lines), \
+            f"flags1 leaked after overwrite: {lines}"
+
+    def test_two_sequential_overwrites(self):
+        """
+        Proto: flags1→R7, osd_addr→R2R3
+        HIR:
+          R7 = R2                          (overwrite 1: R7 = osd_addr.hi)
+          XRAM[OSD_ADDR_MSB] = R7          (use 1)
+          R7 = R3                          (overwrite 2: R7 = osd_addr.lo)
+          XRAM[OSD_ADDR_LSB] = R7          (use 2)
+        Both XRAM stores must NOT contain flags1.
+        """
+        PROTOTYPES["f_kill2"] = FuncProto(
+            return_type="void",
+            params=[
+                Param("flags1", "uint8_t", ("R7",)),
+                Param("osd_addr", "uint16_t", ("R2", "R3")),
+            ],
+        )
+        nodes = [
+            Assign(0x1000, Reg("R7"), Reg("R2")),
+            Assign(0x1002, XRAMRef(Name("OSD_ADDR_MSB")), Reg("R7")),
+            Assign(0x1004, Reg("R7"), Reg("R3")),
+            Assign(0x1006, XRAMRef(Name("OSD_ADDR_LSB")), Reg("R7")),
+        ]
+        func = make_single_block_func("f_kill2", nodes)
+        TypeAwareSimplifier().run(func)
+        lines = self._rendered(func)
+        assert not any("flags1" in l for l in lines), \
+            f"flags1 leaked after overwrite: {lines}"

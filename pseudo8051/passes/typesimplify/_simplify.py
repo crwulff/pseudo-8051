@@ -243,11 +243,10 @@ def _simplify_once(nodes: List[HIRNode], reg_map: Dict[str, VarInfo],
     out: List[HIRNode] = []
     written: set = set()   # registers overwritten so far in this pass
     for node in nodes:
-        # Suppress non-param entries for registers already written in this pass.
+        # Suppress entries for registers already written in this pass.
         if written:
             eff = {k: v for k, v in reg_map.items()
-                   if not (isinstance(v, VarInfo) and not v.is_param
-                           and not v.xram_sym and v.regs
+                   if not (isinstance(v, VarInfo) and not v.xram_sym and v.regs
                            and any(r in written for r in v.regs))}
         else:
             eff = reg_map
