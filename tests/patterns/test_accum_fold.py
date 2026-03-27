@@ -128,3 +128,87 @@ class TestAccumFoldMulAB:
         assert "uint8_t" in rendered
         assert "0xf" in rendered   # Const(0x0f) renders as 0xf
         assert "4" in rendered
+
+
+class TestMulABPairLookahead:
+    def test_basic_mul_pair_no_lo_mod(self):
+        """A=XRAM[X]; A&=0xF0; B=0x10; {B,A}=A*B; R7=A; A=B; R2=A; A=R7; R3=A → R2R3 = product"""
+        nodes = [
+            Assign(0x1000, Reg("A"), XRAMRef(Name("X"))),
+            CompoundAssign(0x1002, Reg("A"), "&=", Const(0xF0)),
+            Assign(0x1004, Reg("B"), Const(0x10)),
+            Assign(0x1006, RegGroup(("B", "A")), BinOp(Reg("A"), "*", Reg("B"))),
+            Assign(0x1008, Reg("R7"), Reg("A")),
+            Assign(0x100a, Reg("A"), Reg("B")),
+            Assign(0x100c, Reg("R2"), Reg("A")),
+            Assign(0x100e, Reg("A"), Reg("R7")),
+            Assign(0x1010, Reg("R3"), Reg("A")),
+        ]
+        result = _match(nodes)
+        assert result is not None
+        replacement, new_i = result
+        assert new_i == 9
+        assert len(replacement) == 1
+        node = replacement[0]
+        assert isinstance(node, Assign)
+        assert isinstance(node.lhs, RegGroup)
+        assert set(node.lhs.regs) == {"R2", "R3"}
+        rendered = node.rhs.render()
+        assert "X" in rendered
+        assert "0xf0" in rendered
+        assert "0x10" in rendered
+        # No Cast — full product (no uint8_t truncation)
+        assert "uint8_t" not in rendered
+
+    def test_mul_pair_with_or_modification(self):
+        """A=XRAM[X]; A&=0xF0; B=0x10; {B,A}=A*B; R7=A; A=B; R2=A; A=R7; A|=XRAM[Y]; R3=A → R2R3 = product | Y"""
+        nodes = [
+            Assign(0x1000, Reg("A"), XRAMRef(Name("X"))),
+            CompoundAssign(0x1002, Reg("A"), "&=", Const(0xF0)),
+            Assign(0x1004, Reg("B"), Const(0x10)),
+            Assign(0x1006, RegGroup(("B", "A")), BinOp(Reg("A"), "*", Reg("B"))),
+            Assign(0x1008, Reg("R7"), Reg("A")),
+            Assign(0x100a, Reg("A"), Reg("B")),
+            Assign(0x100c, Reg("R2"), Reg("A")),
+            Assign(0x100e, Reg("A"), Reg("R7")),
+            CompoundAssign(0x1010, Reg("A"), "|=", XRAMRef(Name("Y"))),
+            Assign(0x1012, Reg("R3"), Reg("A")),
+        ]
+        result = _match(nodes)
+        assert result is not None
+        replacement, new_i = result
+        assert new_i == 10
+        assert len(replacement) == 1
+        node = replacement[0]
+        assert isinstance(node, Assign)
+        assert isinstance(node.lhs, RegGroup)
+        assert set(node.lhs.regs) == {"R2", "R3"}
+        rendered = node.rhs.render()
+        assert "X" in rendered
+        assert "0xf0" in rendered
+        assert "0x10" in rendered
+        assert "Y" in rendered
+        assert "|" in rendered
+        assert "uint8_t" not in rendered
+
+    def test_non_adjacent_pair_does_not_fold(self):
+        """A=XRAM[X]; B=0x10; {B,A}=A*B; R7=A; A=B; R3=A; A=R7; R5=A → no fold (R3/R5 not adjacent)"""
+        nodes = [
+            Assign(0x1000, Reg("A"), XRAMRef(Name("X"))),
+            Assign(0x1002, Reg("B"), Const(0x10)),
+            Assign(0x1004, RegGroup(("B", "A")), BinOp(Reg("A"), "*", Reg("B"))),
+            Assign(0x1006, Reg("R7"), Reg("A")),
+            Assign(0x1008, Reg("A"), Reg("B")),
+            Assign(0x100a, Reg("R3"), Reg("A")),
+            Assign(0x100c, Reg("A"), Reg("R7")),
+            Assign(0x100e, Reg("R5"), Reg("A")),
+        ]
+        result = _match(nodes)
+        # Lookahead should return None; falls back to normal terminal handling
+        # R7=A is the terminal (num_compound=1), so result is R7 = (uint8_t)(XRAM[X]*0x10)
+        assert result is not None
+        replacement, new_i = result
+        assert new_i == 4  # consumed up to and including R7=A
+        node = replacement[0]
+        assert isinstance(node, Assign)
+        assert node.lhs == Reg("R7")

@@ -38,6 +38,86 @@ _OP_WITHOUT_EQ = {
 }
 
 
+def _is_adjacent_hi_lo(hi: str, lo: str) -> bool:
+    """True if hi/lo form a standard 8051 pair: Rn / Rn+1 with n even."""
+    if not (hi.startswith("R") and lo.startswith("R")):
+        return False
+    try:
+        hi_n, lo_n = int(hi[1:]), int(lo[1:])
+    except ValueError:
+        return False
+    return lo_n == hi_n + 1 and hi_n % 2 == 0
+
+
+def _try_mul_pair_lookahead(nodes, j, terminal, a_expr, full_product,
+                            pair_expr, reg_map, a_start_node):
+    """
+    Attempt to consume the 8051 mul-result relay pattern:
+
+        Rn = A          (j)    save lo byte        <- terminal we're at
+        A  = B          (j+1)  load hi byte from B
+        Rm = A          (j+2)  store hi byte
+        A  = Rn         (j+3)  restore lo byte
+        [CompoundAssigns on A]
+        Rk = A          (jj)   store final lo byte
+
+    If Rm and Rk form an adjacent pair (R2R3, R4R5, ...), returns:
+        ([Assign(RegGroup((Rm, Rk)), pair_expr_subst)], jj + 1)
+    Otherwise returns None (fall-through to existing behaviour).
+    """
+    rn = terminal.lhs
+
+    if j + 3 >= len(nodes):
+        return None
+    n1, n2, n3 = nodes[j + 1], nodes[j + 2], nodes[j + 3]
+
+    # A = B
+    if not (isinstance(n1, Assign) and n1.lhs == Reg("A") and n1.rhs == Reg("B")):
+        return None
+    # Rm = A  (hi-byte destination)
+    if not (isinstance(n2, Assign) and n2.rhs == Reg("A") and n2.lhs != Reg("A")):
+        return None
+    rm = n2.lhs
+    # A = Rn  (restore lo byte)
+    if not (isinstance(n3, Assign) and n3.lhs == Reg("A") and n3.rhs == rn):
+        return None
+
+    # Optional compound assigns on A after restore
+    jj = j + 4
+    lo_a_expr    = a_expr
+    pair_expr_la = pair_expr
+    while jj < len(nodes):
+        cn = nodes[jj]
+        if not (isinstance(cn, CompoundAssign) and cn.lhs == Reg("A")):
+            break
+        bin_op = _OP_WITHOUT_EQ.get(cn.op)
+        if bin_op is None:
+            break
+        lo_a_expr    = BinOp(lo_a_expr,    bin_op, cn.rhs)
+        pair_expr_la = BinOp(pair_expr_la, bin_op, cn.rhs)
+        jj += 1
+
+    # Rk = A  (lo-byte destination)
+    if jj >= len(nodes):
+        return None
+    n_final = nodes[jj]
+    if not (isinstance(n_final, Assign)
+            and n_final.rhs == Reg("A") and n_final.lhs != Reg("A")):
+        return None
+    rk = n_final.lhs
+
+    # Must form an adjacent standard pair
+    if not (isinstance(rm, Reg) and isinstance(rk, Reg)
+            and _is_adjacent_hi_lo(rm.name, rk.name)):
+        return None
+
+    pair_expr_subst = _subst_all_expr(pair_expr_la, reg_map)
+    pair_group = RegGroup((rm.name, rk.name))
+    dbg("typesimp",
+        f"  accum_fold (mul pair): {rm.name}{rk.name} = {pair_expr_subst.render()}")
+    return ([Assign(a_start_node.ea, pair_group, pair_expr_subst)], jj + 1)
+
+
 def _contains_a(expr: Expr) -> bool:
     """Return True if Reg("A") appears anywhere in the Expr tree."""
     found = [False]
@@ -108,6 +188,8 @@ class AccumFoldPattern(Pattern):
 
         # ── 3. Compound assigns ───────────────────────────────────────────────
         num_compound = 0
+        _full_product: Optional[Expr] = None
+        _pair_expr:    Optional[Expr] = None
         while j < len(nodes):
             cn = nodes[j]
 
@@ -133,8 +215,10 @@ class AccumFoldPattern(Pattern):
                         and nxt.rhs.lhs == Reg("A")
                         and nxt.rhs.op == "*"
                         and nxt.rhs.rhs == Reg("B")):
-                    b_val = _subst_all_expr(cn.rhs, reg_map)
-                    a_expr = Cast("uint8_t", BinOp(a_expr, "*", b_val))
+                    b_val         = _subst_all_expr(cn.rhs, reg_map)
+                    _full_product = BinOp(a_expr, "*", b_val)
+                    a_expr        = Cast("uint8_t", _full_product)
+                    _pair_expr    = _full_product
                     j += 2
                     num_compound += 1
                     continue
@@ -147,6 +231,8 @@ class AccumFoldPattern(Pattern):
             if bin_op is None:
                 break
             a_expr = BinOp(a_expr, bin_op, cn.rhs)
+            if _pair_expr is not None:
+                _pair_expr = BinOp(_pair_expr, bin_op, cn.rhs)
             num_compound += 1
             j += 1
 
@@ -187,6 +273,15 @@ class AccumFoldPattern(Pattern):
                 and terminal.rhs == Reg("A")
                 and terminal.lhs != Reg("A")
                 and (num_compound > 0 or dptr_consumed)):
+
+            # Try to fold mul hi+lo bytes into a register pair
+            if _full_product is not None:
+                result = _try_mul_pair_lookahead(
+                    nodes, j, terminal, a_expr, _full_product,
+                    _pair_expr, reg_map, a_start_node)
+                if result is not None:
+                    return result
+
             dbg("typesimp", f"  accum_fold (Assign relay): folded {a_expr_subst.render()} into {terminal.lhs.render()}")
             return ([Assign(a_start_node.ea, terminal.lhs, a_expr_subst)], j + 1)
 
