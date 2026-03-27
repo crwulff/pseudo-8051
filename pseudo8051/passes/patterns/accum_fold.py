@@ -20,7 +20,7 @@ owned by AccumRelayPattern.
 import re
 from typing import Dict, List, Optional
 
-from pseudo8051.ir.hir import HIRNode, Assign, CompoundAssign, ReturnStmt, IfGoto, IfNode
+from pseudo8051.ir.hir import HIRNode, Assign, CompoundAssign, ExprStmt, ReturnStmt, IfGoto, IfNode
 from pseudo8051.ir.expr import Expr, Reg, Name, XRAMRef, BinOp, RegGroup, Const, Cast
 from pseudo8051.constants import dbg
 from pseudo8051.passes.patterns.base   import Pattern, Match, Simplify
@@ -67,13 +67,36 @@ def _try_mul_pair_lookahead(nodes, j, terminal, a_expr, full_product,
     """
     rn = terminal.lhs
 
-    if j + 3 >= len(nodes):
-        return None
-    n1, n2, n3 = nodes[j + 1], nodes[j + 2], nodes[j + 3]
+    # Scan forward past safe intermediate nodes to find A = B.
+    # Track register assignments in the interleaved block so that compound
+    # assigns referencing those registers use the new values, not reg_map.
+    _MAX_SKIP = 10
+    skip_end = j + 1
+    interleaved_vals: Dict[str, Expr] = {}
+    while skip_end < len(nodes) and (skip_end - j) <= _MAX_SKIP:
+        sn = nodes[skip_end]
+        if isinstance(sn, Assign) and sn.lhs == Reg("A") and sn.rhs == Reg("B"):
+            break   # found A = B
+        if isinstance(sn, ExprStmt):
+            skip_end += 1; continue
+        if isinstance(sn, Assign) and sn.lhs != Reg("B") and sn.lhs != rn:
+            # Record: resolve rhs through already-seen interleaved vals
+            if isinstance(sn.lhs, Reg):
+                def _subst_iv(e: Expr, _iv=interleaved_vals) -> Expr:
+                    if isinstance(e, Reg) and e.name in _iv:
+                        return _iv[e.name]
+                    return e
+                interleaved_vals[sn.lhs.name] = _walk_expr(sn.rhs, _subst_iv)
+            skip_end += 1; continue
+        return None   # unsafe: B or rn clobbered, or unrecognised type
+    else:
+        return None   # hit limit or end without finding A = B
 
-    # A = B
-    if not (isinstance(n1, Assign) and n1.lhs == Reg("A") and n1.rhs == Reg("B")):
+    # skip_end points at A = B; n2, n3 follow it
+    if skip_end + 2 >= len(nodes):
         return None
+    n2, n3 = nodes[skip_end + 1], nodes[skip_end + 2]
+
     # Rm = A  (hi-byte destination)
     if not (isinstance(n2, Assign) and n2.rhs == Reg("A") and n2.lhs != Reg("A")):
         return None
@@ -83,7 +106,7 @@ def _try_mul_pair_lookahead(nodes, j, terminal, a_expr, full_product,
         return None
 
     # Optional compound assigns on A after restore
-    jj = j + 4
+    jj = skip_end + 3
     lo_a_expr    = a_expr
     pair_expr_la = pair_expr
     while jj < len(nodes):
@@ -111,6 +134,14 @@ def _try_mul_pair_lookahead(nodes, j, terminal, a_expr, full_product,
             and _is_adjacent_hi_lo(rm.name, rk.name)):
         return None
 
+    # Apply interleaved overrides first (e.g. R5 reassigned inside the
+    # interleaved block), then reg_map for any remaining Reg references.
+    if interleaved_vals:
+        def _apply_iv(e: Expr, _iv=interleaved_vals) -> Expr:
+            if isinstance(e, Reg) and e.name in _iv:
+                return _iv[e.name]
+            return e
+        pair_expr_la = _walk_expr(pair_expr_la, _apply_iv)
     pair_expr_subst = _subst_all_expr(pair_expr_la, reg_map)
     pair_group = RegGroup((rm.name, rk.name))
     dbg("typesimp",

@@ -5,8 +5,8 @@ tests/patterns/test_accum_fold.py — AccumFoldPattern edge cases:
   - combined chains
 """
 
-from pseudo8051.ir.hir import Assign, CompoundAssign, IfGoto, ReturnStmt
-from pseudo8051.ir.expr import Reg, Const, BinOp, XRAMRef, Name, RegGroup, Cast
+from pseudo8051.ir.hir import Assign, CompoundAssign, ExprStmt, IfGoto, ReturnStmt
+from pseudo8051.ir.expr import Reg, Const, BinOp, UnaryOp, XRAMRef, Name, RegGroup, Cast
 
 
 def _match(nodes):
@@ -209,6 +209,89 @@ class TestMulABPairLookahead:
         assert result is not None
         replacement, new_i = result
         assert new_i == 4  # consumed up to and including R7=A
+        node = replacement[0]
+        assert isinstance(node, Assign)
+        assert node.lhs == Reg("R7")
+
+
+class TestMulABPairLookaheadInterleaved:
+    def test_interleaved_exprstmt_and_assigns(self):
+        """Interleaved ExprStmt(DPTR++) + Assign(A, XRAM) + Assign(R5, A) between R7=A and A=B."""
+        nodes = [
+            Assign(0x1000, Reg("A"), Reg("R1")),
+            CompoundAssign(0x1002, Reg("A"), "&=", Const(0xF0)),
+            Assign(0x1004, Reg("B"), Const(0x10)),
+            Assign(0x1006, RegGroup(("B", "A")), BinOp(Reg("A"), "*", Reg("B"))),
+            Assign(0x1008, Reg("R7"), Reg("A")),                              # terminal: lo save
+            ExprStmt(0x100a, UnaryOp("++", Reg("DPTR"), post=True)),          # DPTR++ (safe)
+            Assign(0x100c, Reg("A"), XRAMRef(Name("dc6b_sym"))),              # A = XRAM[..] (safe: lhs=A, but A=B not yet)
+            Assign(0x100e, Reg("R5"), Reg("A")),                              # R5 = A (safe)
+            Assign(0x1010, Reg("A"), Reg("B")),                               # A = B  ← found here
+            Assign(0x1012, Reg("R2"), Reg("A")),                              # R2 = A (hi)
+            Assign(0x1014, Reg("A"), Reg("R7")),                              # A = R7 (restore lo)
+            CompoundAssign(0x1016, Reg("A"), "|=", Reg("R5")),               # A |= R5
+            Assign(0x1018, Reg("R3"), Reg("A")),                              # R3 = A (lo final)
+        ]
+        result = _match(nodes)
+        assert result is not None
+        replacement, new_i = result
+        assert new_i == 13
+        assert len(replacement) == 1
+        node = replacement[0]
+        assert isinstance(node, Assign)
+        assert isinstance(node.lhs, RegGroup)
+        assert set(node.lhs.regs) == {"R2", "R3"}
+        rendered = node.rhs.render()
+        assert "R1" in rendered
+        assert "0xf0" in rendered
+        assert "0x10" in rendered
+        # R5 was reassigned to XRAM[dc6b_sym] in the interleaved block;
+        # the rendered output must use that value, not the bare register name.
+        assert "dc6b_sym" in rendered
+        assert "R5" not in rendered
+        assert "|" in rendered
+        assert "uint8_t" not in rendered
+
+    def test_b_clobbered_in_intermediate_no_fold(self):
+        """B overwritten before A=B → lookahead aborts → falls back to lo-byte terminal."""
+        nodes = [
+            Assign(0x1000, Reg("A"), Reg("R1")),
+            Assign(0x1002, Reg("B"), Const(0x10)),
+            Assign(0x1004, RegGroup(("B", "A")), BinOp(Reg("A"), "*", Reg("B"))),
+            Assign(0x1006, Reg("R7"), Reg("A")),                              # terminal: lo save
+            Assign(0x1008, Reg("B"), Const(5)),                               # B clobbered → abort
+            Assign(0x100a, Reg("A"), Reg("B")),
+            Assign(0x100c, Reg("R2"), Reg("A")),
+            Assign(0x100e, Reg("A"), Reg("R7")),
+            Assign(0x1010, Reg("R3"), Reg("A")),
+        ]
+        result = _match(nodes)
+        # Lookahead aborts; terminal is R7=A → R7 = (uint8_t)(R1 * 0x10)
+        assert result is not None
+        replacement, new_i = result
+        assert new_i == 4
+        node = replacement[0]
+        assert isinstance(node, Assign)
+        assert node.lhs == Reg("R7")
+
+    def test_rn_clobbered_in_intermediate_no_fold(self):
+        """lo-save register (R7) overwritten before A=B → lookahead aborts."""
+        nodes = [
+            Assign(0x1000, Reg("A"), Reg("R1")),
+            Assign(0x1002, Reg("B"), Const(0x10)),
+            Assign(0x1004, RegGroup(("B", "A")), BinOp(Reg("A"), "*", Reg("B"))),
+            Assign(0x1006, Reg("R7"), Reg("A")),                              # terminal: lo save
+            Assign(0x1008, Reg("R7"), Const(0)),                              # R7 clobbered → abort
+            Assign(0x100a, Reg("A"), Reg("B")),
+            Assign(0x100c, Reg("R2"), Reg("A")),
+            Assign(0x100e, Reg("A"), Reg("R7")),
+            Assign(0x1010, Reg("R3"), Reg("A")),
+        ]
+        result = _match(nodes)
+        # Lookahead aborts; terminal is R7=A → R7 = (uint8_t)(R1 * 0x10)
+        assert result is not None
+        replacement, new_i = result
+        assert new_i == 4
         node = replacement[0]
         assert isinstance(node, Assign)
         assert node.lhs == Reg("R7")
