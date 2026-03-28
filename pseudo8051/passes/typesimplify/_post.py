@@ -89,6 +89,7 @@ def _consolidate_xram_local_loads(nodes: List[HIRNode],
             return (n.lhs.name, n.rhs.name)
         return None
 
+    nodes = list(nodes)
     out: List[HIRNode] = []
     i = 0
     while i < len(nodes):
@@ -148,6 +149,12 @@ def _consolidate_xram_local_loads(nodes: List[HIRNode],
                         new_vinfo = VarInfo(bname0, v.type, (reg0,), is_param=False)
                         reg_map[reg0] = new_vinfo
                         dbg("typesimp", f"  xram-single-load: {reg0} = {bname0}")
+                        # Immediately substitute Reg(reg0) → Name(bname0) in remaining
+                        # nodes of this scope. Without this, a later reg_map[reg0]
+                        # mutation from a different scope (e.g. the merge block) would
+                        # corrupt _simplify_once's substitution for this scope.
+                        nodes[i + 1:] = _subst_reg_in_scope(
+                            nodes[i + 1:], reg0, NameExpr(bname0))
                         break
         # Recurse into structured nodes
         out.extend(recurse_bodies([node],
@@ -256,6 +263,10 @@ def _collect_hir_name_refs(nodes: List[HIRNode]) -> set:
         def _fn(e: Expr) -> Expr:
             if isinstance(e, (RegExpr, NameExpr)):
                 refs.add(e.name)
+            elif isinstance(e, RegGroupExpr):   # RegGroup in read position → each component reg
+                for r in e.regs:
+                    refs.add(r)
+                refs.add("".join(e.regs))       # also the pair name, e.g. "R2R3"
             return e
         _walk_expr(expr, _fn)
 
@@ -266,6 +277,8 @@ def _collect_hir_name_refs(nodes: List[HIRNode]) -> set:
                 _add(node.lhs)
         elif isinstance(node, CompoundAssign):
             _add(node.rhs)
+            if isinstance(node.lhs, (RegExpr, NameExpr)):   # compound assign READS its LHS
+                refs.add(node.lhs.name)
         elif isinstance(node, ExprStmt):
             _add(node.expr)
         elif isinstance(node, ReturnStmt) and node.value is not None:
@@ -285,6 +298,23 @@ def _collect_hir_name_refs(nodes: List[HIRNode]) -> set:
     for node in nodes:
         _visit(node)
     return refs
+
+
+def _expand_pair_refs(refs, reg_map: Dict[str, VarInfo]) -> frozenset:
+    """
+    Expand pair register names (e.g. 'R2R3') to their individual components
+    ('R2', 'R3') using the reg_map.
+
+    When a call uses Reg('R2R3') as an argument, it implicitly reads both R2
+    and R3.  Without this expansion, an Assign(R3, ...) that feeds into R2R3
+    would look dead because lhs_regs={'R3'} is disjoint from {'R2R3'}.
+    """
+    extra: set = set()
+    for name in refs:
+        vinfo = reg_map.get(name)
+        if isinstance(vinfo, VarInfo) and len(vinfo.regs) > 1:
+            extra.update(vinfo.regs)
+    return frozenset(refs) | frozenset(extra) if extra else frozenset(refs)
 
 
 def _is_call_setup_assign(node: HIRNode) -> bool:
@@ -332,20 +362,47 @@ def _subst_reg_in_call_node(node: HIRNode, reg: str, replacement: Expr) -> HIRNo
 
 
 def _fold_and_prune_setups(nodes: List[HIRNode],
-                            reg_map: Dict[str, VarInfo]) -> List[HIRNode]:
+                            reg_map: Dict[str, VarInfo],
+                            _outer_refs: frozenset = frozenset()) -> List[HIRNode]:
     """
     Post-simplify cleanup of register-setup lines before calls.
 
     1. Fold Assign(Reg, Const) into the next call node's args.
     2. Remove Assign(Reg/RegGroup, Name/Const) setup nodes whose LHS registers
-       are not referenced in any subsequent node.
+       are not referenced in any subsequent node (including caller context via
+       _outer_refs, so branches don't prune registers read after the enclosing
+       IfNode/WhileNode/ForNode).
     3. Remove DPTR++ nodes whose DPTR value is not referenced afterwards.
-    Recurses into IfNode / WhileNode / ForNode bodies.
+    Recurses into IfNode / WhileNode / ForNode / SwitchNode bodies.
     """
-    # Recurse first so inner blocks are cleaned before the outer scan.
-    recursed = recurse_bodies(nodes, lambda ns: _fold_and_prune_setups(ns, reg_map))
+    # Recurse into structured bodies first, passing the correct successor context.
+    result: List[HIRNode] = []
+    for k, node in enumerate(nodes):
+        # refs visible after this node (siblings + caller context), with pair names expanded
+        succ_refs = _expand_pair_refs(
+            frozenset(_collect_hir_name_refs(nodes[k + 1:])) | _outer_refs, reg_map)
+        if isinstance(node, IfNode):
+            result.append(IfNode(node.ea, node.condition,
+                _fold_and_prune_setups(node.then_nodes, reg_map, succ_refs),
+                _fold_and_prune_setups(node.else_nodes, reg_map, succ_refs)))
+        elif isinstance(node, WhileNode):
+            result.append(WhileNode(node.ea, node.condition,
+                _fold_and_prune_setups(node.body_nodes, reg_map, succ_refs)))
+        elif isinstance(node, ForNode):
+            result.append(ForNode(node.ea, node.init, node.condition, node.update,
+                _fold_and_prune_setups(node.body_nodes, reg_map, succ_refs)))
+        elif isinstance(node, SwitchNode):
+            new_cases = [(vals, _fold_and_prune_setups(body, reg_map, succ_refs)
+                          if isinstance(body, list) else body)
+                         for vals, body in node.cases]
+            new_default = (_fold_and_prune_setups(node.default_body, reg_map, succ_refs)
+                           if isinstance(node.default_body, list) else node.default_body)
+            result.append(SwitchNode(node.ea, node.subject, new_cases,
+                                     node.default_label, new_default))
+        else:
+            result.append(node)
 
-    work: List[HIRNode] = list(recursed)
+    work: List[HIRNode] = result
 
     # Phase 1: fold Assign(Reg, Const) into the next call's args.
     for i in range(len(work)):
@@ -373,11 +430,15 @@ def _fold_and_prune_setups(nodes: List[HIRNode],
     for i, node in enumerate(work):
         if _is_call_setup_assign(node):
             lhs_regs = _lhs_reg_names(node)
-            if lhs_regs.isdisjoint(_collect_hir_name_refs(work[i + 1:])):
+            all_downstream = _expand_pair_refs(
+                _collect_hir_name_refs(work[i + 1:]) | _outer_refs, reg_map)
+            if lhs_regs.isdisjoint(all_downstream):
                 dbg("typesimp",
                     f"  prune-setup: {node.lhs.render()} = {node.rhs.render()}")
                 continue
         elif _is_dptr_inc_node(node):
+            # DPTR++ increments a pointer for immediate local use; its value never
+            # flows across a control-flow merge, so we check only intra-scope refs.
             if "DPTR" not in _collect_hir_name_refs(work[i + 1:]):
                 dbg("typesimp", "  prune-dptr++")
                 continue
@@ -542,6 +603,49 @@ def _subst_reg_in_node(node: HIRNode, r: str,
         return Statement(node.ea, pat.sub(repl_str, node.text))
 
     return None
+
+
+def _subst_reg_in_scope(nodes: List[HIRNode], reg: str,
+                         replacement: Expr) -> List[HIRNode]:
+    """
+    Replace Reg/Name(reg) → replacement in read positions of nodes,
+    recursing into IfNode/WhileNode/ForNode/SwitchNode bodies.
+    Stops at the first node that writes reg (i.e. redefines it), leaving
+    that node and all subsequent nodes unchanged.
+    Used by _consolidate_xram_local_loads to apply single-load substitutions
+    immediately within the current scope, before a later reg_map mutation
+    for the same register can corrupt _simplify_once's substitution.
+    """
+    result = []
+    for i, node in enumerate(nodes):
+        patched = _subst_reg_in_node(node, reg, replacement)
+        if patched is not None:
+            result.append(patched)
+        elif isinstance(node, IfNode):
+            result.append(IfNode(node.ea, node.condition,
+                _subst_reg_in_scope(node.then_nodes, reg, replacement),
+                _subst_reg_in_scope(node.else_nodes, reg, replacement)))
+        elif isinstance(node, WhileNode):
+            result.append(WhileNode(node.ea, node.condition,
+                _subst_reg_in_scope(node.body_nodes, reg, replacement)))
+        elif isinstance(node, ForNode):
+            result.append(ForNode(node.ea, node.init, node.condition, node.update,
+                _subst_reg_in_scope(node.body_nodes, reg, replacement)))
+        elif isinstance(node, SwitchNode):
+            new_cases = [(vals, _subst_reg_in_scope(body, reg, replacement)
+                          if isinstance(body, list) else body)
+                         for vals, body in node.cases]
+            new_default = (_subst_reg_in_scope(node.default_body, reg, replacement)
+                           if isinstance(node.default_body, list) else node.default_body)
+            result.append(SwitchNode(node.ea, node.subject, new_cases,
+                                     node.default_label, new_default))
+        else:
+            result.append(node)
+        # If this node writes reg, subsequent nodes see the new value — stop here.
+        if reg in _get_written_regs(node):
+            result.extend(nodes[i + 1:])
+            return result
+    return result
 
 
 def _as_retval_stmt(node: HIRNode) -> Optional[tuple]:
