@@ -110,7 +110,7 @@ class Instruction:
     # ── Branch classification ─────────────────────────────────────────────
 
     _BRANCH_MNEMS = frozenset({
-        "SJMP", "LJMP", "AJMP",
+        "SJMP", "LJMP", "AJMP", "JMP",
         "JZ", "JNZ", "JC", "JNC", "JB", "JNB", "JBC", "CJNE", "DJNZ",
     })
     _COND_BRANCH_MNEMS = frozenset({
@@ -123,7 +123,7 @@ class Instruction:
         return self.mnemonic in self._BRANCH_MNEMS
 
     def is_unconditional_branch(self) -> bool:
-        return self.mnemonic in {"SJMP", "LJMP", "AJMP"}
+        return self.mnemonic in {"SJMP", "LJMP", "AJMP", "JMP"}
 
     def is_conditional_branch(self) -> bool:
         return self.mnemonic in self._COND_BRANCH_MNEMS

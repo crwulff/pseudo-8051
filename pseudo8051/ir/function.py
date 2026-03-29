@@ -58,8 +58,36 @@ class Function:
         for rb in raw_blocks:
             self._block_map[rb.start_ea] = BasicBlock(rb, self._block_map, self.ea)
 
-        self._blocks: List[BasicBlock] = sorted(
-            self._block_map.values(), key=lambda b: b.start_ea)
+        # Order blocks by BFS from the entry block so that the function body
+        # always renders before tail/dispatch blocks that happen to sit at lower
+        # addresses (e.g. jump-table SJMP entries added as function chunks).
+        # Any blocks not reachable from the entry (rare dead-code tails) are
+        # appended at the end, sorted by address.
+        from collections import deque
+        _ordered: List[BasicBlock] = []
+        _seen: set = set()
+        _queue: deque = deque([func_ea])
+        while _queue:
+            _ea = _queue.popleft()
+            if _ea in _seen or _ea not in self._block_map:
+                continue
+            _seen.add(_ea)
+            _blk = self._block_map[_ea]
+            _ordered.append(_blk)
+            # Prefer forward edges (higher address) before backward edges
+            # so that low-address tail blocks appear after the code that
+            # dispatches to them, not before the function entry.
+            for _s in sorted(_blk.successors,
+                             key=lambda b, ea=_blk.start_ea:
+                                 (b.start_ea < ea, b.start_ea)):
+                if _s.start_ea not in _seen:
+                    _queue.append(_s.start_ea)
+        # Append blocks not reachable via BFS (e.g. blocks only reachable through
+        # filtered external edges), sorted by address.
+        for _blk in sorted(self._block_map.values(), key=lambda b: b.start_ea):
+            if _blk.start_ea not in _seen:
+                _ordered.append(_blk)
+        self._blocks: List[BasicBlock] = _ordered
 
         dbg("func", f"{self.name} @ {hex(self.ea)} — {len(self._blocks)} block(s)")
 

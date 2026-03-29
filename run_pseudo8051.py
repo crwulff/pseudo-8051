@@ -37,6 +37,7 @@ _RELOAD_ORDER = [
     "pseudo8051.passes.annotate",
     "pseudo8051.passes.rmw",
     "pseudo8051.passes.loops",
+    "pseudo8051.passes.jmptable",
     "pseudo8051.passes.switch",
     "pseudo8051.passes.ifelse",
     "pseudo8051.passes.patterns.base",

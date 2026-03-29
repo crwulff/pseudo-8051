@@ -17,6 +17,7 @@ from .logic      import AnlHandler, OrlHandler, XrlHandler, ClrHandler, SetbHand
 from .logic      import RlHandler, RlcHandler, RrHandler, RrcHandler, SwapHandler
 from .branch     import SjmpHandler, JzHandler, JnzHandler, JcHandler, JncHandler
 from .branch     import JbHandler, JnbHandler, JbcHandler, CjneHandler, DjnzHandler
+from .branch     import JmpAtADptrHandler
 from .call       import LcallHandler, RetHandler, RetiHandler, NopHandler
 
 
@@ -79,6 +80,7 @@ HANDLERS = {
     "SJMP":  SjmpHandler(),
     "LJMP":  SjmpHandler(),
     "AJMP":  SjmpHandler(),
+    "JMP":   JmpAtADptrHandler(),
     "JZ":    JzHandler(),
     "JNZ":   JnzHandler(),
     "JC":    JcHandler(),
