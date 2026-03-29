@@ -390,4 +390,53 @@ class AccumFoldPattern(Pattern):
                 return (skipped + [Statement(a_start_node.ea,
                                              f"{target_name} = {a_expr_subst.render()};")], j + 1)
 
+        # Carry-comparison terminal: A=val; A-=sub; if(C)/while(C) → if(val < sub)
+        # After SUBB, carry is set iff the subtraction produced a borrow (val < sub unsigned).
+        # Only applies when the net accumulated expression is a single subtraction BinOp.
+        if (num_compound > 0
+                and isinstance(a_expr, BinOp) and a_expr.op == "-"):
+            sub_raw = a_expr.rhs
+            # Strip "+ 0" or "0 +" that CProp leaves when carry-in was cleared (CLR C before SUBB)
+            if isinstance(sub_raw, BinOp) and sub_raw.op == "+":
+                if isinstance(sub_raw.rhs, Const) and sub_raw.rhs.value == 0:
+                    sub_raw = sub_raw.lhs
+                elif isinstance(sub_raw.lhs, Const) and sub_raw.lhs.value == 0:
+                    sub_raw = sub_raw.rhs
+            minuend    = _subst_all_expr(a_expr.lhs, reg_map)
+            subtrahend = _subst_all_expr(sub_raw,    reg_map)
+            carry_cond = BinOp(minuend, "<",  subtrahend)
+            no_carry   = BinOp(minuend, ">=", subtrahend)
+
+            def _is_carry(c) -> bool:
+                return isinstance(c, Reg) and c.name == "C"
+
+            def _is_not_carry(c) -> bool:
+                from pseudo8051.ir.expr import UnaryOp
+                return (isinstance(c, UnaryOp) and c.op == "!" and _is_carry(c.operand))
+
+            if isinstance(terminal, IfGoto):
+                if _is_carry(terminal.cond):
+                    dbg("typesimp",
+                        f"  accum_fold (carry< IfGoto): {minuend.render()} < {subtrahend.render()}")
+                    return (skipped + [IfGoto(a_start_node.ea, carry_cond, terminal.label)], j + 1)
+                if _is_not_carry(terminal.cond):
+                    dbg("typesimp",
+                        f"  accum_fold (carry>= IfGoto): {minuend.render()} >= {subtrahend.render()}")
+                    return (skipped + [IfGoto(a_start_node.ea, no_carry, terminal.label)], j + 1)
+
+            if isinstance(terminal, IfNode):
+                cond = terminal.condition
+                new_then = simplify(terminal.then_nodes, reg_map)
+                new_else = simplify(terminal.else_nodes, reg_map) if terminal.else_nodes else []
+                if _is_carry(cond):
+                    dbg("typesimp",
+                        f"  accum_fold (carry< IfNode): {minuend.render()} < {subtrahend.render()}")
+                    return (skipped + [IfNode(a_start_node.ea, carry_cond,
+                                             new_then, new_else)], j + 1)
+                if _is_not_carry(cond):
+                    dbg("typesimp",
+                        f"  accum_fold (carry>= IfNode): {minuend.render()} >= {subtrahend.render()}")
+                    return (skipped + [IfNode(a_start_node.ea, no_carry,
+                                             new_then, new_else)], j + 1)
+
         return None
