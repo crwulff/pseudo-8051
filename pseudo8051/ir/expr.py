@@ -337,6 +337,27 @@ class Call(Expr):
         return f"Call({self.func_name!r}, {self.args!r})"
 
 
+class Paren(Expr):
+    """Explicit parenthesis wrapper — always renders as (inner)."""
+
+    __slots__ = ("inner",)
+
+    def __init__(self, inner: Expr):
+        self.inner = inner
+
+    def render(self, outer_prec: int = 0) -> str:
+        return f"({self.inner.render()})"
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, Paren) and self.inner == other.inner
+
+    def __hash__(self) -> int:
+        return hash(("Paren", self.inner))
+
+    def __repr__(self) -> str:
+        return f"Paren({self.inner!r})"
+
+
 class Cast(Expr):
     """
     Type cast: Cast("uint8_t", Reg("A")) → "(uint8_t)A".

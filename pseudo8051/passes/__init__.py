@@ -38,6 +38,9 @@ def run_all_passes(func: Function) -> None:
     from pseudo8051.passes.chunk_inline import ChunkInliner
     ChunkInliner().run(func)
 
+    from pseudo8051.passes.annotate import AnnotationPass
+    AnnotationPass().run(func)
+
     RMWCollapser().run(func)
     LoopStructurer().run(func)
     SwitchStructurer().run(func)

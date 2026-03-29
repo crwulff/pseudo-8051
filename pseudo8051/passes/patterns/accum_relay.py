@@ -58,7 +58,7 @@ class AccumRelayPattern(Pattern):
                     and n0.rhs != Reg("A")):
                 new_rhs = _subst_all_expr(n0.rhs, reg_map)
                 new_lhs = n1.lhs
-                dbg("typesimp", f"  accum_relay (expr): {n0.lhs.render()} = {n0.rhs.render()} + {n1.lhs.render()} = {n1.rhs.render()}")
+                dbg("typesimp", f"  [{hex(n0.ea)}] accum_relay (expr): {n0.lhs.render()} = {n0.rhs.render()} + {n1.lhs.render()} = {n1.rhs.render()}")
                 return ([Assign(n0.ea, new_lhs, new_rhs)], i + 2)
 
         # ── Legacy Statement path ─────────────────────────────────────────
@@ -77,5 +77,5 @@ class AccumRelayPattern(Pattern):
             return None
 
         new_text = _subst_all_text(f"{target} = {expr};", reg_map)
-        dbg("typesimp", f"  accum_relay: {n0.text!r} + {n1.text!r} → {new_text!r}")
+        dbg("typesimp", f"  [{hex(n0.ea)}] accum_relay: {n0.text!r} + {n1.text!r} → {new_text!r}")
         return ([Statement(n0.ea, new_text)], i + 2)

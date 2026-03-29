@@ -22,6 +22,7 @@ _RELOAD_ORDER = [
     "pseudo8051.constants",
     "pseudo8051.locals",
     "pseudo8051.prototypes",
+    "pseudo8051.ir.expr",
     "pseudo8051.ir.hir",
     "pseudo8051.ir.operand",
     "pseudo8051.ir.instruction",
@@ -33,6 +34,7 @@ _RELOAD_ORDER = [
     "pseudo8051.handlers",
     "pseudo8051.passes",           # defines OptimizationPass ABC
     "pseudo8051.passes.chunk_inline",
+    "pseudo8051.passes.annotate",
     "pseudo8051.passes.rmw",
     "pseudo8051.passes.loops",
     "pseudo8051.passes.switch",
@@ -59,6 +61,7 @@ _RELOAD_ORDER = [
     "pseudo8051.passes.typesimplify",
     "pseudo8051.analysis.constprop",
     "pseudo8051.analysis.liveness",
+    "pseudo8051.ir.cpstate",
     "pseudo8051.ir.basicblock",
     "pseudo8051.ir.function",
     "pseudo8051.locals_ui",

@@ -6,16 +6,31 @@ render() returns a list of (ea, indented_text) tuples.
 """
 
 from abc import ABC, abstractmethod
-from typing import List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
 from pseudo8051.ir.expr import Expr
+
+if TYPE_CHECKING:
+    from pseudo8051.passes.patterns._utils import VarInfo
+
+
+class NodeAnnotation:
+    """Per-node annotation: register names/types and constant values at this point."""
+    __slots__ = ("reg_names", "reg_consts", "call_arg_ann", "callee_args")
+
+    def __init__(self):
+        self.reg_names:    "Dict[str, VarInfo]" = {}   # reg → VarInfo (name, type)
+        self.reg_consts:   Dict[str, int]        = {}   # reg → known const
+        self.call_arg_ann: "Dict[str, VarInfo]"  = {}   # backward-propagated callee param
+        self.callee_args:  "Optional[Dict[str, VarInfo]]" = None  # call node only
 
 
 class HIRNode(ABC):
     """Abstract base for all HIR nodes."""
 
     def __init__(self, ea: int):
-        self.ea = ea
+        self.ea  = ea
+        self.ann: Optional[NodeAnnotation] = None
 
     @abstractmethod
     def render(self, indent: int = 0) -> List[Tuple[int, str]]:

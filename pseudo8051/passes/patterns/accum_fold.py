@@ -20,7 +20,7 @@ owned by AccumRelayPattern.
 import re
 from typing import Dict, List, Optional
 
-from pseudo8051.ir.hir import HIRNode, Assign, CompoundAssign, ExprStmt, ReturnStmt, IfGoto, IfNode
+from pseudo8051.ir.hir import HIRNode, Statement, Assign, CompoundAssign, ExprStmt, ReturnStmt, IfGoto, IfNode
 from pseudo8051.ir.expr import Expr, Reg, Name, XRAMRef, BinOp, RegGroup, Const, Cast
 from pseudo8051.constants import dbg
 from pseudo8051.passes.patterns.base   import Pattern, Match, Simplify
@@ -149,6 +149,33 @@ def _try_mul_pair_lookahead(nodes, j, terminal, a_expr, full_product,
     return ([Assign(a_start_node.ea, pair_group, pair_expr_subst)], jj + 1)
 
 
+_RE_HEX_CONST = re.compile(r'^0x[0-9a-fA-F]+$')
+_RE_DEC_CONST = re.compile(r'^\d+$')
+_RE_REG_TOKEN = re.compile(r'^(R[0-7]|A|B|DPTR|DPH|DPL|C)$')
+
+
+def _parse_simple_expr(s: str) -> Optional[Expr]:
+    """Parse a simple single-token string into an Expr node.
+
+    Returns Const for numeric literals, Reg for known register names,
+    Name for other bare identifiers, or None for complex expressions
+    (spaces, operators, parens etc.) that should not be attempted.
+    """
+    s = s.strip()
+    if not s or ' ' in s or '(' in s or ')' in s:
+        return None
+    if _RE_HEX_CONST.match(s):
+        return Const(int(s, 16))
+    if _RE_DEC_CONST.match(s):
+        return Const(int(s))
+    if _RE_REG_TOKEN.match(s):
+        return Reg(s)
+    # bare identifier (parameter name, local variable)
+    if re.match(r'^[A-Za-z_]\w*$', s):
+        return Name(s)
+    return None
+
+
 def _contains_a(expr: Expr) -> bool:
     """Return True if Reg("A") appears anywhere in the Expr tree."""
     found = [False]
@@ -221,6 +248,8 @@ class AccumFoldPattern(Pattern):
         num_compound = 0
         _full_product: Optional[Expr] = None
         _pair_expr:    Optional[Expr] = None
+        skipped: List[HIRNode] = []   # safe interleaved non-A/non-B assigns
+        _ACCUM_REGS = {"A", "B", "DPTR", "DPH", "DPL"}
         while j < len(nodes):
             cn = nodes[j]
 
@@ -257,6 +286,31 @@ class AccumFoldPattern(Pattern):
             if not (isinstance(cn, CompoundAssign)
                     and cn.lhs == Reg("A")
                     and not _contains_a(cn.rhs)):
+                # Statement fallback: "A op= rhs;"
+                if isinstance(cn, Statement):
+                    m_stmt = re.match(r'^A\s*(\+=|-=|\*=|&=|\|=|\^=|<<=|>>=)\s*(.+);$',
+                                      cn.text)
+                    if m_stmt:
+                        bin_op_stmt = _OP_WITHOUT_EQ.get(m_stmt.group(1))
+                        if bin_op_stmt is not None:
+                            rhs_node = _parse_simple_expr(m_stmt.group(2).strip())
+                            if rhs_node is not None and not _contains_a(rhs_node):
+                                a_expr = BinOp(a_expr, bin_op_stmt, rhs_node)
+                                if _pair_expr is not None:
+                                    _pair_expr = BinOp(_pair_expr, bin_op_stmt, rhs_node)
+                                num_compound += 1
+                                j += 1
+                                continue
+                # Safe interleaved: Assign to a non-accumulator register that
+                # doesn't read A.  Collect and re-emit in the output so that
+                # downstream pruning can handle them normally.
+                if (isinstance(cn, Assign)
+                        and isinstance(cn.lhs, Reg)
+                        and cn.lhs.name not in _ACCUM_REGS
+                        and not _contains_a(cn.rhs)):
+                    skipped.append(cn)
+                    j += 1
+                    continue
                 break
             bin_op = _OP_WITHOUT_EQ.get(cn.op)
             if bin_op is None:
@@ -278,7 +332,7 @@ class AccumFoldPattern(Pattern):
         if isinstance(terminal, IfGoto) and _contains_a(terminal.cond):
             new_cond = _subst_a(terminal.cond, a_expr_subst)
             dbg("typesimp", f"  accum_fold (IfGoto): folded {a_expr_subst.render()} into cond")
-            return ([IfGoto(a_start_node.ea, new_cond, terminal.label)], j + 1)
+            return (skipped + [IfGoto(a_start_node.ea, new_cond, terminal.label)], j + 1)
 
         # IfNode: substitute A in condition (Expr or str)
         if isinstance(terminal, IfNode):
@@ -288,14 +342,14 @@ class AccumFoldPattern(Pattern):
                 new_then = simplify(terminal.then_nodes, reg_map)
                 new_else = simplify(terminal.else_nodes, reg_map) if terminal.else_nodes else []
                 dbg("typesimp", f"  accum_fold (IfNode expr): folded {a_expr_subst.render()} into cond")
-                return ([IfNode(a_start_node.ea, new_cond, new_then, new_else)], j + 1)
+                return (skipped + [IfNode(a_start_node.ea, new_cond, new_then, new_else)], j + 1)
             if isinstance(cond, str) and re.search(r'\bA\b', cond):
                 rendered = a_expr_subst.render()
                 new_cond_str = re.sub(r'\bA\b', rendered, cond)
                 new_then = simplify(terminal.then_nodes, reg_map)
                 new_else = simplify(terminal.else_nodes, reg_map) if terminal.else_nodes else []
                 dbg("typesimp", f"  accum_fold (IfNode str): folded {rendered} into cond")
-                return ([IfNode(a_start_node.ea, new_cond_str, new_then, new_else)], j + 1)
+                return (skipped + [IfNode(a_start_node.ea, new_cond_str, new_then, new_else)], j + 1)
 
         # Assign(target, Reg("A")) where target != A:
         # only fold if there was at least one compound assign or a DPTR prefix
@@ -311,16 +365,29 @@ class AccumFoldPattern(Pattern):
                     nodes, j, terminal, a_expr, _full_product,
                     _pair_expr, reg_map, a_start_node)
                 if result is not None:
-                    return result
+                    replacement_nodes, new_j = result
+                    return (skipped + replacement_nodes, new_j)
 
             dbg("typesimp", f"  accum_fold (Assign relay): folded {a_expr_subst.render()} into {terminal.lhs.render()}")
-            return ([Assign(a_start_node.ea, terminal.lhs, a_expr_subst)], j + 1)
+            new_node = Assign(a_start_node.ea, terminal.lhs, a_expr_subst)
+            new_node.ann = terminal.ann   # preserve call_arg_ann for downstream pair folding
+            return (skipped + [new_node], j + 1)
 
         # ReturnStmt(Reg("A")): only if compound > 0 or DPTR consumed
         if (isinstance(terminal, ReturnStmt)
                 and terminal.value == Reg("A")
                 and (num_compound > 0 or dptr_consumed)):
             dbg("typesimp", f"  accum_fold (ReturnStmt): folded {a_expr_subst.render()}")
-            return ([ReturnStmt(a_start_node.ea, a_expr_subst)], j + 1)
+            return (skipped + [ReturnStmt(a_start_node.ea, a_expr_subst)], j + 1)
+
+        # Statement terminal: "Rn = A;" — only if compound > 0 or DPTR consumed
+        if isinstance(terminal, Statement) and (num_compound > 0 or dptr_consumed):
+            m_term = re.match(r'^(\w+)\s*=\s*A;$', terminal.text)
+            if m_term and m_term.group(1) != "A":
+                target_name = m_term.group(1)
+                dbg("typesimp",
+                    f"  accum_fold (Stmt relay): folded {a_expr_subst.render()} into {target_name}")
+                return (skipped + [Statement(a_start_node.ea,
+                                             f"{target_name} = {a_expr_subst.render()};")], j + 1)
 
         return None

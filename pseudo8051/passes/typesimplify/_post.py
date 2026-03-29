@@ -12,7 +12,7 @@ from pseudo8051.constants import dbg
 from pseudo8051.passes.patterns._utils  import (
     VarInfo, _type_bytes, _byte_names, _walk_expr,
 )
-from pseudo8051.ir.expr import (Expr, UnaryOp, BinOp, Const, Call,
+from pseudo8051.ir.expr import (Expr, UnaryOp, BinOp, Const, Call, Paren,
                                  Reg as RegExpr, RegGroup as RegGroupExpr, Name as NameExpr,
                                  XRAMRef, IRAMRef)
 
@@ -130,14 +130,14 @@ def _consolidate_xram_local_loads(nodes: List[HIRNode],
                                                   NameExpr(parent_nm)))
                                 j += 1
                                 dbg("typesimp",
-                                    f"  xram-pair-consolidate: DPTR = {parent_nm}"
+                                    f"  [{hex(node.ea)}] xram-pair-consolidate: DPTR = {parent_nm}"
                                     f" (via {pair_key} + DPH)")
                             else:
                                 out.append(Assign(node.ea,
                                                   RegGroupExpr(tuple(regs)),
                                                   NameExpr(parent_nm)))
                                 dbg("typesimp",
-                                    f"  xram-pair-consolidate: {pair_key} = {parent_nm}")
+                                    f"  [{hex(node.ea)}] xram-pair-consolidate: {pair_key} = {parent_nm}")
                             i = j
                             continue
             else:
@@ -148,7 +148,7 @@ def _consolidate_xram_local_loads(nodes: List[HIRNode],
                             and _type_bytes(v.type) == 1):
                         new_vinfo = VarInfo(bname0, v.type, (reg0,), is_param=False)
                         reg_map[reg0] = new_vinfo
-                        dbg("typesimp", f"  xram-single-load: {reg0} = {bname0}")
+                        dbg("typesimp", f"  [{hex(node.ea)}] xram-single-load: {reg0} = {bname0}")
                         # Immediately substitute Reg(reg0) → Name(bname0) in remaining
                         # nodes of this scope. Without this, a later reg_map[reg0]
                         # mutation from a different scope (e.g. the merge block) would
@@ -156,9 +156,33 @@ def _consolidate_xram_local_loads(nodes: List[HIRNode],
                         nodes[i + 1:] = _subst_reg_in_scope(
                             nodes[i + 1:], reg0, NameExpr(bname0))
                         break
-        # Recurse into structured nodes
-        out.extend(recurse_bodies([node],
-            lambda ns: _consolidate_xram_local_loads(ns, reg_map)))
+        # Recurse into structured nodes with a scope-local copy of reg_map so
+        # that arm-internal mutations (xram-single-load, pair keys) don't leak
+        # into the outer scope and cause incorrect substitutions at merge points.
+        if isinstance(node, IfNode):
+            out.append(IfNode(node.ea, node.condition,
+                _consolidate_xram_local_loads(node.then_nodes, dict(reg_map)),
+                _consolidate_xram_local_loads(node.else_nodes, dict(reg_map))))
+        elif isinstance(node, WhileNode):
+            out.append(WhileNode(node.ea, node.condition,
+                _consolidate_xram_local_loads(node.body_nodes, dict(reg_map))))
+        elif isinstance(node, ForNode):
+            out.append(ForNode(node.ea, node.init, node.condition, node.update,
+                _consolidate_xram_local_loads(node.body_nodes, dict(reg_map))))
+        elif isinstance(node, SwitchNode):
+            new_cases = [
+                (vals, _consolidate_xram_local_loads(body, dict(reg_map))
+                       if isinstance(body, list) else body)
+                for vals, body in node.cases
+            ]
+            new_default = (
+                _consolidate_xram_local_loads(node.default_body, dict(reg_map))
+                if isinstance(node.default_body, list) else node.default_body
+            )
+            out.append(SwitchNode(node.ea, node.subject, new_cases,
+                                  node.default_label, new_default))
+        else:
+            out.append(node)
         i += 1
     return out
 
@@ -245,7 +269,7 @@ def _collapse_dpl_dph(nodes: List[HIRNode],
                      else RegGroupExpr((reg_hi, reg_lo)))
         out.append(Assign(node.ea, RegExpr("DPTR"), rhs))
         dead.add(partner_idx)
-        dbg("typesimp", f"  dpl-dph-collapse: DPTR = {pair_key}")
+        dbg("typesimp", f"  [{hex(node.ea)}] dpl-dph-collapse: DPTR = {pair_key}")
 
     return out
 
@@ -361,6 +385,33 @@ def _subst_reg_in_call_node(node: HIRNode, reg: str, replacement: Expr) -> HIRNo
     return node
 
 
+def _first_kill_before_read(reg: str, nodes: List[HIRNode]) -> bool:
+    """
+    Return True if `reg` is written before being read in the flat prefix of `nodes`.
+
+    Scans nodes in order; stops at the first node that reads OR writes `reg`.
+    Returns True only if the first relevant node is a pure WRITE (not a read).
+    For structured nodes (IfNode etc.) where either branch might read, returns False
+    (conservative: assume the reg might be read).
+    """
+    for node in nodes:
+        if isinstance(node, (IfNode, WhileNode, ForNode, SwitchNode)):
+            return False  # conservative: might read in a branch
+        # CompoundAssign LHS is both read and written — _count_reg_uses_in_node
+        # only counts the RHS, so check the LHS explicitly here.
+        if (isinstance(node, CompoundAssign)
+                and isinstance(node.lhs, RegExpr)
+                and node.lhs.name == reg):
+            return False  # CompoundAssign reads its LHS operand
+        reads = _count_reg_uses_in_node(reg, node)
+        writes = reg in _get_written_regs(node)
+        if reads > 0:
+            return False  # reg is read first
+        if writes:
+            return True   # reg is written before being read
+    return False
+
+
 def _fold_and_prune_setups(nodes: List[HIRNode],
                             reg_map: Dict[str, VarInfo],
                             _outer_refs: frozenset = frozenset()) -> List[HIRNode]:
@@ -421,7 +472,7 @@ def _fold_and_prune_setups(nodes: List[HIRNode],
             if new_nj is not nj:
                 work[j] = new_nj
                 work[i] = None
-                dbg("typesimp", f"  fold-const: {reg}={val.render()} into call")
+                dbg("typesimp", f"  [{hex(node.ea)}] fold-const: {reg}={val.render()} into call")
             break
     work = [n for n in work if n is not None]
 
@@ -434,13 +485,21 @@ def _fold_and_prune_setups(nodes: List[HIRNode],
                 _collect_hir_name_refs(work[i + 1:]) | _outer_refs, reg_map)
             if lhs_regs.isdisjoint(all_downstream):
                 dbg("typesimp",
-                    f"  prune-setup: {node.lhs.render()} = {node.rhs.render()}")
+                    f"  [{hex(node.ea)}] prune-setup: {node.lhs.render()} = {node.rhs.render()}")
+                continue
+            # Also prune if every LHS reg that appears downstream is killed before first read
+            live_lhs = lhs_regs & all_downstream
+            if live_lhs and all(_first_kill_before_read(r, work[i + 1:])
+                                 for r in live_lhs):
+                dbg("typesimp",
+                    f"  [{hex(node.ea)}] prune-setup-killed: "
+                    f"{node.lhs.render()} = {node.rhs.render()}")
                 continue
         elif _is_dptr_inc_node(node):
             # DPTR++ increments a pointer for immediate local use; its value never
             # flows across a control-flow merge, so we check only intra-scope refs.
             if "DPTR" not in _collect_hir_name_refs(work[i + 1:]):
-                dbg("typesimp", "  prune-dptr++")
+                dbg("typesimp", f"  [{hex(node.ea)}] prune-dptr++")
                 continue
         out.append(node)
     return out
@@ -490,6 +549,159 @@ def _fold_return_chains(hir: List[HIRNode], ret_regs: tuple) -> List[HIRNode]:
         return out
 
     return _fold(hir)
+
+
+# ── Call-arg pair folding ─────────────────────────────────────────────────────
+
+def _find_pair_groups(reg_map: Dict[str, VarInfo]) -> Dict[tuple, VarInfo]:
+    """Return mapping: regs_tuple → VarInfo for multi-byte param pairs."""
+    groups: Dict[tuple, VarInfo] = {}
+    for r, v in reg_map.items():
+        if isinstance(v, VarInfo) and len(v.regs) > 1 and r in v.regs:
+            key = tuple(v.regs)
+            if key not in groups:
+                groups[key] = v
+    return groups
+
+
+def _reads_any_reg(node: HIRNode, regs: set) -> bool:
+    """True if node reads any register in regs."""
+    for r in regs:
+        if _count_reg_uses_in_node(r, node) > 0:
+            return True
+    return False
+
+
+def _writes_any_reg(node: HIRNode, regs: set) -> bool:
+    """True if node writes any register in regs."""
+    return bool(_get_written_regs(node) & regs)
+
+
+def _fold_call_arg_pairs(nodes: List[HIRNode],
+                          reg_map: Dict[str, VarInfo]) -> List[HIRNode]:
+    """
+    Fold consecutive assignments to all regs of a multi-byte call-arg pair into
+    a single RegGroup assignment with a bit-shifted combination expression.
+
+    Example: R3 = lo_expr; [safe nodes]; R2 = hi_expr;
+         →   R2R3 = (hi_expr << 8) | lo_expr;
+
+    Recurses into IfNode/WhileNode/ForNode/SwitchNode bodies.
+    """
+    pair_groups = _find_pair_groups(reg_map)
+
+    # Build lookup: each individual reg → its regs tuple
+    reg_to_pair: Dict[str, tuple] = {}
+    for regs_key in pair_groups:
+        for r in regs_key:
+            reg_to_pair[r] = regs_key
+
+    # Also harvest pair entries from per-node call_arg_ann annotations.
+    # call_arg_ann entries may not have reached reg_map due to killed-param
+    # blocking in _simplify, but are still present on the assignment nodes.
+    for node in nodes:
+        ann = getattr(node, "ann", None)
+        if ann is None:
+            continue
+        for r, v in ann.call_arg_ann.items():
+            if isinstance(v, VarInfo) and len(v.regs) > 1 and r in v.regs:
+                key = tuple(v.regs)
+                if key not in pair_groups:
+                    pair_groups[key] = v
+                for pr in key:
+                    reg_to_pair.setdefault(pr, key)
+
+    if not reg_to_pair:
+        return nodes
+
+    # Recurse into structured bodies first.
+    nodes = recurse_bodies(nodes, lambda ns: _fold_call_arg_pairs(ns, reg_map))
+
+    out: List[HIRNode] = []
+    consumed: set = set()  # indices already folded
+
+    for i, node in enumerate(nodes):
+        if i in consumed:
+            continue
+
+        # Is this a plain Assign(Reg(r), expr) where r is part of a pair?
+        if not (isinstance(node, Assign)
+                and isinstance(node.lhs, RegExpr)
+                and node.lhs.name in reg_to_pair):
+            out.append(node)
+            continue
+
+        r0 = node.lhs.name
+        regs_key = reg_to_pair[r0]
+        vinfo = pair_groups[regs_key]
+        all_regs = set(regs_key)
+        remaining_regs = all_regs - {r0}
+
+        # Collect byte assignments: reg → (index, expr)
+        byte_assigns: Dict[str, tuple] = {r0: (i, node.rhs)}
+        interleaved: List[int] = []
+        conflict = False
+
+        for k in range(i + 1, len(nodes)):
+            if k in consumed:
+                continue
+            nd = nodes[k]
+            # If this node reads or writes any pair reg, check carefully
+            reads_pair = _reads_any_reg(nd, all_regs)
+            writes_pair = _writes_any_reg(nd, all_regs)
+
+            if isinstance(nd, Assign) and isinstance(nd.lhs, RegExpr) \
+                    and nd.lhs.name in remaining_regs and not reads_pair:
+                # Found another pair member assignment
+                byte_assigns[nd.lhs.name] = (k, nd.rhs)
+                remaining_regs -= {nd.lhs.name}
+                if not remaining_regs:
+                    break
+            elif reads_pair or writes_pair:
+                # Conflict: pair reg read or written by non-pair-member node
+                conflict = True
+                break
+            else:
+                # Safe interleaved node
+                interleaved.append(k)
+
+        if conflict or remaining_regs:
+            out.append(node)
+            continue
+
+        # All pair members collected — build combined expression.
+        # regs_key[0] is hi byte, regs_key[-1] is lo byte.
+        n_bytes = len(regs_key)
+        # Sort by position in regs_key (hi first)
+        ordered_exprs = [byte_assigns[r][1] for r in regs_key]
+
+        def _paren_if_binop(e: Expr) -> Expr:
+            """Wrap in Paren for clarity when the expr itself is a BinOp."""
+            return Paren(e) if isinstance(e, BinOp) else e
+
+        # Build: (byte0 << (n-1)*8) | byte1 | ... | byte_{n-1}
+        # Use Paren wrappers so that `<<` and `|` operands are always explicit.
+        hi = _paren_if_binop(ordered_exprs[0])
+        combined: Expr = Paren(BinOp(hi, "<<", Const((n_bytes - 1) * 8)))
+        for b in range(1, n_bytes):
+            shift = (n_bytes - 1 - b) * 8
+            lo = _paren_if_binop(ordered_exprs[b])
+            if shift > 0:
+                term: Expr = Paren(BinOp(lo, "<<", Const(shift)))
+            else:
+                term = lo
+            combined = BinOp(combined, "|", term)
+
+        pair_group = RegGroupExpr(regs_key)
+        out.append(Assign(node.ea, pair_group, combined))
+        dbg("typesimp",
+            f"  [{hex(node.ea)}] fold-call-arg-pair: {''.join(regs_key)} = {combined.render()}")
+
+        # Mark all consumed indices
+        for r, (idx, _) in byte_assigns.items():
+            consumed.add(idx)
+
+    return out
 
 
 # ── Forward single-use propagation ────────────────────────────────────────────
@@ -733,7 +945,7 @@ def _propagate_values(nodes: List[HIRNode],
                 if new_node is not None:
                     live[use_idx] = new_node
                     live[i] = None
-                    dbg("typesimp", f"  prop-values: folded {r} into node {use_idx}")
+                    dbg("typesimp", f"  [{hex(node.ea)}] prop-values: folded {r} into node {use_idx}")
                     changed = True
 
             i += 1
@@ -774,9 +986,10 @@ def _propagate_values(nodes: List[HIRNode],
                                     live[abs_j] = new_node
                                 else:
                                     live[abs_j] = new_node
+                        src_ea = hex(live[i].ea)
                         live[i] = None
                         dbg("typesimp",
-                            f"  prop-values: inlined {retval_name} into node {abs_j}")
+                            f"  [{src_ea}] prop-values: inlined {retval_name} into node {abs_j}")
                         changed = True
                         break
 
@@ -889,7 +1102,7 @@ def _try_collapse_subb16(cond, body: List[HIRNode]):
         new_body = body[:k] + body[k+4:]
         new_cond = BinOp(NameExpr(minuend), "<", NameExpr(subtrahend))
         dbg("typesimp",
-            f"  subb16-collapse: {minuend} < {subtrahend}"
+            f"  [{hex(body[k].ea)}] subb16-collapse: {minuend} < {subtrahend}"
             f" (via {Rhi_min},{Rlo_sub} - {Rhi_sub},{Rlo_sub})")
         return (new_cond, new_body)
     return None
@@ -948,7 +1161,7 @@ def _simplify_orl_zero_check(nodes: List[HIRNode]) -> List[HIRNode]:
                 if new_cond is not None:
                     result.append(_replace_cond(nodes[i + 1], new_cond))
                     dbg("typesimp",
-                        f"  orl-zero-check: A|={node.rhs.name} → {parent} {new_cond.op} 0")
+                        f"  [{hex(node.ea)}] orl-zero-check: A|={node.rhs.name} → {parent} {new_cond.op} 0")
                     i += 2
                     continue
         result.append(node)
@@ -1000,7 +1213,7 @@ def _prune_orphaned_dptr_inc(nodes: List[HIRNode]) -> List[HIRNode]:
     result: List[HIRNode] = []
     for i, node in enumerate(nodes):
         if _is_dptr_inc_node(node) and not _dptr_live_after(nodes[i + 1:]):
-            dbg("typesimp", "  prune-orphaned-dptr++")
+            dbg("typesimp", f"  [{hex(node.ea)}] prune-orphaned-dptr++")
             continue
         result.append(node)
     return result

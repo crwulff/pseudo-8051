@@ -74,6 +74,40 @@ def _get_written_regs(node: HIRNode) -> frozenset:
     return frozenset()
 
 
+def _effective_map(node: HIRNode, base_eff: Dict[str, VarInfo]) -> Dict[str, VarInfo]:
+    """Build per-node effective reg map from base_eff merged with node annotations.
+
+    For is_param entries: suppresses any whose registers are absent from
+    node.ann.reg_names (the annotation forward-pass already tracked kills across
+    all control-flow paths, including kills inside IfNode/WhileNode branches that
+    the local `killed` set never sees).
+
+    Then adds entries from node.ann.reg_names and node.ann.call_arg_ann via
+    setdefault, so annotations never override entries that survived suppression.
+    """
+    ann = node.ann
+    if ann is None:
+        return base_eff
+
+    eff: Dict[str, VarInfo] = {}
+    for k, v in base_eff.items():
+        if isinstance(v, VarInfo) and v.is_param and v.regs:
+            # Keep this param only if at least one of its registers is still
+            # live according to the annotation (not killed by any path).
+            if any(r in ann.reg_names for r in v.regs):
+                eff[k] = v
+            # else: all paths through preceding control flow wrote to these
+            # regs — the param name no longer applies here.
+        else:
+            eff[k] = v
+
+    for r, vi in ann.reg_names.items():
+        eff.setdefault(r, vi)
+    for r, vi in ann.call_arg_ann.items():
+        eff.setdefault(r, vi)
+    return eff
+
+
 def _kill_params(reg_map: Dict[str, VarInfo], killed: set) -> Dict[str, VarInfo]:
     """Return reg_map with entries whose param registers overlap *killed* removed."""
     if not killed:
@@ -245,11 +279,12 @@ def _simplify_once(nodes: List[HIRNode], reg_map: Dict[str, VarInfo],
     for node in nodes:
         # Suppress entries for registers already written in this pass.
         if written:
-            eff = {k: v for k, v in reg_map.items()
-                   if not (isinstance(v, VarInfo) and not v.xram_sym and v.regs
-                           and any(r in written for r in v.regs))}
+            base_eff = {k: v for k, v in reg_map.items()
+                        if not (isinstance(v, VarInfo) and not v.xram_sym and v.regs
+                                and any(r in written for r in v.regs))}
         else:
-            eff = reg_map
+            base_eff = reg_map
+        eff = _effective_map(node, base_eff)
         for pat in _PATTERNS:
             result = pat.match([node], 0, eff, simplify_fn)
             if result is not None:
@@ -260,7 +295,29 @@ def _simplify_once(nodes: List[HIRNode], reg_map: Dict[str, VarInfo],
             if transformed is not None:
                 out.append(transformed)
         written.update(_get_written_regs(node))
+        if isinstance(node, IfNode):
+            written.update(_if_definite_kills(node))
     return out
+
+
+def _if_definite_kills(node: IfNode) -> frozenset:
+    """Registers definitely written in ALL execution paths through an IfNode.
+
+    Both arms always execute exactly one, so the intersection of their writes
+    is guaranteed to be killed at the merge point.  Used by _simplify_once to
+    prevent stale param mappings from leaking into post-branch nodes that lack
+    annotation (because they were created by patterns earlier in the pipeline).
+    """
+    return _definite_kills_list(node.then_nodes) & _definite_kills_list(node.else_nodes)
+
+
+def _definite_kills_list(nodes: List[HIRNode]) -> frozenset:
+    result: set = set()
+    for n in nodes:
+        result |= _get_written_regs(n)
+        if isinstance(n, IfNode):
+            result |= _if_definite_kills(n)
+    return frozenset(result)
 
 
 def _simplify(nodes: List[HIRNode], reg_map: Dict[str, VarInfo],
@@ -288,7 +345,8 @@ def _simplify(nodes: List[HIRNode], reg_map: Dict[str, VarInfo],
                 killed.add(r)
 
     while i < len(nodes):
-        eff = _kill_params(reg_map, killed)
+        base_eff = _kill_params(reg_map, killed)
+        eff = _effective_map(nodes[i], base_eff)
 
         for pat in _PATTERNS:
             result = pat.match(nodes, i, eff, _sub_simplify)
@@ -308,7 +366,8 @@ def _simplify(nodes: List[HIRNode], reg_map: Dict[str, VarInfo],
                 # Gather kills from the consumed range, then recompute eff
                 for j in range(i, new_i):
                     _update_killed(nodes[j])
-                eff = _kill_params(reg_map, killed)
+                base_eff = _kill_params(reg_map, killed)
+                eff = _effective_map(nodes[i], base_eff)
                 i = new_i
                 out.extend(_simplify_once(replacement, eff, _sub_simplify))
                 break

@@ -118,7 +118,7 @@ class XRAMLocalWritePattern(Pattern):
                     value_str = byte_exprs[0]
                 else:
                     continue
-            dbg("typesimp", f"  xram-local-write: {vinfo.name} = {value_str}")
+            dbg("typesimp", f"  [{hex(nodes[i].ea)}] xram-local-write: {vinfo.name} = {value_str}")
             return ([Statement(nodes[i].ea, f"{vinfo.name} = {value_str};")], end_i)
 
         return None

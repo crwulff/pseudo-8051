@@ -15,7 +15,7 @@ from pseudo8051.passes.typesimplify._regmap   import (
 from pseudo8051.passes.typesimplify._simplify import _simplify, _simplify_once
 from pseudo8051.passes.typesimplify._post     import (
     _consolidate_xram_local_loads, _collapse_dpl_dph,
-    _fold_and_prune_setups, _propagate_values,
+    _fold_and_prune_setups, _fold_call_arg_pairs, _propagate_values,
     _simplify_carry_comparison,
     _simplify_orl_zero_check,
     _prune_orphaned_dptr_inc,
@@ -50,7 +50,11 @@ class TypeAwareSimplifier(OptimizationPass):
                             "scanning callee prototypes for register mappings")
 
         reg_map = _augment_with_local_vars(func.ea, reg_map)
-        reg_map = _augment_with_callee_regs(func.hir, reg_map)
+
+        # Fall back to global callee-reg scan when AnnotationPass hasn't run
+        # (e.g. unit tests that call TypeAwareSimplifier directly).
+        if not getattr(func, "_annotation_pass_ran", False):
+            reg_map = _augment_with_callee_regs(func.hir, reg_map)
 
         if not reg_map:
             dbg("typesimp", f"{func.name}: no register mappings found, running structural patterns only")
@@ -60,6 +64,7 @@ class TypeAwareSimplifier(OptimizationPass):
         func.hir = _simplify(func.hir, reg_map)
         func.hir = _consolidate_xram_local_loads(func.hir, reg_map)
         func.hir = _simplify_once(func.hir, reg_map)
+        func.hir = _fold_call_arg_pairs(func.hir, reg_map)
         func.hir = _collapse_dpl_dph(func.hir, reg_map)
         func.hir = _fold_and_prune_setups(func.hir, reg_map)
         func.hir = _propagate_values(func.hir, reg_map)
