@@ -195,6 +195,15 @@ class AnnotationPass(OptimizationPass):
             if isinstance(v, VarInfo) and v.xram_sym:
                 xram_locals[v.xram_sym] = v
 
+        # Load custom register annotations (indexed by insn_ea)
+        _reg_anns: Dict[int, list] = {}
+        try:
+            from pseudo8051.reganns import get_reganns
+            for ra in get_reganns(func.ea):
+                _reg_anns.setdefault(ra.ea, []).append(ra)
+        except Exception:
+            pass  # not in IDA environment (unit tests)
+
         # ── Forward walk ───────────────────────────────────────────────────
         block_exit_names: Dict[int, Dict] = {}  # start_ea → exit name_state
         call_sites: List[Tuple[List[HIRNode], int, Dict]] = []
@@ -218,13 +227,21 @@ class AnnotationPass(OptimizationPass):
 
             nodes = block.hir
             for idx, node in enumerate(nodes):
-                # (a) Snapshot annotation
+                # (a) Inject custom register annotations at this instruction EA
+                for ra in _reg_anns.get(getattr(node, 'ea', None) or 0, []):
+                    vi = VarInfo(ra.name, ra.type, ra.regs, is_param=False)
+                    for r in ra.regs:
+                        name_state[r] = vi
+                    if len(ra.regs) > 1:
+                        name_state["".join(ra.regs)] = vi   # pair key e.g. "R6R7"
+
+                # (b) Snapshot annotation
                 ann = NodeAnnotation()
                 ann.reg_names  = dict(name_state)
                 ann.reg_consts = dict(const_state)
                 node.ann = ann
 
-                # (b) Detect call
+                # (c) Detect call
                 call_expr = _is_call_node(node)
                 if call_expr is not None:
                     callee_proto = get_proto(call_expr.func_name)
