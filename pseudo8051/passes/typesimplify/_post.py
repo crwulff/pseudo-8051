@@ -799,7 +799,7 @@ def _subst_reg_in_node(node: HIRNode, r: str,
         new_cond = _walk_expr(node.cond, _fn)
         if new_cond is node.cond:
             return None
-        return IfGoto(node.ea, new_cond, node.target)
+        return IfGoto(node.ea, new_cond, node.label)
 
     if isinstance(node, Statement):
         pat = re.compile(r'\b' + re.escape(r) + r'\b')
@@ -1129,7 +1129,7 @@ def _replace_cond(node: HIRNode, new_cond) -> HIRNode:
     if isinstance(node, IfNode):
         return IfNode(node.ea, new_cond, node.then_nodes, node.else_nodes)
     if isinstance(node, IfGoto):
-        return IfGoto(node.ea, new_cond, node.target)
+        return IfGoto(node.ea, new_cond, node.label)
     return node
 
 
