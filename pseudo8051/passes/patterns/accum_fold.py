@@ -145,7 +145,7 @@ def _try_mul_pair_lookahead(nodes, j, terminal, a_expr, full_product,
     pair_expr_subst = _subst_all_expr(pair_expr_la, reg_map)
     pair_group = RegGroup((rm.name, rk.name))
     dbg("typesimp",
-        f"  accum_fold (mul pair): {rm.name}{rk.name} = {pair_expr_subst.render()}")
+        f"  [{hex(a_start_node.ea)}] accum_fold (mul pair): {rm.name}{rk.name} = {pair_expr_subst.render()}")
     return ([Assign(a_start_node.ea, pair_group, pair_expr_subst)], jj + 1)
 
 
@@ -331,7 +331,7 @@ class AccumFoldPattern(Pattern):
         # IfGoto: substitute A in condition
         if isinstance(terminal, IfGoto) and _contains_a(terminal.cond):
             new_cond = _subst_a(terminal.cond, a_expr_subst)
-            dbg("typesimp", f"  accum_fold (IfGoto): folded {a_expr_subst.render()} into cond")
+            dbg("typesimp", f"  [{hex(a_start_node.ea)}] accum_fold (IfGoto): folded {a_expr_subst.render()} into cond")
             return (skipped + [IfGoto(a_start_node.ea, new_cond, terminal.label)], j + 1)
 
         # IfNode: substitute A in condition (Expr or str)
@@ -341,14 +341,14 @@ class AccumFoldPattern(Pattern):
                 new_cond: object = _subst_a(cond, a_expr_subst)
                 new_then = simplify(terminal.then_nodes, reg_map)
                 new_else = simplify(terminal.else_nodes, reg_map) if terminal.else_nodes else []
-                dbg("typesimp", f"  accum_fold (IfNode expr): folded {a_expr_subst.render()} into cond")
+                dbg("typesimp", f"  [{hex(a_start_node.ea)}] accum_fold (IfNode expr): folded {a_expr_subst.render()} into cond")
                 return (skipped + [IfNode(a_start_node.ea, new_cond, new_then, new_else)], j + 1)
             if isinstance(cond, str) and re.search(r'\bA\b', cond):
                 rendered = a_expr_subst.render()
                 new_cond_str = re.sub(r'\bA\b', rendered, cond)
                 new_then = simplify(terminal.then_nodes, reg_map)
                 new_else = simplify(terminal.else_nodes, reg_map) if terminal.else_nodes else []
-                dbg("typesimp", f"  accum_fold (IfNode str): folded {rendered} into cond")
+                dbg("typesimp", f"  [{hex(a_start_node.ea)}] accum_fold (IfNode str): folded {rendered} into cond")
                 return (skipped + [IfNode(a_start_node.ea, new_cond_str, new_then, new_else)], j + 1)
 
         # Assign(target, Reg("A")) where target != A:
@@ -368,7 +368,7 @@ class AccumFoldPattern(Pattern):
                     replacement_nodes, new_j = result
                     return (skipped + replacement_nodes, new_j)
 
-            dbg("typesimp", f"  accum_fold (Assign relay): folded {a_expr_subst.render()} into {terminal.lhs.render()}")
+            dbg("typesimp", f"  [{hex(a_start_node.ea)}] accum_fold (Assign relay): folded {a_expr_subst.render()} into {terminal.lhs.render()}")
             new_node = Assign(a_start_node.ea, terminal.lhs, a_expr_subst)
             new_node.ann = terminal.ann   # preserve call_arg_ann for downstream pair folding
             return (skipped + [new_node], j + 1)
@@ -377,7 +377,7 @@ class AccumFoldPattern(Pattern):
         if (isinstance(terminal, ReturnStmt)
                 and terminal.value == Reg("A")
                 and (num_compound > 0 or dptr_consumed)):
-            dbg("typesimp", f"  accum_fold (ReturnStmt): folded {a_expr_subst.render()}")
+            dbg("typesimp", f"  [{hex(a_start_node.ea)}] accum_fold (ReturnStmt): folded {a_expr_subst.render()}")
             return (skipped + [ReturnStmt(a_start_node.ea, a_expr_subst)], j + 1)
 
         # Statement terminal: "Rn = A;" — only if compound > 0 or DPTR consumed
@@ -386,7 +386,7 @@ class AccumFoldPattern(Pattern):
             if m_term and m_term.group(1) != "A":
                 target_name = m_term.group(1)
                 dbg("typesimp",
-                    f"  accum_fold (Stmt relay): folded {a_expr_subst.render()} into {target_name}")
+                    f"  [{hex(a_start_node.ea)}] accum_fold (Stmt relay): folded {a_expr_subst.render()} into {target_name}")
                 return (skipped + [Statement(a_start_node.ea,
                                              f"{target_name} = {a_expr_subst.render()};")], j + 1)
 
@@ -417,11 +417,11 @@ class AccumFoldPattern(Pattern):
             if isinstance(terminal, IfGoto):
                 if _is_carry(terminal.cond):
                     dbg("typesimp",
-                        f"  accum_fold (carry< IfGoto): {minuend.render()} < {subtrahend.render()}")
+                        f"  [{hex(a_start_node.ea)}] accum_fold (carry< IfGoto): {minuend.render()} < {subtrahend.render()}")
                     return (skipped + [IfGoto(a_start_node.ea, carry_cond, terminal.label)], j + 1)
                 if _is_not_carry(terminal.cond):
                     dbg("typesimp",
-                        f"  accum_fold (carry>= IfGoto): {minuend.render()} >= {subtrahend.render()}")
+                        f"  [{hex(a_start_node.ea)}] accum_fold (carry>= IfGoto): {minuend.render()} >= {subtrahend.render()}")
                     return (skipped + [IfGoto(a_start_node.ea, no_carry, terminal.label)], j + 1)
 
             if isinstance(terminal, IfNode):
@@ -430,12 +430,12 @@ class AccumFoldPattern(Pattern):
                 new_else = simplify(terminal.else_nodes, reg_map) if terminal.else_nodes else []
                 if _is_carry(cond):
                     dbg("typesimp",
-                        f"  accum_fold (carry< IfNode): {minuend.render()} < {subtrahend.render()}")
+                        f"  [{hex(a_start_node.ea)}] accum_fold (carry< IfNode): {minuend.render()} < {subtrahend.render()}")
                     return (skipped + [IfNode(a_start_node.ea, carry_cond,
                                              new_then, new_else)], j + 1)
                 if _is_not_carry(cond):
                     dbg("typesimp",
-                        f"  accum_fold (carry>= IfNode): {minuend.render()} >= {subtrahend.render()}")
+                        f"  [{hex(a_start_node.ea)}] accum_fold (carry>= IfNode): {minuend.render()} >= {subtrahend.render()}")
                     return (skipped + [IfNode(a_start_node.ea, no_carry,
                                              new_then, new_else)], j + 1)
 

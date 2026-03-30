@@ -15,7 +15,7 @@ from pseudo8051.ir.hir     import (HIRNode, NodeAnnotation, Assign, CompoundAssi
                                     ExprStmt)
 from pseudo8051.ir.expr    import Reg as RegExpr, RegGroup as RegGroupExpr, XRAMRef, Name as NameExpr
 from pseudo8051.passes     import OptimizationPass
-from pseudo8051.constants  import PARAM_REG_ORDER, dbg
+from pseudo8051.constants  import PARAM_REG_ORDER, DEBUG, dbg
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -162,6 +162,60 @@ def _backward_annotate_call(nodes: List[HIRNode], call_idx: int,
         j -= 1
 
 
+# ── Debug dump ────────────────────────────────────────────────────────────────
+
+def _fmt_varinfo(vi) -> str:
+    """Compact single-line representation of a VarInfo."""
+    regs = f"({','.join(vi.regs)})" if vi.regs else "()"
+    flags = []
+    if vi.is_param:      flags.append("param")
+    if vi.xram_sym:      flags.append(f"xram={vi.xram_sym}")
+    if vi.is_byte_field: flags.append("byte_field")
+    flag_str = f" [{','.join(flags)}]" if flags else ""
+    return f"{vi.type} {vi.name}{regs}{flag_str}"
+
+
+def _dump_annotated_hir(func) -> None:
+    """Print each block's annotated flat HIR to the debug console."""
+    from pseudo8051.passes.patterns._utils import VarInfo
+    print(f"[pseudo8051:annotate] ── HIR dump: {func.name} ──")
+    for block in _rpo(func):
+        print(f"[pseudo8051:annotate]   block {hex(block.start_ea)}:")
+        for node in block.hir:
+            lines = node.render(indent=2)
+            text = lines[0][1].strip() if lines else repr(node)
+            ann  = node.ann
+            ea   = getattr(node, "ea", None)
+            ea_s = f"[{hex(ea)}] " if ea is not None else ""
+            if ann is None:
+                print(f"[pseudo8051:annotate]     {ea_s}{text}  (no ann)")
+                continue
+            print(f"[pseudo8051:annotate]     {ea_s}{text}")
+            if ann.reg_names:
+                parts = ", ".join(
+                    f"{r}={_fmt_varinfo(v)}" for r, v in sorted(ann.reg_names.items())
+                    if isinstance(v, VarInfo)
+                )
+                print(f"[pseudo8051:annotate]       names:    {parts}")
+            if ann.reg_consts:
+                parts = ", ".join(
+                    f"{r}={hex(v)}" for r, v in sorted(ann.reg_consts.items())
+                )
+                print(f"[pseudo8051:annotate]       consts:   {parts}")
+            if ann.call_arg_ann:
+                parts = ", ".join(
+                    f"{r}={_fmt_varinfo(v)}" for r, v in sorted(ann.call_arg_ann.items())
+                    if isinstance(v, VarInfo)
+                )
+                print(f"[pseudo8051:annotate]       call_arg: {parts}")
+            if ann.callee_args:
+                parts = ", ".join(
+                    f"{r}={_fmt_varinfo(v)}" for r, v in sorted(ann.callee_args.items())
+                    if isinstance(v, VarInfo)
+                )
+                print(f"[pseudo8051:annotate]       callee:   {parts}")
+
+
 # ── Pass ───────────────────────────────────────────────────────────────────────
 
 class AnnotationPass(OptimizationPass):
@@ -297,3 +351,5 @@ class AnnotationPass(OptimizationPass):
 
         func._annotation_pass_ran = True
         dbg("annotate", f"{func.name}: annotation complete")
+        if DEBUG:
+            _dump_annotated_hir(func)
