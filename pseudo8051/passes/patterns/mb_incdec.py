@@ -226,7 +226,7 @@ class IfNodeIncDecPattern(Pattern):
 
         ea = nodes[i].ea
         dbg("typesimp", f"  ifnode-incdec: {var_name}{op};  (nodes {i}–{j}, ea={ea:#x})")
-        return ([Statement(ea, f"{var_name}{op};")], j + 1)
+        return ([ExprStmt(ea, UnaryOp(op, Name(var_name), post=True))], j + 1)
 
 
 class MultiByteIncDecPattern(Pattern):
@@ -287,4 +287,4 @@ class MultiByteIncDecPattern(Pattern):
 
         ea = units[0][1]
         dbg("typesimp", f"  mb-incdec: {var_name}{op};  (nodes {i}–{j-1}, ea={ea:#x})")
-        return ([Statement(ea, f"{var_name}{op};")], j)
+        return ([ExprStmt(ea, UnaryOp(op, Name(var_name), post=True))], j)

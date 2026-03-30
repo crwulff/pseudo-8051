@@ -1,7 +1,7 @@
 import pytest
 
 from pseudo8051.ir.hir import (Statement, IfGoto, Assign, CompoundAssign,
-                                SwitchNode, GotoStatement, Label, ReturnStmt)
+                                SwitchNode, GotoStatement, BreakStmt, Label, ReturnStmt)
 from pseudo8051.ir.expr import Reg, Const, BinOp, Name
 from pseudo8051.passes.switch import SwitchStructurer, SwitchBodyAbsorber
 from pseudo8051.passes.ifelse import IfElseStructurer
@@ -415,8 +415,8 @@ class TestSwitchBodyAbsorber:
         for values, body in sw.cases:
             assert isinstance(body, list), \
                 f"case {values} body should be inlined, got {body!r}"
-            texts = [n.text for n in body if isinstance(n, Statement)]
-            assert "break;" not in texts, "no break; expected (arm ends with return)"
+            assert not any(isinstance(n, BreakStmt) for n in body), \
+                "no break; expected (arm ends with return)"
 
         assert sw.default_label is None
         assert isinstance(sw.default_body, list)
@@ -489,14 +489,14 @@ class TestSwitchBodyAbsorber:
 
         # The returning arm (case 2) must end with return, not break
         case_map = {v: body for vals, body in sw.cases for v in vals}
-        c2_texts = [n.text for n in case_map[2] if isinstance(n, Statement)]
-        assert "break;" not in c2_texts, "returning arm should not have break;"
+        assert not any(isinstance(n, BreakStmt) for n in case_map[2]), \
+            "returning arm should not have break;"
 
         # The live arms (case 4 and default) must end with break (goto→merge replaced)
-        c4_texts = [n.text for n in case_map[4] if isinstance(n, Statement)]
-        assert "break;" in c4_texts, "live arm should end with break;"
-        def_texts = [n.text for n in sw.default_body if isinstance(n, Statement)]
-        assert "break;" in def_texts, "default live arm should end with break;"
+        assert any(isinstance(n, BreakStmt) for n in case_map[4]), \
+            "live arm should end with break;"
+        assert any(isinstance(n, BreakStmt) for n in sw.default_body), \
+            "default live arm should end with break;"
 
         assert b_c2._absorbed
         assert b_fall._absorbed

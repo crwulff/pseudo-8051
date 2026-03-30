@@ -29,10 +29,9 @@ raw Assign nodes into named Statement nodes).
 import re
 from typing import List, Optional
 
-from pseudo8051.ir.hir   import HIRNode, Statement, ExprStmt, IfNode, WhileNode, ForNode, DoWhileNode
-from pseudo8051.ir.expr  import Reg, UnaryOp
+from pseudo8051.ir.hir   import HIRNode, Statement, Assign, ExprStmt, IfNode, WhileNode, ForNode, DoWhileNode
+from pseudo8051.ir.expr  import Reg, UnaryOp, Name, Const
 from pseudo8051.constants import dbg
-from pseudo8051.passes.patterns._utils import _const_str
 
 # Match "lhs_parent.suffix = rhs_expr;"
 _RE_MB_ASSIGN  = re.compile(r'^(\w+)\.(hi|lo|b\d+)\s*=\s*(.+);$')
@@ -130,7 +129,7 @@ def _try_collapse(nodes: List[HIRNode], i: int):
 
     if valid_field and rhs_parent is not None:
         dbg("typesimp", f"  mb_assign: {lhs_parent} = {rhs_parent}")
-        return Statement(n0.ea, f"{lhs_parent} = {rhs_parent};"), j
+        return Assign(n0.ea, Name(lhs_parent), Name(rhs_parent)), j
 
     # Try: all RHS are integer constants
     const_vals = [_parse_int(rv) for rv in rhs_vals]
@@ -138,11 +137,8 @@ def _try_collapse(nodes: List[HIRNode], i: int):
         value = 0
         for cv in const_vals:
             value = (value << 8) | (cv & 0xFF)
-        n_bytes = len(const_vals)
-        type_str = {1: "uint8_t", 2: "uint16_t", 4: "uint32_t"}.get(n_bytes, "uint16_t")
-        val_str = _const_str(value, type_str)
-        dbg("typesimp", f"  mb_assign: {lhs_parent} = {val_str} (const)")
-        return Statement(n0.ea, f"{lhs_parent} = {val_str};"), j
+        dbg("typesimp", f"  mb_assign: {lhs_parent} = {hex(value)} (const)")
+        return Assign(n0.ea, Name(lhs_parent), Const(value)), j
 
     return None, i
 

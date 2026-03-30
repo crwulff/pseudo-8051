@@ -1,4 +1,4 @@
-from pseudo8051.ir.hir import Statement
+from pseudo8051.ir.hir import Statement, Assign
 from pseudo8051.passes.typesimplify import TypeAwareSimplifier
 from pseudo8051.prototypes import PROTOTYPES, FuncProto, Param
 
@@ -64,5 +64,5 @@ class TestEndToEndPipeline:
         ])
         TypeAwareSimplifier().run(func)
 
-        texts = [n.text for n in func.hir if isinstance(n, Statement)]
-        assert "x = -x;" in texts
+        rendered = [t for n in func.hir for _, t in n.render()]
+        assert "x = -x;" in rendered

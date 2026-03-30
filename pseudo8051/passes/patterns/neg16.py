@@ -11,7 +11,7 @@ import re
 from typing import Dict, List, Optional
 
 from pseudo8051.ir.hir import HIRNode, Statement, Assign, CompoundAssign
-from pseudo8051.ir.expr import Reg, Const, BinOp, UnaryOp
+from pseudo8051.ir.expr import Reg, Const, BinOp, UnaryOp, Name
 from pseudo8051.constants import dbg
 from pseudo8051.passes.patterns.base   import Pattern, Match, Simplify
 from pseudo8051.passes.patterns._utils import VarInfo
@@ -88,4 +88,4 @@ class Neg16Pattern(Pattern):
             return None
 
         dbg("typesimp", f"  neg16: {info_lo.name} = -{info_lo.name}")
-        return ([Statement(nodes[i].ea, f"{info_lo.name} = -{info_lo.name};")], i + 7)
+        return ([Assign(nodes[i].ea, Name(info_lo.name), UnaryOp("-", Name(info_lo.name)))], i + 7)

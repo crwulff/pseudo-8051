@@ -138,6 +138,13 @@ class GotoStatement(HIRNode):
         return [(self.ea, f"{self._ind(indent)}goto {self.label};")]
 
 
+class BreakStmt(HIRNode):
+    """break;"""
+
+    def render(self, indent: int = 0) -> List[Tuple[int, str]]:
+        return [(self.ea, f"{self._ind(indent)}break;")]
+
+
 class Label(HIRNode):
     """label_XXXX: — emitted before a block that needs a label."""
 

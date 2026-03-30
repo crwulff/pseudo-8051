@@ -8,7 +8,7 @@ and storing the result byte-by-byte into a declared XRAM local.
 from typing import Dict, List, Optional
 
 from pseudo8051.ir.hir import HIRNode, Statement, Assign, CompoundAssign, ExprStmt
-from pseudo8051.ir.expr import Reg, Const, XRAMRef, UnaryOp
+from pseudo8051.ir.expr import Reg, Const, XRAMRef, UnaryOp, Name, BinOp, Cast, Expr
 from pseudo8051.constants import dbg
 from pseudo8051.passes.patterns.base   import Pattern, Match, Simplify
 from pseudo8051.passes.patterns._utils import (
@@ -78,7 +78,7 @@ def _node_is_dptr_set(node: HIRNode) -> bool:
 
 def _src_expr(Rhi: str, Rlo: str,
               reg_map: Dict[str, VarInfo],
-              target_type: str) -> str:
+              target_type: str) -> Expr:
     rhi_info = reg_map.get(Rhi)
     rlo_info = reg_map.get(Rlo)
 
@@ -97,13 +97,13 @@ def _src_expr(Rhi: str, Rlo: str,
                 src_bytes = _type_bytes(vinfo.type)
                 dst_bytes = _type_bytes(target_type)
                 if src_bytes == dst_bytes:
-                    return vinfo.name
-                return f"({target_type}){vinfo.name}"
+                    return Name(vinfo.name)
+                return Cast(target_type, Name(vinfo.name))
 
     pair = Rhi + Rlo
     if pair in reg_map and not reg_map[pair].xram_sym:
-        return _replace_pairs(pair, reg_map)
-    return pair
+        return Name(_replace_pairs(pair, reg_map))
+    return Name(pair)
 
 
 def _is_lo_companion(sym_lo: str,
@@ -186,14 +186,14 @@ class MultiByteAddPattern(Pattern):
         if not _is_lo_companion(sym_lo, hi_vinfo, reg_map):
             return None
 
-        src  = _src_expr(Rhi, Rlo, reg_map, hi_vinfo.type)
+        src_expr = _src_expr(Rhi, Rlo, reg_map, hi_vinfo.type)
         cval = (hi_const << 8) | lo_const
 
         if cval == 0:
-            text = f"{hi_vinfo.name} = {src};"
+            result_node = Assign(nodes[i].ea, Name(hi_vinfo.name), src_expr)
         else:
-            cstr = _const_str(cval, hi_vinfo.type)
-            text = f"{hi_vinfo.name} = {src} + {cstr};"
+            result_node = Assign(nodes[i].ea, Name(hi_vinfo.name),
+                                 BinOp(src_expr, "+", Const(cval)))
 
-        dbg("typesimp", f"  mb-add: {text}  (nodes {i}–{j-1}, ea={nodes[i].ea:#x})")
-        return ([Statement(nodes[i].ea, text)], j)
+        dbg("typesimp", f"  mb-add: {result_node.render()[0][1]}  (nodes {i}–{j-1}, ea={nodes[i].ea:#x})")
+        return ([result_node], j)

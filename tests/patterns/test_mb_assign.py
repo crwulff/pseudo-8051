@@ -1,4 +1,4 @@
-from pseudo8051.ir.hir import Statement, ExprStmt, IfNode
+from pseudo8051.ir.hir import Statement, Assign, ExprStmt, IfNode
 from pseudo8051.ir.expr import Reg, UnaryOp
 from pseudo8051.passes.patterns.mb_assign import collapse_mb_assigns
 
@@ -14,8 +14,8 @@ class TestCollapseMbAssigns:
         ]
         result = collapse_mb_assigns(nodes)
         assert len(result) == 1
-        assert isinstance(result[0], Statement)
-        assert result[0].text == "var0 = count;"
+        assert isinstance(result[0], Assign)
+        assert result[0].render()[0][1] == "var0 = count;"
 
     def test_two_byte_field_const_src(self):
         """var0.hi = 0x12; DPTR++; var0.lo = 0x34; → var0 = 0x1234;"""
@@ -27,7 +27,8 @@ class TestCollapseMbAssigns:
         ]
         result = collapse_mb_assigns(nodes)
         assert len(result) == 1
-        assert result[0].text == "var0 = 0x1234;"
+        assert isinstance(result[0], Assign)
+        assert result[0].render()[0][1] == "var0 = 0x1234;"
 
     def test_no_collapse_mismatched_rhs(self):
         """Different RHS parents → no collapse."""
@@ -64,7 +65,8 @@ class TestCollapseMbAssigns:
         ]
         result = collapse_mb_assigns(nodes)
         assert len(result) == 1
-        assert result[0].text == "result = src;"
+        assert isinstance(result[0], Assign)
+        assert result[0].render()[0][1] == "result = src;"
 
     def test_recurse_into_if_node(self):
         """Byte-field assignments inside IfNode bodies are also collapsed."""
@@ -78,7 +80,7 @@ class TestCollapseMbAssigns:
         assert len(result) == 1
         assert isinstance(result[0], IfNode)
         assert len(result[0].then_nodes) == 1
-        assert result[0].then_nodes[0].text == "var0 = count;"
+        assert result[0].then_nodes[0].render()[0][1] == "var0 = count;"
 
     def test_surrounding_nodes_preserved(self):
         """Other statements before/after the sequence are preserved."""
@@ -93,5 +95,5 @@ class TestCollapseMbAssigns:
         result = collapse_mb_assigns(nodes)
         assert len(result) == 3
         assert result[0].text == "foo();"
-        assert result[1].text == "var0 = count;"
+        assert result[1].render()[0][1] == "var0 = count;"
         assert result[2].text == "bar();"

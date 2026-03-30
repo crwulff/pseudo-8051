@@ -48,8 +48,8 @@ class TestMultiByteIncDecPattern:
         replacement, new_i = result
         assert new_i == len(nodes)
         assert len(replacement) == 1
-        assert isinstance(replacement[0], Statement)
-        assert replacement[0].text == "var1++;"
+        assert isinstance(replacement[0], ExprStmt)
+        assert replacement[0].render()[0][1] == "var1++;"
 
     def test_mb_dec_xram_16bit(self):
         """16-bit XRAM decrement collapses to 'var1--;'."""
@@ -62,7 +62,7 @@ class TestMultiByteIncDecPattern:
         reg_map = self._xram_reg_map_16bit()
         result = self._pat().match(nodes, 0, reg_map, self._noop())
         assert result is not None
-        assert result[0][0].text == "var1--;"
+        assert result[0][0].render()[0][1] == "var1--;"
 
     def test_mb_inc_xram_16bit_dptr_prefix(self):
         """Same as test_mb_inc_xram_16bit but with DPTR setup nodes included."""
@@ -86,8 +86,8 @@ class TestMultiByteIncDecPattern:
         replacement, new_i = result
         assert new_i == len(nodes)
         assert len(replacement) == 1
-        assert isinstance(replacement[0], Statement)
-        assert replacement[0].text == "var1++;"
+        assert isinstance(replacement[0], ExprStmt)
+        assert replacement[0].render()[0][1] == "var1++;"
 
     def test_mb_inc_reg_16bit(self):
         """4-node register 16-bit increment: R7++;  if (R7 != 0) goto skip;  R6++;  skip: → 'count++;'."""
@@ -106,8 +106,8 @@ class TestMultiByteIncDecPattern:
         replacement, new_i = result
         assert new_i == 4
         assert len(replacement) == 1
-        assert isinstance(replacement[0], Statement)
-        assert replacement[0].text == "count++;"
+        assert isinstance(replacement[0], ExprStmt)
+        assert replacement[0].render()[0][1] == "count++;"
 
     def test_mb_inc_reg_16bit_no_varinfo(self):
         """Without a VarInfo entry, fall back to concatenated register name 'R7R6'."""
@@ -119,7 +119,7 @@ class TestMultiByteIncDecPattern:
         ]
         result = self._pat().match(nodes, 0, {}, self._noop())
         assert result is not None
-        assert result[0][0].text == "R7R6++;"
+        assert result[0][0].render()[0][1] == "R7R6++;"
 
     def test_mb_inc_single_unit_no_match(self):
         """A single XRAM unit without a carry check → pattern must not fire."""
@@ -162,8 +162,8 @@ class TestMultiByteIncDecPattern:
         replacement, new_i = result
         assert new_i == len(nodes)
         assert len(replacement) == 1
-        assert isinstance(replacement[0], Statement)
-        assert replacement[0].text == "var32++;"
+        assert isinstance(replacement[0], ExprStmt)
+        assert replacement[0].render()[0][1] == "var32++;"
 
 
 class TestIfNodeIncDecPattern:
@@ -206,7 +206,7 @@ class TestIfNodeIncDecPattern:
         assert result is not None
         replacement, new_i = result
         assert new_i == 4
-        assert replacement[0].text == "var1++;"
+        assert replacement[0].render()[0][1] == "var1++;"
 
     def test_16bit_dec_ifnode(self):
         """16-bit XRAM -- via IfNode carry → 'var1--;'."""
@@ -216,7 +216,7 @@ class TestIfNodeIncDecPattern:
         )
         result = self._pat().match(nodes, 0, self._xram_reg_map_16bit(), self._noop())
         assert result is not None
-        assert result[0][0].text == "var1--;"
+        assert result[0][0].render()[0][1] == "var1--;"
 
     def test_16bit_inc_ifnode_dptr_prefix(self):
         """DPTR prefix inside IfNode then_nodes is consumed transparently."""
@@ -234,7 +234,7 @@ class TestIfNodeIncDecPattern:
         )
         result = self._pat().match(nodes, 0, self._xram_reg_map_16bit(), self._noop())
         assert result is not None
-        assert result[0][0].text == "var1++;"
+        assert result[0][0].render()[0][1] == "var1++;"
 
     def test_single_unit_no_ifnode(self):
         """A single XRAM unit not followed by IfNode → no match."""

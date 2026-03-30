@@ -1,4 +1,4 @@
-from pseudo8051.ir.hir import Statement
+from pseudo8051.ir.hir import Statement, Assign
 from pseudo8051.passes.patterns._utils import VarInfo
 from pseudo8051.passes.patterns.neg16 import Neg16Pattern
 
@@ -29,7 +29,8 @@ class TestNeg16Pattern:
         assert result is not None
         replacement, new_i = result
         assert new_i == 7
-        assert replacement[0].text == "x = -x;"
+        assert isinstance(replacement[0], Assign)
+        assert replacement[0].render()[0][1] == "x = -x;"
 
     def test_no_fire_wrong_var_order(self):
         """lo and hi from different VarInfo → no match."""

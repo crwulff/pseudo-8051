@@ -19,7 +19,7 @@ from typing import Dict, List, Optional, Tuple, Union
 
 from pseudo8051.ir.hir import (
     HIRNode, Label, Assign, CompoundAssign, IfGoto, SwitchNode,
-    Statement, GotoStatement, IfNode, WhileNode, ForNode, DoWhileNode, ReturnStmt)
+    Statement, GotoStatement, BreakStmt, IfNode, WhileNode, ForNode, DoWhileNode, ReturnStmt)
 from pseudo8051.ir.expr import Reg, Const, BinOp, Expr, UnaryOp
 from pseudo8051.ir.function   import Function
 from pseudo8051.ir.basicblock import BasicBlock
@@ -263,7 +263,7 @@ def _replace_goto_with_break(nodes: List[HIRNode],
     result: List[HIRNode] = []
     for node in nodes:
         if isinstance(node, GotoStatement) and node.label == merge_label:
-            result.append(Statement(node.ea, "break;"))
+            result.append(BreakStmt(node.ea))
         elif isinstance(node, IfGoto) and node.label == merge_label:
             result.append(Statement(node.ea,
                                     f"if ({node.cond.render()}) break;"))
@@ -289,6 +289,8 @@ def _needs_break(body_nodes: List[HIRNode]) -> bool:
     if isinstance(last, ReturnStmt):
         return False
     if isinstance(last, GotoStatement):
+        return False
+    if isinstance(last, BreakStmt):
         return False
     if isinstance(last, Statement):
         if last.text in ("break;", "return;"):
@@ -438,7 +440,7 @@ class SwitchBodyAbsorber(OptimizationPass):
             body_hir = _build_arm_hir(body_blocks, arm_ml)
             body_hir = _replace_goto_with_break(body_hir, arm_ml)
             if _needs_break(body_hir):
-                body_hir.append(Statement(switch_node.ea, "break;"))
+                body_hir.append(BreakStmt(switch_node.ea))
             label_body_cache[label] = body_hir
             all_body_blocks.extend(body_blocks)
             return body_hir
