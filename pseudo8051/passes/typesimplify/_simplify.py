@@ -7,7 +7,7 @@ from typing import Dict, List, Optional
 
 from pseudo8051.ir.hir    import (HIRNode, Statement, Assign, CompoundAssign,
                                    ExprStmt, ReturnStmt, IfGoto, IfNode, WhileNode, ForNode,
-                                   SwitchNode)
+                                   DoWhileNode, SwitchNode)
 from pseudo8051.passes.patterns         import _PATTERNS
 from pseudo8051.passes.patterns._utils  import (
     VarInfo, _replace_pairs, _replace_xram_syms, _replace_single_regs,
@@ -245,6 +245,17 @@ def _transform_default(node: HIRNode,
             init       = new_init,
             condition  = new_cond,
             update     = new_update,
+            body_nodes = simplify_fn(node.body_nodes, reg_map),
+        )
+    if isinstance(node, DoWhileNode):
+        cond = node.condition
+        if isinstance(cond, str):
+            new_cond = _simplify_bool_str(_subst_text(cond, reg_map))
+        else:
+            new_cond = _simplify_bool_expr(_subst_expr(cond, reg_map))
+        return DoWhileNode(
+            ea         = node.ea,
+            condition  = new_cond,
             body_nodes = simplify_fn(node.body_nodes, reg_map),
         )
     if isinstance(node, SwitchNode):

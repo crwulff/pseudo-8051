@@ -270,6 +270,15 @@ def _try_jmptable(func: Function, block: BasicBlock) -> bool:
         dbg("switch", f"JmpTableStructurer(mem): block {hex(block.start_ea)} "
                       f"table @ {hex(table_ea)} → {len(cases)} cases "
                       f"stride={stride}")
+
+        # Absorb the SJMP dispatch-table blocks by their table EAs.
+        # block.successors is empty when IDA did not create CFG edges from
+        # the JMP block, so we must look up the entries directly.
+        for i in range(len(cases)):
+            entry_ea = table_ea + i * stride
+            sjmp_blk = func._block_map.get(entry_ea)
+            if sjmp_blk is not None:
+                sjmp_blk._absorbed = True
     else:
         # CFG path: absorb the SJMP dispatch blocks
         succs_sorted = sorted(

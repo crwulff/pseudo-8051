@@ -7,7 +7,7 @@ from typing import Callable, Dict, List, Optional
 
 from pseudo8051.ir.hir    import (HIRNode, Statement, Assign, CompoundAssign,
                                    ExprStmt, ReturnStmt, IfGoto, IfNode, WhileNode, ForNode,
-                                   SwitchNode)
+                                   DoWhileNode, SwitchNode)
 from pseudo8051.constants import dbg
 from pseudo8051.passes.patterns._utils  import (
     VarInfo, _type_bytes, _byte_names, _walk_expr,
@@ -30,6 +30,8 @@ def recurse_bodies(nodes: List[HIRNode], fn: Callable) -> List[HIRNode]:
         elif isinstance(node, ForNode):
             result.append(ForNode(node.ea, node.init, node.condition, node.update,
                 fn(node.body_nodes)))
+        elif isinstance(node, DoWhileNode):
+            result.append(DoWhileNode(node.ea, node.condition, fn(node.body_nodes)))
         elif isinstance(node, SwitchNode):
             new_cases = [
                 (vals, fn(body) if isinstance(body, list) else body)
@@ -168,6 +170,9 @@ def _consolidate_xram_local_loads(nodes: List[HIRNode],
                 _consolidate_xram_local_loads(node.body_nodes, dict(reg_map))))
         elif isinstance(node, ForNode):
             out.append(ForNode(node.ea, node.init, node.condition, node.update,
+                _consolidate_xram_local_loads(node.body_nodes, dict(reg_map))))
+        elif isinstance(node, DoWhileNode):
+            out.append(DoWhileNode(node.ea, node.condition,
                 _consolidate_xram_local_loads(node.body_nodes, dict(reg_map))))
         elif isinstance(node, SwitchNode):
             new_cases = [
@@ -315,7 +320,7 @@ def _collect_hir_name_refs(nodes: List[HIRNode]) -> set:
         elif isinstance(node, IfNode):
             for sub in list(node.then_nodes) + list(node.else_nodes):
                 _visit(sub)
-        elif isinstance(node, (WhileNode, ForNode)):
+        elif isinstance(node, (WhileNode, ForNode, DoWhileNode)):
             for sub in node.body_nodes:
                 _visit(sub)
 
@@ -395,7 +400,7 @@ def _first_kill_before_read(reg: str, nodes: List[HIRNode]) -> bool:
     (conservative: assume the reg might be read).
     """
     for node in nodes:
-        if isinstance(node, (IfNode, WhileNode, ForNode, SwitchNode)):
+        if isinstance(node, (IfNode, WhileNode, ForNode, DoWhileNode, SwitchNode)):
             return False  # conservative: might read in a branch
         # CompoundAssign LHS is both read and written — _count_reg_uses_in_node
         # only counts the RHS, so check the LHS explicitly here.
@@ -441,6 +446,9 @@ def _fold_and_prune_setups(nodes: List[HIRNode],
                 _fold_and_prune_setups(node.body_nodes, reg_map, succ_refs)))
         elif isinstance(node, ForNode):
             result.append(ForNode(node.ea, node.init, node.condition, node.update,
+                _fold_and_prune_setups(node.body_nodes, reg_map, succ_refs)))
+        elif isinstance(node, DoWhileNode):
+            result.append(DoWhileNode(node.ea, node.condition,
                 _fold_and_prune_setups(node.body_nodes, reg_map, succ_refs)))
         elif isinstance(node, SwitchNode):
             new_cases = [(vals, _fold_and_prune_setups(body, reg_map, succ_refs)
@@ -535,6 +543,8 @@ def _fold_return_chains(hir: List[HIRNode], ret_regs: tuple) -> List[HIRNode]:
             elif isinstance(node, ForNode):
                 node = ForNode(node.ea, node.init, node.condition,
                                node.update, _fold(node.body_nodes))
+            elif isinstance(node, DoWhileNode):
+                node = DoWhileNode(node.ea, node.condition, _fold(node.body_nodes))
             elif isinstance(node, SwitchNode):
                 new_cases = [
                     (vals, _fold(body) if isinstance(body, list) else body)

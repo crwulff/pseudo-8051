@@ -179,10 +179,14 @@ class Function:
                 if succ.start_ea >= BADADDR:
                     continue
                 pred_count[succ.start_ea] = pred_count.get(succ.start_ea, 0) + 1
-                if succ.start_ea <= block.start_ea:
-                    loop_headers.add(succ.start_ea)
-                    if succ.start_ea in self._block_map:
-                        self._block_map[succ.start_ea].is_loop_header = True
+
+        # Detect loop headers via DFS (correct for all loop shapes, including
+        # loops whose header EA is higher than the tail EA).
+        from pseudo8051.passes.loops import _dfs_back_edges
+        for _, hdr in _dfs_back_edges(self._block_map[self.ea]):
+            loop_headers.add(hdr.start_ea)
+            if hdr.start_ea in self._block_map:
+                self._block_map[hdr.start_ea].is_loop_header = True
 
         needs_label = loop_headers | {ea for ea, cnt in pred_count.items() if cnt > 1}
 
@@ -224,7 +228,7 @@ class Function:
     def _walk_fix_returns(self, nodes: List[HIRNode],
                           ret_expr: str, ret_reg: str) -> None:
         from pseudo8051.ir.hir import (Statement, ReturnStmt,
-                                       IfNode, WhileNode, ForNode, SwitchNode)
+                                       IfNode, WhileNode, ForNode, DoWhileNode, SwitchNode)
         from pseudo8051.ir.expr import Reg
         for node in nodes:
             if isinstance(node, Statement) and node.text == "return;":
@@ -234,7 +238,7 @@ class Function:
             elif isinstance(node, IfNode):
                 self._walk_fix_returns(node.then_nodes, ret_expr, ret_reg)
                 self._walk_fix_returns(node.else_nodes, ret_expr, ret_reg)
-            elif isinstance(node, (WhileNode, ForNode)):
+            elif isinstance(node, (WhileNode, ForNode, DoWhileNode)):
                 self._walk_fix_returns(node.body_nodes, ret_expr, ret_reg)
             elif isinstance(node, SwitchNode):
                 for _vals, body in node.cases:

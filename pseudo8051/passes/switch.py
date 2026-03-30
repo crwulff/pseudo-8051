@@ -19,7 +19,7 @@ from typing import Dict, List, Optional, Tuple, Union
 
 from pseudo8051.ir.hir import (
     HIRNode, Label, Assign, CompoundAssign, IfGoto, SwitchNode,
-    Statement, GotoStatement, IfNode, WhileNode, ForNode, ReturnStmt)
+    Statement, GotoStatement, IfNode, WhileNode, ForNode, DoWhileNode, ReturnStmt)
 from pseudo8051.ir.expr import Reg, Const, BinOp, Expr, UnaryOp
 from pseudo8051.ir.function   import Function
 from pseudo8051.ir.basicblock import BasicBlock
@@ -405,6 +405,7 @@ class SwitchBodyAbsorber(OptimizationPass):
                 all_arm_eas.add(b.start_ea)
 
         # Collect external goto targets (blocks outside the switch block + arms)
+        dbg("switch", f"  SwitchBodyAbsorber: all_arm_eas={sorted(hex(e) for e in all_arm_eas)}")
         external_targets: set = set()
         for blk in func.blocks:
             if (getattr(blk, "_absorbed", False)
@@ -420,7 +421,17 @@ class SwitchBodyAbsorber(OptimizationPass):
             """Return inlined body HIR for label, or the label string if blocked."""
             if label in label_body_cache:
                 return label_body_cache[label]
-            if label not in label_to_block or label in external_targets:
+            if label not in label_to_block:
+                dbg("switch", f"  SwitchBodyAbsorber: {label!r} not in label_to_block — keeping goto")
+                return label  # keep as goto label
+            if label in external_targets:
+                ext_blks = [hex(b.start_ea) for b in func.blocks
+                            if not getattr(b, "_absorbed", False)
+                            and b is not block
+                            and b.start_ea not in all_arm_eas
+                            and label in _collect_goto_targets(b.hir)]
+                dbg("switch", f"  SwitchBodyAbsorber: {label!r} in external_targets "
+                              f"(referenced by blocks: {ext_blks}) — keeping goto")
                 return label  # keep as goto label
             arm_me, arm_ml = _arm_merge(label)
             body_blocks = _arm_blocks(label_to_block[label], arm_me)

@@ -224,10 +224,11 @@ class ForNode(HIRNode):
     for (init; condition; update) { body_nodes }
 
     init/condition/update may be str (legacy) or Assign/Expr (Phase 7+).
+    init may be None for promoted loops where the counter is already set.
     """
 
     def __init__(self, ea: int,
-                 init: Union[str, Expr, Assign],
+                 init: Union[str, Expr, Assign, None],
                  condition: _Cond,
                  update: Union[str, Expr],
                  body_nodes: List[HIRNode]):
@@ -239,6 +240,8 @@ class ForNode(HIRNode):
 
     def _render_init(self) -> str:
         """Render the for-loop init clause (no trailing semicolon)."""
+        if self.init is None:
+            return ""
         if isinstance(self.init, Assign):
             return f"{_render_expr(self.init.lhs)} = {_render_expr(self.init.rhs)}"
         if isinstance(self.init, Expr):
@@ -255,6 +258,28 @@ class ForNode(HIRNode):
         for node in self.body_nodes:
             lines.extend(node.render(indent + 1))
         lines.append((self.ea, f"{ind}}}"))
+        return lines
+
+
+class DoWhileNode(HIRNode):
+    """
+    do { body_nodes } while (condition);
+
+    condition may be str (legacy) or Expr.
+    """
+
+    def __init__(self, ea: int, condition: _Cond, body_nodes: List[HIRNode]):
+        super().__init__(ea)
+        self.condition  = condition
+        self.body_nodes = body_nodes
+
+    def render(self, indent: int = 0) -> List[Tuple[int, str]]:
+        ind = self._ind(indent)
+        lines: List[Tuple[int, str]] = []
+        lines.append((self.ea, f"{ind}do {{"))
+        for node in self.body_nodes:
+            lines.extend(node.render(indent + 1))
+        lines.append((self.ea, f"{ind}}} while ({_render_cond(self.condition)});"))
         return lines
 
 

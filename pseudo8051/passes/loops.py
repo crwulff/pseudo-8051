@@ -1,12 +1,12 @@
 """
-passes/loops.py — LoopStructurer: back-edge loops → WhileNode / ForNode.
+passes/loops.py — LoopStructurer: back-edge loops → WhileNode / ForNode / DoWhileNode.
 
-For each back-edge B → H (successor start_ea ≤ block start_ea):
+For each back-edge B → H (detected via DFS from the function entry):
   1. Collect all blocks in the natural loop body (blocks that can reach B
      while dominated by H).
   2. Find the exit block (successor of the loop header outside the body).
-  3. Replace the HIR of the header block with a WhileNode (or ForNode for
-     DJNZ patterns) that wraps the body blocks' HIR.
+  3. Replace the HIR of the header block with a WhileNode, ForNode, or
+     DoWhileNode that wraps the body blocks' HIR.
 
 DJNZ loops produce:  for (Rn = N; Rn; Rn--)  when a constant value can be
 determined, otherwise  while (--Rn != 0).
@@ -18,9 +18,10 @@ Multiple back-edges to the same header are handled as a single loop:
 
 import re
 from collections import defaultdict
-from typing import List, Set, Optional
+from typing import List, Set, Optional, Tuple
 
-from pseudo8051.ir.hir      import HIRNode, Statement, Assign, WhileNode, ForNode, Label, IfGoto, GotoStatement, IfNode
+from pseudo8051.ir.hir      import (HIRNode, Statement, Assign, CompoundAssign, ExprStmt,
+                                    WhileNode, ForNode, DoWhileNode, Label, IfGoto, GotoStatement, IfNode)
 from pseudo8051.ir.expr     import Expr, Reg, Const, BinOp, UnaryOp
 from pseudo8051.passes      import OptimizationPass
 from pseudo8051.constants import dbg
@@ -63,6 +64,32 @@ def _is_djnz_node(node: HIRNode) -> Optional[str]:
     return None
 
 
+def _dfs_back_edges(entry: "BasicBlock") -> List[Tuple["BasicBlock", "BasicBlock"]]:
+    """
+    Iterative DFS from entry; returns list of (tail, header) back-edge pairs.
+    A back-edge is an edge to a block already on the current DFS stack (gray node).
+    """
+    in_stack: set = set()
+    visited:  set = set()
+    back_edges: List = []
+    stack = [(entry, iter(entry.successors))]
+    in_stack.add(entry.start_ea)
+    while stack:
+        block, children = stack[-1]
+        try:
+            child = next(children)
+            if child.start_ea in in_stack:
+                back_edges.append((block, child))   # (tail, header)
+            elif child.start_ea not in visited:
+                in_stack.add(child.start_ea)
+                stack.append((child, iter(child.successors)))
+        except StopIteration:
+            block, _ = stack.pop()
+            in_stack.discard(block.start_ea)
+            visited.add(block.start_ea)
+    return back_edges
+
+
 def _collect_loop_body(header: BasicBlock, tail: BasicBlock) -> Set[int]:
     """
     Collect the EAs of all blocks in the natural loop defined by back-edge
@@ -84,6 +111,97 @@ def _collect_loop_body(header: BasicBlock, tail: BasicBlock) -> Set[int]:
     return body
 
 
+def _extract_cond_reg(cond) -> Optional[str]:
+    """Extract the primary register name from a loop condition."""
+    if isinstance(cond, Reg):
+        return cond.name
+    if isinstance(cond, BinOp) and isinstance(cond.lhs, Reg):
+        return cond.lhs.name
+    if isinstance(cond, str):
+        m = re.match(r'^(\w+)\s*(?:!=|==|<|>|<=|>=)', cond)
+        if m:
+            return m.group(1)
+    return None
+
+
+def _node_to_update_if_writes(node: HIRNode, reg: str):
+    """Return update expression/string if node writes reg as a simple side-effect, else None."""
+    if isinstance(node, CompoundAssign):
+        if isinstance(node.lhs, Reg) and node.lhs.name == reg:
+            return f"{node.lhs.render()} {node.op} {node.rhs.render()}"
+    if isinstance(node, ExprStmt):
+        expr = node.expr
+        if (isinstance(expr, UnaryOp)
+                and isinstance(expr.operand, Reg)
+                and expr.operand.name == reg):
+            return expr
+    if isinstance(node, Statement):
+        m = re.match(r'^(\w+)\s*(?:--|[+\-*/&|^]=)', node.text)
+        if m and m.group(1) == reg:
+            return node.text.rstrip(';').strip()
+    return None
+
+
+def _try_promote_to_for(while_node: WhileNode) -> HIRNode:
+    """
+    Promote a WhileNode to ForNode when the last body statement is a simple
+    update of the loop condition variable.
+    """
+    body = while_node.body_nodes
+    if not body:
+        return while_node
+    reg = _extract_cond_reg(while_node.condition)
+    if reg is None:
+        return while_node
+    update = _node_to_update_if_writes(body[-1], reg)
+    if update is None:
+        return while_node
+    dbg("loops", f"  → promote WhileNode to ForNode  reg={reg}  update={update!r}")
+    return ForNode(
+        ea         = while_node.ea,
+        init       = None,
+        condition  = while_node.condition,
+        update     = update,
+        body_nodes = body[:-1],
+    )
+
+
+def _extract_dowhile_cond(tail: "BasicBlock", header: "BasicBlock",
+                           body_eas: Set[int], func) -> Optional[object]:
+    """
+    Return the do-while loop condition if the primary tail ends with a
+    conditional back-edge to the loop body, else None.
+    """
+    if not tail.hir:
+        return None
+    last = tail.hir[-1]
+    if _is_djnz_node(last):
+        return None   # DJNZ handled separately
+
+    label_map = {b.label: b.start_ea
+                 for b in func._block_map.values() if b.label}
+
+    if isinstance(last, IfGoto):
+        target_ea = label_map.get(last.label)
+        if target_ea is None:
+            return None
+        if target_ea in body_eas:
+            return last.cond           # goto header → continue when true
+        return _invert_cond(last.cond) # goto exit   → continue when not cond
+
+    if isinstance(last, Statement):
+        m = re.match(r'^if \((.+)\) goto (\S+?);$', last.text)
+        if m:
+            target_ea = label_map.get(m.group(2))
+            if target_ea is None:
+                return None
+            if target_ea in body_eas:
+                return m.group(1)
+            return _invert_cond(m.group(1))
+
+    return None
+
+
 class LoopStructurer(OptimizationPass):
     """
     Detect natural loops via back-edges and replace them with WhileNode /
@@ -96,12 +214,8 @@ class LoopStructurer(OptimizationPass):
     """
 
     def run(self, func: Function) -> None:
-        # Identify all back-edges: succ.start_ea <= block.start_ea
-        back_edges = []
-        for block in func.blocks:
-            for succ in block.successors:
-                if succ.start_ea <= block.start_ea:
-                    back_edges.append((block, succ))   # (tail, header)
+        # Identify all back-edges via DFS from the function entry block
+        back_edges = _dfs_back_edges(func.entry_block)
 
         if not back_edges:
             dbg("loops", "no back-edges found")
@@ -179,7 +293,7 @@ class LoopStructurer(OptimizationPass):
         if djnz_reg is not None:
             reg = djnz_reg
             # Look for an immediate assignment before the loop for ForNode
-            init_val = self._find_init_value(header, body_blocks, reg)
+            init_val = self._find_init_value(header, body_eas, reg)
             if init_val is not None:
                 dbg("loops", f"  → ForNode  reg={reg}  init={init_val}")
                 loop_node: HIRNode = ForNode(
@@ -220,16 +334,29 @@ class LoopStructurer(OptimizationPass):
                 cond = _invert_cond(cond)
             dbg("loops", f"  → WhileNode  cond={cond!r}  exit_inverted={is_exit}")
             # Body HIR = header_stmts body + loop body
-            loop_node = WhileNode(
+            loop_node: HIRNode = WhileNode(
                 loop_ea,
                 condition=cond,
                 body_nodes=header_stmts + body_hir,
             )
             header_stmts = []
+            # Try to promote to ForNode if body ends with a condition update
+            loop_node = _try_promote_to_for(loop_node)
         else:
-            dbg("loops", f"  → WhileNode (infinite)")
-            loop_node = WhileNode(loop_ea, condition="1",
-                                  body_nodes=body_hir)
+            # No branch in header — check primary tail for do-while pattern
+            do_cond = _extract_dowhile_cond(primary_tail, header, body_eas, func)
+            if do_cond is not None:
+                dbg("loops", f"  → DoWhileNode  cond={do_cond!r}")
+                loop_node = DoWhileNode(
+                    loop_ea,
+                    condition=do_cond,
+                    body_nodes=header_stmts + body_hir,
+                )
+                header_stmts = []
+            else:
+                dbg("loops", f"  → WhileNode (infinite)")
+                loop_node = WhileNode(loop_ea, condition="1",
+                                      body_nodes=body_hir)
 
         # ── Replace header's HIR ─────────────────────────────────────────
         new_hir: List[HIRNode] = []
@@ -336,14 +463,15 @@ class LoopStructurer(OptimizationPass):
         return result
 
     def _find_init_value(self, header: BasicBlock,
-                         _body_blocks: List[BasicBlock], reg: str) -> Optional[str]:
+                         body_eas: Set[int], reg: str) -> Optional[str]:
         """
         Search the block immediately preceding the header for an assignment
         'reg = value;' that initialises the loop counter.
         """
         for pred in header.predecessors:
-            if pred.start_ea < header.start_ea:   # not a back-edge
-                for node in reversed(pred.hir):
+            if pred.start_ea in body_eas:   # skip back-edge predecessors
+                continue
+            for node in reversed(pred.hir):
                     if isinstance(node, Assign) and node.lhs == Reg(reg):
                         return node.rhs.render()
                     if isinstance(node, Statement):

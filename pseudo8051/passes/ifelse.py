@@ -16,7 +16,7 @@ the pass removes Label nodes that are no longer targeted by any goto.
 import re
 from typing import List, Optional, Tuple, Union
 
-from pseudo8051.ir.hir      import HIRNode, Statement, IfNode, WhileNode, ForNode, Label, IfGoto, GotoStatement, SwitchNode
+from pseudo8051.ir.hir      import HIRNode, Statement, IfNode, WhileNode, ForNode, DoWhileNode, Label, IfGoto, GotoStatement, SwitchNode
 from pseudo8051.ir.expr     import Expr, UnaryOp
 from pseudo8051.passes    import OptimizationPass
 from pseudo8051.constants import dbg
@@ -200,7 +200,7 @@ def _collect_goto_targets(nodes: List[HIRNode]) -> set:
         elif isinstance(node, IfNode):
             targets |= _collect_goto_targets(node.then_nodes)
             targets |= _collect_goto_targets(node.else_nodes)
-        elif isinstance(node, (WhileNode, ForNode)):
+        elif isinstance(node, (WhileNode, ForNode, DoWhileNode)):
             targets |= _collect_goto_targets(node.body_nodes)
         elif isinstance(node, SwitchNode):
             for _, body in node.cases:

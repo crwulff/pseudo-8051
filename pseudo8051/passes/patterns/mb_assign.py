@@ -29,7 +29,7 @@ raw Assign nodes into named Statement nodes).
 import re
 from typing import List, Optional
 
-from pseudo8051.ir.hir   import HIRNode, Statement, ExprStmt, IfNode, WhileNode, ForNode
+from pseudo8051.ir.hir   import HIRNode, Statement, ExprStmt, IfNode, WhileNode, ForNode, DoWhileNode
 from pseudo8051.ir.expr  import Reg, UnaryOp
 from pseudo8051.constants import dbg
 from pseudo8051.passes.patterns._utils import _const_str
@@ -172,6 +172,11 @@ def collapse_mb_assigns(nodes: List[HIRNode]) -> List[HIRNode]:
             i += 1
             continue
         if isinstance(node, ForNode):
+            node.body_nodes = collapse_mb_assigns(node.body_nodes)
+            out.append(node)
+            i += 1
+            continue
+        if isinstance(node, DoWhileNode):
             node.body_nodes = collapse_mb_assigns(node.body_nodes)
             out.append(node)
             i += 1
