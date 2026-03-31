@@ -302,63 +302,51 @@ def _subst_all_expr(expr: Expr, reg_map: Dict[str, "VarInfo"]) -> Expr:
     return expr
 
 
+def _apply_expr_subst_to_node(node: HIRNode,
+                               expr_fn: Callable[[Expr], Expr],
+                               text_fn: Optional[Callable[[str], str]] = None) -> HIRNode:
+    """Apply expr_fn to every read-position Expr in node; text_fn to Statement text.
+
+    Handles Assign/CompoundAssign (rhs), ExprStmt (expr), ReturnStmt (value),
+    and legacy Statement (text via text_fn). LHS is never transformed.
+    Returns node unchanged if nothing changed.
+    """
+    if isinstance(node, Assign):
+        new_rhs = expr_fn(node.rhs)
+        return Assign(node.ea, node.lhs, new_rhs) if new_rhs is not node.rhs else node
+    if isinstance(node, CompoundAssign):
+        new_rhs = expr_fn(node.rhs)
+        return CompoundAssign(node.ea, node.lhs, node.op, new_rhs) if new_rhs is not node.rhs else node
+    if isinstance(node, ExprStmt):
+        new_expr = expr_fn(node.expr)
+        return ExprStmt(node.ea, new_expr) if new_expr is not node.expr else node
+    if isinstance(node, ReturnStmt) and node.value is not None:
+        new_val = expr_fn(node.value)
+        return ReturnStmt(node.ea, new_val) if new_val is not node.value else node
+    if isinstance(node, Statement) and text_fn is not None:
+        new_text = text_fn(node.text)
+        return Statement(node.ea, new_text) if new_text != node.text else node
+    return node
+
+
 def _replace_pairs_in_node(node: HIRNode,
                             reg_map: Dict[str, "VarInfo"]) -> HIRNode:
     """Apply pair substitution to an Assign / ExprStmt / ReturnStmt rhs/expr."""
-    if isinstance(node, Assign):
-        new_rhs = _subst_pairs_in_expr(node.rhs, reg_map)
-        if new_rhs is not node.rhs:
-            return Assign(node.ea, node.lhs, new_rhs)
-        return node
-    if isinstance(node, CompoundAssign):
-        new_rhs = _subst_pairs_in_expr(node.rhs, reg_map)
-        if new_rhs is not node.rhs:
-            return CompoundAssign(node.ea, node.lhs, node.op, new_rhs)
-        return node
-    if isinstance(node, ExprStmt):
-        new_expr = _subst_pairs_in_expr(node.expr, reg_map)
-        if new_expr is not node.expr:
-            return ExprStmt(node.ea, new_expr)
-        return node
-    if isinstance(node, ReturnStmt) and node.value is not None:
-        new_val = _subst_pairs_in_expr(node.value, reg_map)
-        if new_val is not node.value:
-            return ReturnStmt(node.ea, new_val)
-        return node
-    # Legacy Statement — fall back to text substitution
-    if isinstance(node, Statement):
-        new_text = _replace_pairs(node.text, reg_map)
-        return Statement(node.ea, new_text) if new_text != node.text else node
-    return node
+    return _apply_expr_subst_to_node(
+        node,
+        lambda e: _subst_pairs_in_expr(e, reg_map),
+        lambda t: _replace_pairs(t, reg_map),
+    )
 
 
 def _replace_single_regs_in_node(node: HIRNode,
                                   reg_map: Dict[str, "VarInfo"]) -> HIRNode:
     """Apply single-reg param substitution to RHS/value/expr of a node."""
-    if isinstance(node, Assign):
-        new_rhs = _subst_single_regs_in_expr(node.rhs, reg_map)
-        if new_rhs is not node.rhs:
-            return Assign(node.ea, node.lhs, new_rhs)
-        return node
-    if isinstance(node, CompoundAssign):
-        new_rhs = _subst_single_regs_in_expr(node.rhs, reg_map)
-        if new_rhs is not node.rhs:
-            return CompoundAssign(node.ea, node.lhs, node.op, new_rhs)
-        return node
-    if isinstance(node, ExprStmt):
-        new_expr = _subst_single_regs_in_expr(node.expr, reg_map)
-        if new_expr is not node.expr:
-            return ExprStmt(node.ea, new_expr)
-        return node
-    if isinstance(node, ReturnStmt) and node.value is not None:
-        new_val = _subst_single_regs_in_expr(node.value, reg_map)
-        if new_val is not node.value:
-            return ReturnStmt(node.ea, new_val)
-        return node
-    if isinstance(node, Statement):
-        new_text = _replace_single_regs(node.text, reg_map)
-        return Statement(node.ea, new_text) if new_text != node.text else node
-    return node
+    return _apply_expr_subst_to_node(
+        node,
+        lambda e: _subst_single_regs_in_expr(e, reg_map),
+        lambda t: _replace_single_regs(t, reg_map),
+    )
 
 
 def _fold_into_node(node: HIRNode, name_expr: Expr,
