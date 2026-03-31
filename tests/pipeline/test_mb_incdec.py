@@ -1,4 +1,4 @@
-from pseudo8051.ir.hir import Statement, ExprStmt, IfGoto, Assign, Label, IfNode
+from pseudo8051.ir.hir import ExprStmt, IfGoto, Assign, Label, IfNode
 from pseudo8051.ir.expr import Reg, Const, BinOp, UnaryOp, XRAMRef, Name
 
 
@@ -258,7 +258,7 @@ class TestIfNodeIncDecPattern:
             self._xram_unit("EXT_LO", "++", 0x1000)
             + [IfNode(0x1006, BinOp(Reg("A"), "==", Const(0)),
                       self._xram_unit("EXT_HI", "++", 0x1008),
-                      [Statement(0x1010, "extra;")])]
+                      [ExprStmt(0x1010, Name("extra"))])]
         )
         result = self._pat().match(nodes, 0, self._xram_reg_map_16bit(), self._noop())
         assert result is None

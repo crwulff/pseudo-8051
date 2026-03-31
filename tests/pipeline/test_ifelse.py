@@ -1,4 +1,4 @@
-from pseudo8051.ir.hir import Statement, IfNode, IfGoto, GotoStatement
+from pseudo8051.ir.hir import IfNode, IfGoto, GotoStatement, Assign, ReturnStmt
 from pseudo8051.ir.expr import Reg, Const, Name, BinOp
 from pseudo8051.passes.ifelse import IfElseStructurer
 
@@ -18,8 +18,8 @@ class TestIfElseStructurer:
         Result: A.hir = [IfNode(cond, then=[...], else=[])]
         """
         A = FakeBlock(0x1000, hir=[IfGoto(0x1000, BinOp(Reg("A"), "!=", Const(0)), "label_b")])
-        B = FakeBlock(0x1010, hir=[Statement(0x1010, "R7 = 0;")], label="label_b")
-        C = FakeBlock(0x1020, hir=[Statement(0x1020, "return;")])
+        B = FakeBlock(0x1010, hir=[Assign(0x1010, Reg("R7"), Const(0))], label="label_b")
+        C = FakeBlock(0x1020, hir=[ReturnStmt(0x1020)])
 
         connect(A, B)
         connect(A, C)
@@ -33,7 +33,7 @@ class TestIfElseStructurer:
         assert isinstance(node, IfNode)
         assert _cond_str(node.condition) == "A != 0"
         assert len(node.then_nodes) == 1
-        assert node.then_nodes[0].text == "R7 = 0;"
+        assert node.then_nodes[0].render()[0][1] == "R7 = 0;"
         assert node.else_nodes == []
         assert B._absorbed
 
@@ -42,9 +42,9 @@ class TestIfElseStructurer:
         Block A → [B (true), D (false)], both converge at E.
         """
         A = FakeBlock(0x1000, hir=[IfGoto(0x1000, BinOp(Reg("A"), "!=", Const(0)), "label_b")])
-        B = FakeBlock(0x1010, hir=[Statement(0x1010, "R7 = 1;")], label="label_b")
-        D = FakeBlock(0x1020, hir=[Statement(0x1020, "R7 = 2;")])
-        E = FakeBlock(0x1030, hir=[Statement(0x1030, "return;")])
+        B = FakeBlock(0x1010, hir=[Assign(0x1010, Reg("R7"), Const(1))], label="label_b")
+        D = FakeBlock(0x1020, hir=[Assign(0x1020, Reg("R7"), Const(2))])
+        E = FakeBlock(0x1030, hir=[ReturnStmt(0x1030)])
 
         connect(A, B)
         connect(A, D)
@@ -57,17 +57,17 @@ class TestIfElseStructurer:
         node = A.hir[0]
         assert isinstance(node, IfNode)
         assert _cond_str(node.condition) == "A != 0"
-        assert node.then_nodes[0].text == "R7 = 1;"
-        assert node.else_nodes[0].text == "R7 = 2;"
+        assert node.then_nodes[0].render()[0][1] == "R7 = 1;"
+        assert node.else_nodes[0].render()[0][1] == "R7 = 2;"
 
     def test_no_structure_single_successor(self):
         """Block with only one successor is not structured."""
-        A = FakeBlock(0x1000, hir=[Statement(0x1000, "A = R7;")])
-        B = FakeBlock(0x1010, hir=[Statement(0x1010, "return;")])
+        A = FakeBlock(0x1000, hir=[Assign(0x1000, Reg("A"), Reg("R7"))])
+        B = FakeBlock(0x1010, hir=[ReturnStmt(0x1010)])
         connect(A, B)
         func = FakeFunction("linear_if", [A, B])
         IfElseStructurer().run(func)
-        assert isinstance(A.hir[0], Statement)
+        assert isinstance(A.hir[0], Assign)
 
     def test_empty_then_arm_swapped(self):
         """
@@ -75,8 +75,8 @@ class TestIfElseStructurer:
         and condition is inverted so then_nodes is always non-empty.
         """
         A = FakeBlock(0x1000, hir=[IfGoto(0x1000, BinOp(Reg("A"), "!=", Const(0)), "label_c")])
-        B = FakeBlock(0x1010, hir=[Statement(0x1010, "R7 = 0;")])
-        C = FakeBlock(0x1020, hir=[Statement(0x1020, "return;")], label="label_c")
+        B = FakeBlock(0x1010, hir=[Assign(0x1010, Reg("R7"), Const(0))])
+        C = FakeBlock(0x1020, hir=[ReturnStmt(0x1020)], label="label_c")
 
         connect(A, C)   # true arm (goto label_c) → directly to merge
         connect(A, B)   # false arm
@@ -88,7 +88,7 @@ class TestIfElseStructurer:
         node = A.hir[0]
         assert isinstance(node, IfNode)
         assert "A != 0" in _cond_str(node.condition)
-        assert node.then_nodes[0].text == "R7 = 0;"
+        assert node.then_nodes[0].render()[0][1] == "R7 = 0;"
         assert node.else_nodes == []
 
     def test_dead_end_false_arm(self):
@@ -96,8 +96,8 @@ class TestIfElseStructurer:
         False arm is a terminal block (no successors) — the 'if-with-exit' pattern.
         """
         A = FakeBlock(0x1000, hir=[IfGoto(0x1000, BinOp(Reg("A"), "!=", Const(0)), "label_b")])
-        C = FakeBlock(0x1010, hir=[Statement(0x1010, "return;")])
-        B = FakeBlock(0x1020, hir=[Statement(0x1020, "R7 = 1;")], label="label_b")
+        C = FakeBlock(0x1010, hir=[ReturnStmt(0x1010)])
+        B = FakeBlock(0x1020, hir=[Assign(0x1020, Reg("R7"), Const(1))], label="label_b")
 
         connect(A, B)   # true arm
         connect(A, C)   # false arm (dead-end)
@@ -109,7 +109,7 @@ class TestIfElseStructurer:
         assert isinstance(node, IfNode)
         assert "A != 0" in _cond_str(node.condition)
         assert len(node.then_nodes) == 1
-        assert node.then_nodes[0].text == "return;"
+        assert node.then_nodes[0].render()[0][1] == "return;"
         assert node.else_nodes == []
         assert C._absorbed
 
@@ -118,9 +118,9 @@ class TestIfElseStructurer:
         False arm spans two blocks before terminating — multi-block dead-end path.
         """
         A = FakeBlock(0x1000, hir=[IfGoto(0x1000, BinOp(Reg("A"), "!=", Const(0)), "label_b")])
-        C = FakeBlock(0x1010, hir=[Statement(0x1010, "R6 = 0;")])
-        D = FakeBlock(0x1020, hir=[Statement(0x1020, "return;")])
-        B = FakeBlock(0x1030, hir=[Statement(0x1030, "R7 = 1;")], label="label_b")
+        C = FakeBlock(0x1010, hir=[Assign(0x1010, Reg("R6"), Const(0))])
+        D = FakeBlock(0x1020, hir=[ReturnStmt(0x1020)])
+        B = FakeBlock(0x1030, hir=[Assign(0x1030, Reg("R7"), Const(1))], label="label_b")
 
         connect(A, B)   # true arm
         connect(A, C)   # false arm (dead-end path: C → D, D has no successors)
@@ -132,7 +132,7 @@ class TestIfElseStructurer:
         node = A.hir[0]
         assert isinstance(node, IfNode)
         assert "A != 0" in _cond_str(node.condition)
-        texts = [n.text for n in node.then_nodes]
+        texts = [t for n in node.then_nodes for _, t in n.render()]
         assert "R6 = 0;" in texts
         assert "return;" in texts
         assert node.else_nodes == []
@@ -147,11 +147,11 @@ class TestIfElseStructurer:
         A = FakeBlock(0x1000, hir=[IfGoto(0x1000,
                                           BinOp(Reg("A"), "!=", Const(0)),
                                           "code_7_2cf8")])
-        B = FakeBlock(0x1010, hir=[Statement(0x1010, "R7 = 1;"),
+        B = FakeBlock(0x1010, hir=[Assign(0x1010, Reg("R7"), Const(1)),
                                    GotoStatement(0x1012, "code_7_2cfa")])
-        C = FakeBlock(0x1020, hir=[Statement(0x1020, "R7 = 0;")],
+        C = FakeBlock(0x1020, hir=[Assign(0x1020, Reg("R7"), Const(0))],
                       label="code_7_2cf8")
-        E = FakeBlock(0x1030, hir=[Statement(0x1030, "A = R7;")],
+        E = FakeBlock(0x1030, hir=[Assign(0x1030, Reg("A"), Reg("R7"))],
                       label="code_7_2cfa")
 
         connect(A, C)   # true arm
@@ -165,7 +165,7 @@ class TestIfElseStructurer:
         node = A.hir[0]
         assert isinstance(node, IfNode)
         assert len(node.else_nodes) == 1
-        assert node.else_nodes[0].text == "R7 = 1;"
+        assert node.else_nodes[0].render()[0][1] == "R7 = 1;"
 
     def test_dead_end_arm_skipped_if_externally_referenced(self):
         """
@@ -173,10 +173,10 @@ class TestIfElseStructurer:
         E must NOT be structured (F cannot be absorbed), but A can be structured.
         """
         A = FakeBlock(0x1000, hir=[IfGoto(0x1000, BinOp(Name("X"), "==", Const(0)), "label_f")])
-        B = FakeBlock(0x1010, hir=[Statement(0x1010, "R7 = 1;")])
+        B = FakeBlock(0x1010, hir=[Assign(0x1010, Reg("R7"), Const(1))])
         E = FakeBlock(0x1020, hir=[IfGoto(0x1020, BinOp(Reg("R7"), "!=", Const(0)), "label_g")])
-        F = FakeBlock(0x1030, hir=[Statement(0x1030, "return;")], label="label_f")
-        G = FakeBlock(0x1040, hir=[Statement(0x1040, "R7 = 2;")])
+        F = FakeBlock(0x1030, hir=[ReturnStmt(0x1030)], label="label_f")
+        G = FakeBlock(0x1040, hir=[Assign(0x1040, Reg("R7"), Const(2))])
 
         connect(A, F)   # true arm (goto label_f)
         connect(A, B)   # false arm

@@ -86,8 +86,7 @@ class TestUsercallParamSubst:
         )
         func = make_single_block_func("p", ["XRAM[X] = R6R7;"])
         TypeAwareSimplifier().run(func)
-        from pseudo8051.ir.hir import Statement
-        texts = [n.text for n in func.hir if isinstance(n, Statement)]
+        texts = [t for n in func.hir for _, t in n.render()]
         assert "XRAM[X] = val;" in texts
 
 

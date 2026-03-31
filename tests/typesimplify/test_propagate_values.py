@@ -6,22 +6,23 @@ import pytest
 
 from pseudo8051.passes.typesimplify._post import _propagate_values
 from pseudo8051.passes.patterns._utils import VarInfo
-from pseudo8051.ir.hir import Assign, TypedAssign, ExprStmt, Statement
-from pseudo8051.ir.expr import Reg, Name, XRAMRef, Call
+from pseudo8051.ir.hir import Assign, TypedAssign, ExprStmt
+from pseudo8051.ir.expr import Reg, Name, XRAMRef, Call, Const
 
 
 class TestPropagateValues:
 
-    def test_dptr_fold_into_statement(self):
-        """DPTR=Name("offset") folded into call Statement."""
+    def test_dptr_fold_into_assign(self):
+        """DPTR=Name("offset") folded into call Assign."""
         nodes = [
             Assign(0, Reg("DPTR"), Name("offset")),
-            Statement(1, "retval1 = func(DPTR);"),
+            Assign(1, Name("retval1"), Call("func", [Reg("DPTR")])),
         ]
         result = _propagate_values(nodes, {})
         assert len(result) == 1
-        assert "DPTR" not in result[0].text
-        assert "offset" in result[0].text
+        rendered = result[0].render()[0][1]
+        assert "DPTR" not in rendered
+        assert "offset" in rendered
 
     def test_dptr_fold_into_xram_lhs(self):
         """DPTR=Name("_dest") folded into XRAM[DPTR]=val LHS."""

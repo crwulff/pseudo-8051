@@ -1,6 +1,6 @@
 from pseudo8051.passes.typesimplify._post import _simplify_carry_comparison
-from pseudo8051.ir.hir import Assign, CompoundAssign, WhileNode, Statement
-from pseudo8051.ir.expr import Reg, RegGroup, Name, Const, BinOp
+from pseudo8051.ir.hir import Assign, CompoundAssign, WhileNode, ExprStmt
+from pseudo8051.ir.expr import Reg, RegGroup, Name, Const, BinOp, Call
 
 
 class TestCarryComparison:
@@ -20,7 +20,7 @@ class TestCarryComparison:
             Assign(0, RegGroup(("R6", "R7")), Name("_count")),
             Assign(1, RegGroup(("R4", "R5")), Name("offset")),
         ] + self._make_subb16(k=2) + [
-            Statement(6, "do_something();"),
+            ExprStmt(6, Call("do_something", [])),
         ]
         nodes = [WhileNode(0, Reg("C"), body)]
         result = _simplify_carry_comparison(nodes)
@@ -42,7 +42,7 @@ class TestCarryComparison:
 
     def test_missing_reggroup_leaves_unchanged(self):
         """If no RegGroup assigns found, body and condition are left unchanged."""
-        body = self._make_subb16(k=0) + [Statement(4, "do_something();")]
+        body = self._make_subb16(k=0) + [ExprStmt(4, Call("do_something", []))]
         nodes = [WhileNode(0, Reg("C"), body)]
         result = _simplify_carry_comparison(nodes)
         wn = result[0]

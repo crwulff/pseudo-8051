@@ -3,14 +3,14 @@ tests/typesimplify/test_param_infer.py — Synthesized arg-N params when no prot
 """
 
 from pseudo8051.passes.typesimplify import TypeAwareSimplifier
-from pseudo8051.ir.hir import Assign, CompoundAssign, ReturnStmt, Statement, IfGoto
+from pseudo8051.ir.hir import Assign, CompoundAssign, ReturnStmt, IfGoto
 from pseudo8051.ir.expr import Reg, Const, BinOp, Name
 
 from ..helpers import FakeBlock, FakeFunction
 
 
 def _texts(func):
-    return [n.text for n in func.hir if isinstance(n, Statement)]
+    return [t for n in func.hir for _, t in n.render()]
 
 
 def _render_hir(func):

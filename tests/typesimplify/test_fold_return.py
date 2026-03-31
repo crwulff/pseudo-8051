@@ -3,7 +3,7 @@ tests/typesimplify/test_fold_return.py — _fold_return_chains helper.
 """
 
 import pytest
-from pseudo8051.ir.hir import Assign, ReturnStmt, IfNode, SwitchNode, Statement
+from pseudo8051.ir.hir import Assign, ReturnStmt, IfNode, SwitchNode
 from pseudo8051.ir.expr import Reg, Const, BinOp, XRAMRef, Name
 from pseudo8051.passes.typesimplify._post import _fold_return_chains
 
@@ -46,7 +46,7 @@ class TestFoldReturnChains:
         """Assign(R7, expr); stmt; ReturnStmt(R7) — not adjacent, no fold."""
         nodes = [
             Assign(0x1000, Reg("R7"), Const(1)),
-            Statement(0x1002, "XRAM[x] = R7;"),
+            Assign(0x1002, XRAMRef(Name("x")), Reg("R7")),
             ReturnStmt(0x1004, Reg("R7")),
         ]
         result = _fold_return_chains(nodes, ("R7",))

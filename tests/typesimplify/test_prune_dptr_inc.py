@@ -1,5 +1,5 @@
 from pseudo8051.passes.typesimplify._post import _prune_orphaned_dptr_inc
-from pseudo8051.ir.hir import ExprStmt, Assign, WhileNode, IfNode, Statement
+from pseudo8051.ir.hir import ExprStmt, Assign, WhileNode, IfNode
 from pseudo8051.ir.expr import Reg, Name, Const, UnaryOp, BinOp, XRAMRef, Cast
 
 
@@ -63,17 +63,17 @@ class TestPruneOrphanedDptrInc:
         """Top-level DPTR++ kept only because of inner DPTR++; after inner is pruned, outer is too."""
         inner_body = [
             _dptr_inc(10),
-            Statement(11, "x = 1;"),
+            Assign(11, Name("x"), Const(1)),
         ]
         nodes = [
             _dptr_inc(0),
-            Statement(1, "y = 2;"),
+            Assign(1, Name("y"), Const(2)),
             WhileNode(2, BinOp(Name("n"), "!=", Const(0)), inner_body),
         ]
         result = _prune_orphaned_dptr_inc(nodes)
-        # Both DPTR++ should be gone; WhileNode body reduced to just Statement
-        assert len(result) == 2  # Statement("y=2") + WhileNode
-        assert isinstance(result[0], Statement)
+        # Both DPTR++ should be gone; WhileNode body reduced to just Assign
+        assert len(result) == 2  # Assign("y=2") + WhileNode
+        assert isinstance(result[0], Assign)
         while_node = result[1]
         assert isinstance(while_node, WhileNode)
         assert len(while_node.body_nodes) == 1  # inner DPTR++ pruned

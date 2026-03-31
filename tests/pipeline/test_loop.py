@@ -1,5 +1,5 @@
-from pseudo8051.ir.hir import Statement, Assign, ForNode, WhileNode, DoWhileNode, IfNode, IfGoto, GotoStatement, CompoundAssign
-from pseudo8051.ir.expr import BinOp, Const, Reg, UnaryOp
+from pseudo8051.ir.hir import Assign, ExprStmt, ReturnStmt, ForNode, WhileNode, DoWhileNode, IfNode, IfGoto, GotoStatement, CompoundAssign
+from pseudo8051.ir.expr import BinOp, Const, Reg, UnaryOp, Name, XRAMRef
 from pseudo8051.passes.loops import LoopStructurer, _dfs_back_edges
 
 from ..helpers import FakeBlock, FakeFunction, connect
@@ -26,7 +26,7 @@ class TestLoopStructurer:
         init   = FakeBlock(0x1000, hir=[Assign(0x1000, Reg("R7"), Const(5))])
         header = FakeBlock(0x1010, hir=[])
         body   = FakeBlock(0x1018, hir=[
-            Statement(0x1018, "XRAM[S] = A;"),
+            Assign(0x1018, XRAMRef(Name("S")), Reg("A")),
             IfGoto(0x101a, BinOp(UnaryOp("--", Reg("R7")), "!=", Const(0)), "label_1010"),
         ])
         after  = FakeBlock(0x1020, hir=[])
@@ -46,8 +46,8 @@ class TestLoopStructurer:
         assert _cond_str(fn.condition) == "R7"
         assert _cond_str(fn.update)    == "--R7"
         assert len(fn.body_nodes) == 1
-        assert isinstance(fn.body_nodes[0], Statement)
-        assert fn.body_nodes[0].text == "XRAM[S] = A;"
+        assert isinstance(fn.body_nodes[0], Assign)
+        assert fn.body_nodes[0].render()[0][1] == "XRAM[S] = A;"
 
         assert body._absorbed
 
@@ -82,7 +82,7 @@ class TestLoopStructurer:
             after  (0x1010): (empty)
         """
         header = FakeBlock(0x1000, hir=[
-            Statement(0x1000, "XRAM[S] = A;"),
+            Assign(0x1000, XRAMRef(Name("S")), Reg("A")),
             IfGoto(0x1002, BinOp(Reg("C"), "!=", Const(0)), "label_1000"),
         ])
         after  = FakeBlock(0x1010, hir=[])
@@ -98,17 +98,17 @@ class TestLoopStructurer:
         assert isinstance(wn, WhileNode)
         assert _cond_str(wn.condition) == "C != 0"
         assert len(wn.body_nodes) == 1
-        assert wn.body_nodes[0].text == "XRAM[S] = A;"
+        assert wn.body_nodes[0].render()[0][1] == "XRAM[S] = A;"
 
     def test_no_loop_no_change(self):
         """Linear CFG without back-edges is left unchanged."""
-        b0 = FakeBlock(0x1000, hir=[Statement(0x1000, "A = R7;")])
-        b1 = FakeBlock(0x1010, hir=[Statement(0x1010, "return;")])
+        b0 = FakeBlock(0x1000, hir=[Assign(0x1000, Reg("A"), Reg("R7"))])
+        b1 = FakeBlock(0x1010, hir=[ReturnStmt(0x1010)])
         connect(b0, b1)
         func = FakeFunction("linear", [b0, b1])
         LoopStructurer().run(func)
-        assert b0.hir[0].text == "A = R7;"
-        assert b1.hir[0].text == "return;"
+        assert b0.hir[0].render()[0][1] == "A = R7;"
+        assert b1.hir[0].render()[0][1] == "return;"
 
     def test_multi_tail_loop_produces_single_while_with_if(self):
         """
@@ -116,21 +116,21 @@ class TestLoopStructurer:
           body (0x1010): R7=1; IfGoto(R7!=0 → header)  — conditional early-continue
           tail (0x1020): R6=1; GotoStatement(→ header)  — normal loop end
 
-        Expected: one WhileNode whose body is [Statement("R7 = 1;"),
-                                               IfNode(R7==0, ["R6 = 1;"])]
+        Expected: one WhileNode whose body is [Assign(R7, 1),
+                                               IfNode(R7==0, [Assign(R6, 1)])]
         Topology:
             header(0x1000): if(cond) goto exit  → [exit(0x2000), body(0x1010)]
             body  (0x1010): R7=1; jnz→header   → [header(back-edge), tail(0x1020)]
             tail  (0x1020): R6=1; sjmp→header  → [header(back-edge)]
             exit  (0x2000): return;
         """
-        exit_b = FakeBlock(0x2000, hir=[Statement(0x2000, "return;")], label="label_exit")
+        exit_b = FakeBlock(0x2000, hir=[ReturnStmt(0x2000)], label="label_exit")
         tail   = FakeBlock(0x1020, hir=[
-            Statement(0x1020, "R6 = 1;"),
+            Assign(0x1020, Reg("R6"), Const(1)),
             GotoStatement(0x1022, "label_1000"),
         ])
         body   = FakeBlock(0x1010, hir=[
-            Statement(0x1010, "R7 = 1;"),
+            Assign(0x1010, Reg("R7"), Const(1)),
             IfGoto(0x1012, BinOp(Reg("R7"), "!=", Const(0)), "label_1000"),
         ])
         header = FakeBlock(0x1000, hir=[
@@ -151,14 +151,14 @@ class TestLoopStructurer:
         assert len(while_nodes) == 1
         wn = while_nodes[0]
 
-        # body_nodes: [Statement("R7 = 1;"), IfNode(R7==0, ["R6 = 1;"])]
-        body_texts = [n.text for n in wn.body_nodes if isinstance(n, Statement)]
+        # body_nodes: [Assign(R7, 1), IfNode(R7==0, [Assign(R6, 1)])]
+        body_texts = [t for n in wn.body_nodes for _, t in n.render()]
         assert "R7 = 1;" in body_texts
 
         if_node = wn.body_nodes[-1]
         assert isinstance(if_node, IfNode)
         assert len(if_node.then_nodes) == 1
-        assert if_node.then_nodes[0].text == "R6 = 1;"
+        assert if_node.then_nodes[0].render()[0][1] == "R6 = 1;"
         assert if_node.else_nodes == []
 
         # Condition is inverted: R7 != 0 → R7 == 0
@@ -181,15 +181,15 @@ class TestLoopStructurer:
             header (0x3000): IfGoto(A == 0, label_exit)   → [exit (0x4000), body (0x2000)]
             exit   (0x4000)
         """
-        exit_b = FakeBlock(0x4000, hir=[Statement(0x4000, "return;")], label="label_exit")
+        exit_b = FakeBlock(0x4000, hir=[ReturnStmt(0x4000)], label="label_exit")
         body   = FakeBlock(0x2000, hir=[
-            Statement(0x2000, "R7++;"),
+            ExprStmt(0x2000, UnaryOp("++", Reg("R7"), post=True)),
             GotoStatement(0x2002, "label_3000"),
         ])
         header = FakeBlock(0x3000, hir=[
             IfGoto(0x3000, BinOp(Reg("A"), "==", Const(0)), "label_exit"),
         ], label="label_3000")
-        init   = FakeBlock(0x1000, hir=[Statement(0x1000, "A = R7;")])
+        init   = FakeBlock(0x1000, hir=[Assign(0x1000, Reg("A"), Reg("R7"))])
 
         connect(init,   header)
         connect(header, exit_b)   # branch-taken → exit
@@ -228,11 +228,11 @@ class TestLoopStructurer:
         """
         after  = FakeBlock(0x1020, hir=[])
         body   = FakeBlock(0x1010, hir=[
-            Statement(0x1010, "R6 = 1;"),
+            Assign(0x1010, Reg("R6"), Const(1)),
             IfGoto(0x1012, BinOp(Reg("C"), "!=", Const(0)), "label_1000"),
         ])
         header = FakeBlock(0x1000, hir=[
-            Statement(0x1000, "R7++;"),
+            ExprStmt(0x1000, UnaryOp("++", Reg("R7"), post=True)),
         ], label="label_1000")
 
         connect(header, body)
@@ -246,10 +246,10 @@ class TestLoopStructurer:
         assert len(dw_nodes) == 1
         dw = dw_nodes[0]
         assert _cond_str(dw.condition) == "C != 0"
-        # body_nodes = [Statement("R7++;"), Statement("R6 = 1;")]
+        # body_nodes = [ExprStmt(R7++), Assign(R6, 1)]
         assert len(dw.body_nodes) == 2
-        assert dw.body_nodes[0].text == "R7++;"
-        assert dw.body_nodes[1].text == "R6 = 1;"
+        assert dw.body_nodes[0].render()[0][1] == "R7++;"
+        assert dw.body_nodes[1].render()[0][1] == "R6 = 1;"
         assert body._absorbed
 
     def test_do_while_exit_condition_inverted(self):
@@ -266,7 +266,7 @@ class TestLoopStructurer:
             IfGoto(0x1010, BinOp(Reg("C"), "==", Const(0)), "label_exit"),
         ])
         header = FakeBlock(0x1000, hir=[
-            Statement(0x1000, "R7++;"),
+            ExprStmt(0x1000, UnaryOp("++", Reg("R7"), post=True)),
         ], label="label_1000")
 
         connect(header, body)
@@ -295,7 +295,7 @@ class TestLoopStructurer:
         """
         exit_b = FakeBlock(0x2000, hir=[], label="label_exit")
         body   = FakeBlock(0x1010, hir=[
-            Statement(0x1010, "A++;"),
+            ExprStmt(0x1010, UnaryOp("++", Reg("A"), post=True)),
             CompoundAssign(0x1012, Reg("R7"), "-=", Const(1)),
         ])
         header = FakeBlock(0x1000, hir=[
@@ -320,14 +320,14 @@ class TestLoopStructurer:
         assert _cond_str(fn.update) == "R7 -= 1"
         # body_nodes has only "A++;" (last update node was hoisted)
         assert len(fn.body_nodes) == 1
-        assert fn.body_nodes[0].text == "A++;"
+        assert fn.body_nodes[0].render()[0][1] == "A++;"
         assert body._absorbed
 
     def test_forward_exit_condition_inverted(self):
         """JNC-style forward exit: while condition should be inverted (C, not !C)."""
-        exit_b = FakeBlock(0x2020, hir=[Statement(0x2020, "return;")], label="label_exit")
+        exit_b = FakeBlock(0x2020, hir=[ReturnStmt(0x2020)], label="label_exit")
         body   = FakeBlock(0x1010, hir=[
-            Statement(0x1010, "A = R5;"),
+            Assign(0x1010, Reg("A"), Reg("R5")),
             GotoStatement(0x1012, "label_1000"),
         ])
         header = FakeBlock(0x1000, hir=[

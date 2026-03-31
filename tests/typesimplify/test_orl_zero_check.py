@@ -1,6 +1,6 @@
 from pseudo8051.passes.typesimplify._post import _simplify_orl_zero_check
-from pseudo8051.ir.hir import CompoundAssign, IfNode, IfGoto, Statement
-from pseudo8051.ir.expr import Reg, Name, Const, BinOp
+from pseudo8051.ir.hir import CompoundAssign, IfNode, IfGoto, ExprStmt
+from pseudo8051.ir.expr import Reg, Name, Const, BinOp, Call
 
 
 class TestOrlZeroCheck:
@@ -10,7 +10,7 @@ class TestOrlZeroCheck:
         nodes = [
             CompoundAssign(0, Reg("A"), "|=", Name("count.hi")),
             IfNode(1, BinOp(Name("retval"), "!=", Const(0)),
-                   [Statement(2, "do_thing();")], []),
+                   [ExprStmt(2, Call("do_thing", []))], []),
         ]
         result = _simplify_orl_zero_check(nodes)
         assert len(result) == 1
@@ -57,7 +57,7 @@ class TestOrlZeroCheck:
         """ORL not immediately before IfNode → unchanged."""
         nodes = [
             CompoundAssign(0, Reg("A"), "|=", Name("count.hi")),
-            Statement(1, "something_else();"),
+            ExprStmt(1, Call("something_else", [])),
             IfNode(2, BinOp(Name("retval"), "!=", Const(0)), [], []),
         ]
         result = _simplify_orl_zero_check(nodes)

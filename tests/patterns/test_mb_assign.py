@@ -1,5 +1,5 @@
-from pseudo8051.ir.hir import Statement, Assign, ExprStmt, IfNode
-from pseudo8051.ir.expr import Reg, UnaryOp, Name, Const
+from pseudo8051.ir.hir import Assign, ExprStmt, IfNode
+from pseudo8051.ir.expr import Reg, UnaryOp, Name, Const, Call
 from pseudo8051.passes.patterns.mb_assign import collapse_mb_assigns
 
 
@@ -101,14 +101,14 @@ class TestCollapseMbAssigns:
     def test_surrounding_nodes_preserved(self):
         """Other statements before/after the sequence are preserved."""
         nodes = [
-            Statement(0, "foo();"),
+            ExprStmt(0, Call("foo", [])),
             Assign(2, Name("var0.hi"), Name("count.hi")),
             _dptr_inc(3),
             Assign(4, Name("var0.lo"), Name("count.lo")),
-            Statement(6, "bar();"),
+            ExprStmt(6, Call("bar", [])),
         ]
         result = collapse_mb_assigns(nodes)
         assert len(result) == 3
-        assert result[0].text == "foo();"
+        assert result[0].render()[0][1] == "foo();"
         assert result[1].render()[0][1] == "var0 = count;"
-        assert result[2].text == "bar();"
+        assert result[2].render()[0][1] == "bar();"

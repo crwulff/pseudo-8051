@@ -1,8 +1,9 @@
 import pytest
 
-from pseudo8051.ir.hir import (Statement, IfGoto, Assign, CompoundAssign,
-                                SwitchNode, GotoStatement, BreakStmt, Label, ReturnStmt)
-from pseudo8051.ir.expr import Reg, Const, BinOp, Name
+from pseudo8051.ir.hir import (IfGoto, Assign, CompoundAssign,
+                                SwitchNode, GotoStatement, BreakStmt, Label, ReturnStmt,
+                                ExprStmt)
+from pseudo8051.ir.expr import Reg, Const, BinOp, Name, Call
 from pseudo8051.passes.switch import SwitchStructurer, SwitchBodyAbsorber
 from pseudo8051.passes.ifelse import IfElseStructurer
 from pseudo8051.passes.typesimplify import TypeAwareSimplifier
@@ -16,9 +17,9 @@ class TestSwitchStructurer:
 
     def test_switch_basic_jz_chain(self):
         """3-block jz chain → SwitchNode with 2 cases, no default."""
-        b_c2   = FakeBlock(0x1020, hir=[Statement(0x1020, "return;")], label="label_c2")
-        b_c4   = FakeBlock(0x1030, hir=[Statement(0x1030, "return;")], label="label_c4")
-        b_fall = FakeBlock(0x1040, hir=[Statement(0x1040, "return;")])
+        b_c2   = FakeBlock(0x1020, hir=[ReturnStmt(0x1020)], label="label_c2")
+        b_c4   = FakeBlock(0x1030, hir=[ReturnStmt(0x1030)], label="label_c4")
+        b_fall = FakeBlock(0x1040, hir=[ReturnStmt(0x1040)])
         b1     = FakeBlock(0x1010, hir=[
             CompoundAssign(0x1010, Reg("A"), "+=", Const(0xFE)),
             IfGoto(0x1012, BinOp(Reg("A"), "==", Const(0)), "label_c4"),
@@ -52,9 +53,9 @@ class TestSwitchStructurer:
 
     def test_switch_jnz_terminator(self):
         """2-block chain: jz + jnz → SwitchNode with case for jz, case for fall-through, and default."""
-        b_c2   = FakeBlock(0x1020, hir=[Statement(0x1020, "return;")], label="label_c2")
-        b_def  = FakeBlock(0x1030, hir=[Statement(0x1030, "return;")], label="label_def")
-        b_fall = FakeBlock(0x1040, hir=[Statement(0x1040, "return;")], label="label_fall")
+        b_c2   = FakeBlock(0x1020, hir=[ReturnStmt(0x1020)], label="label_c2")
+        b_def  = FakeBlock(0x1030, hir=[ReturnStmt(0x1030)], label="label_def")
+        b_fall = FakeBlock(0x1040, hir=[ReturnStmt(0x1040)], label="label_fall")
         b1     = FakeBlock(0x1010, hir=[
             CompoundAssign(0x1010, Reg("A"), "+=", Const(0xFC)),
             IfGoto(0x1012, BinOp(Reg("A"), "!=", Const(0)), "label_def"),
@@ -85,8 +86,8 @@ class TestSwitchStructurer:
 
     def test_single_step_not_converted(self):
         """A single (jz) step does NOT become a SwitchNode — chain must be ≥ 2."""
-        b_c2   = FakeBlock(0x1020, hir=[Statement(0x1020, "return;")], label="label_c2")
-        b_fall = FakeBlock(0x1030, hir=[Statement(0x1030, "return;")])
+        b_c2   = FakeBlock(0x1020, hir=[ReturnStmt(0x1020)], label="label_c2")
+        b_fall = FakeBlock(0x1030, hir=[ReturnStmt(0x1030)])
         b0     = FakeBlock(0x1000, hir=[
             Assign(0x1000, Reg("A"), Reg("R7")),
             CompoundAssign(0x1002, Reg("A"), "+=", Const(0xFE)),
@@ -104,8 +105,8 @@ class TestSwitchStructurer:
 
     def test_duplicate_labels_merged(self):
         """When two steps jump to the same label, they are merged into one case entry."""
-        b_x    = FakeBlock(0x1020, hir=[Statement(0x1020, "return;")], label="label_x")
-        b_fall = FakeBlock(0x1030, hir=[Statement(0x1030, "return;")])
+        b_x    = FakeBlock(0x1020, hir=[ReturnStmt(0x1020)], label="label_x")
+        b_fall = FakeBlock(0x1030, hir=[ReturnStmt(0x1030)])
         b1     = FakeBlock(0x1010, hir=[
             CompoundAssign(0x1010, Reg("A"), "+=", Const(0xFE)),
             IfGoto(0x1012, BinOp(Reg("A"), "==", Const(0)), "label_x"),
@@ -133,12 +134,12 @@ class TestSwitchStructurer:
 
     def test_five_block_chain_from_plan(self):
         """Full 5-block example: b0..b4 with jz/jnz steps."""
-        b_L2   = FakeBlock(0x2000, hir=[Statement(0x2000, "f2();")],  label="label_c2")
-        b_L4   = FakeBlock(0x2010, hir=[Statement(0x2010, "f4();")],  label="label_c4")
-        b_L16  = FakeBlock(0x2020, hir=[Statement(0x2020, "f16();")], label="label_c16")
-        b_L32  = FakeBlock(0x2030, hir=[Statement(0x2030, "f32();")], label="label_c32")
-        b_def  = FakeBlock(0x2040, hir=[Statement(0x2040, "fdef();")], label="label_def")
-        b_fall = FakeBlock(0x2050, hir=[Statement(0x2050, "f8();")],  label="label_fall")
+        b_L2   = FakeBlock(0x2000, hir=[ExprStmt(0x2000, Call("f2",  []))], label="label_c2")
+        b_L4   = FakeBlock(0x2010, hir=[ExprStmt(0x2010, Call("f4",  []))], label="label_c4")
+        b_L16  = FakeBlock(0x2020, hir=[ExprStmt(0x2020, Call("f16", []))], label="label_c16")
+        b_L32  = FakeBlock(0x2030, hir=[ExprStmt(0x2030, Call("f32", []))], label="label_c32")
+        b_def  = FakeBlock(0x2040, hir=[ExprStmt(0x2040, Call("fdef",[]))], label="label_def")
+        b_fall = FakeBlock(0x2050, hir=[ExprStmt(0x2050, Call("f8",  []))], label="label_fall")
 
         b4 = FakeBlock(0x1040, hir=[
             CompoundAssign(0x1040, Reg("A"), "+=", Const(0x18)),
@@ -219,21 +220,21 @@ class TestSwitchBodyAbsorber:
         """2-case switch + default: case bodies inlined, gotos replaced with break."""
         merge  = FakeBlock(0x2030, hir=[
             Label(0x2030, "label_merge"),
-            Statement(0x2030, "return;"),
+            ReturnStmt(0x2030),
         ], label="label_merge")
         b_c2   = FakeBlock(0x2000, hir=[
             Label(0x2000, "label_c2"),
-            Statement(0x2000, "R7 = 2;"),
+            Assign(0x2000, Reg("R7"), Const(2)),
             GotoStatement(0x2002, "label_merge"),
         ], label="label_c2")
         b_fall = FakeBlock(0x2010, hir=[
             Label(0x2010, "label_fall"),
-            Statement(0x2010, "R7 = 4;"),
+            Assign(0x2010, Reg("R7"), Const(4)),
             GotoStatement(0x2012, "label_merge"),
         ], label="label_fall")
         b_def  = FakeBlock(0x2020, hir=[
             Label(0x2020, "label_def"),
-            Statement(0x2020, "R7 = 99;"),
+            Assign(0x2020, Reg("R7"), Const(99)),
             GotoStatement(0x2022, "label_merge"),
         ], label="label_def")
         b1     = FakeBlock(0x1010, hir=[
@@ -277,16 +278,16 @@ class TestSwitchBodyAbsorber:
         """SwitchNode with inlined bodies renders correctly."""
         merge  = FakeBlock(0x2030, hir=[
             Label(0x2030, "label_merge"),
-            Statement(0x2030, "return;"),
+            ReturnStmt(0x2030),
         ], label="label_merge")
         b_c2   = FakeBlock(0x2000, hir=[
             Label(0x2000, "label_c2"),
-            Statement(0x2000, "R7 = 2;"),
+            Assign(0x2000, Reg("R7"), Const(2)),
             GotoStatement(0x2002, "label_merge"),
         ], label="label_c2")
         b_fall = FakeBlock(0x2010, hir=[
             Label(0x2010, "label_fall"),
-            Statement(0x2010, "R7 = 4;"),
+            Assign(0x2010, Reg("R7"), Const(4)),
             GotoStatement(0x2012, "label_merge"),
         ], label="label_fall")
         b1     = FakeBlock(0x1010, hir=[
@@ -327,15 +328,15 @@ class TestSwitchBodyAbsorber:
         """Case body ending with return; should NOT get a trailing break;."""
         merge  = FakeBlock(0x2030, hir=[
             Label(0x2030, "label_merge"),
-            Statement(0x2030, "R6 = 0;"),
+            Assign(0x2030, Reg("R6"), Const(0)),
         ], label="label_merge")
         b_c2   = FakeBlock(0x2000, hir=[
             Label(0x2000, "label_c2"),
-            Statement(0x2000, "return;"),
+            ReturnStmt(0x2000),
         ], label="label_c2")
         b_fall = FakeBlock(0x2010, hir=[
             Label(0x2010, "label_fall"),
-            Statement(0x2010, "R7 = 4;"),
+            Assign(0x2010, Reg("R7"), Const(4)),
             GotoStatement(0x2012, "label_merge"),
         ], label="label_fall")
         b1     = FakeBlock(0x1010, hir=[
@@ -363,30 +364,29 @@ class TestSwitchBodyAbsorber:
 
         for values, body in sw.cases:
             if isinstance(body, list):
-                texts = [n.text for n in body if isinstance(n, Statement)]
-                if "return;" in texts:
-                    assert texts[-1] == "return;", \
-                        f"Expected return; as last stmt, got {texts}"
+                has_return = any(isinstance(n, ReturnStmt) for n in body)
+                if has_return:
+                    assert isinstance(body[-1], ReturnStmt), \
+                        f"Expected ReturnStmt as last node, got {body[-1]!r}"
                     break
         else:
-            pytest.fail("No case body with 'return;' found")
+            pytest.fail("No case body with return found")
 
     def test_all_arms_terminate(self):
         """Switch where every case arm ends with ret (no merge point) → bodies still inlined."""
-        from pseudo8051.ir.hir import ReturnStmt
         b_c2   = FakeBlock(0x2000, hir=[
             Label(0x2000, "label_c2"),
-            Statement(0x2000, "R7 = 2;"),
+            Assign(0x2000, Reg("R7"), Const(2)),
             ReturnStmt(0x2002),
         ], label="label_c2")
         b_fall = FakeBlock(0x2010, hir=[
             Label(0x2010, "label_fall"),
-            Statement(0x2010, "R7 = 4;"),
+            Assign(0x2010, Reg("R7"), Const(4)),
             ReturnStmt(0x2012),
         ], label="label_fall")
         b_def  = FakeBlock(0x2020, hir=[
             Label(0x2020, "label_def"),
-            Statement(0x2020, "R7 = 99;"),
+            Assign(0x2020, Reg("R7"), Const(99)),
             ReturnStmt(0x2022),
         ], label="label_def")
         b1     = FakeBlock(0x1010, hir=[
@@ -435,24 +435,23 @@ class TestSwitchBodyAbsorber:
           b_def:  R7 = 99; goto label_merge ← live arm (default)
           merge:  return;                  ← shared merge point for live arms
         """
-        from pseudo8051.ir.hir import ReturnStmt
         merge  = FakeBlock(0x3000, hir=[
             Label(0x3000, "label_merge"),
-            Statement(0x3000, "return;"),
+            ReturnStmt(0x3000),
         ], label="label_merge")
         b_c2   = FakeBlock(0x2000, hir=[
             Label(0x2000, "label_c2"),
-            Statement(0x2000, "R7 = 2;"),
+            Assign(0x2000, Reg("R7"), Const(2)),
             ReturnStmt(0x2002),
         ], label="label_c2")
         b_fall = FakeBlock(0x2010, hir=[
             Label(0x2010, "label_fall"),
-            Statement(0x2010, "R7 = 4;"),
+            Assign(0x2010, Reg("R7"), Const(4)),
             GotoStatement(0x2012, "label_merge"),
         ], label="label_fall")
         b_def  = FakeBlock(0x2020, hir=[
             Label(0x2020, "label_def"),
-            Statement(0x2020, "R7 = 99;"),
+            Assign(0x2020, Reg("R7"), Const(99)),
             GotoStatement(0x2022, "label_merge"),
         ], label="label_def")
         b1     = FakeBlock(0x1010, hir=[
@@ -561,7 +560,7 @@ class TestSwitchNodeTypeSimplify:
             Label(0x2000, "label_c2"),
             Assign(0x2002, Reg("A"), Reg("R7")),
             Assign(0x2004, Reg("R6"), Reg("A")),
-            Statement(0x2006, "break;"),
+            BreakStmt(0x2006),
         ]
         sw = SwitchNode(
             ea=0x1000,

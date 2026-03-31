@@ -1,4 +1,4 @@
-from pseudo8051.ir.hir import Statement, IfGoto, Assign, CompoundAssign, IfNode
+from pseudo8051.ir.hir import IfGoto, Assign, CompoundAssign, IfNode
 from pseudo8051.ir.expr import Reg, Const, BinOp, XRAMRef, Name
 
 
@@ -35,7 +35,7 @@ class TestAccumFoldPattern:
         A=XRAM[sym]; A&=1; IfNode(A!=0, [then_stmt])
         → IfNode((XRAM[sym] & 1) != 0, [then_stmt])
         """
-        then_stmt = Statement(0x1010, "R7 = 1;")
+        then_stmt = Assign(0x1010, Reg("R7"), Const(1))
         nodes = [
             Assign(0x1000, Reg("A"), XRAMRef(Name("SYM"))),
             CompoundAssign(0x1002, Reg("A"), "&=", Const(1)),
