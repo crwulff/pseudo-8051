@@ -5,7 +5,7 @@ passes/typesimplify/_simplify.py — Boolean helpers, default transform, core si
 import re
 from typing import Dict, List, Optional
 
-from pseudo8051.ir.hir    import (HIRNode, Statement, Assign, CompoundAssign,
+from pseudo8051.ir.hir    import (HIRNode, Assign, CompoundAssign,
                                    ExprStmt, ReturnStmt, IfGoto, IfNode, WhileNode, ForNode,
                                    DoWhileNode, SwitchNode)
 from pseudo8051.passes.patterns         import _PATTERNS
@@ -58,9 +58,6 @@ def _simplify_bool_str(cond: str) -> str:
 
 
 # ── Default node transformation ───────────────────────────────────────────────
-
-_RE_DPTR_SETUP = re.compile(r'^DPTR = (.+?);')
-
 
 
 def _effective_map(node: HIRNode, base_eff: Dict[str, VarInfo]) -> Dict[str, VarInfo]:
@@ -140,15 +137,6 @@ def _transform_default(node: HIRNode,
     """
     if simplify_fn is None:
         simplify_fn = _simplify
-    if isinstance(node, Statement):
-        m = _RE_DPTR_SETUP.match(node.text)
-        if m:
-            sym = m.group(1).strip()
-            if any(v.xram_sym == sym for v in reg_map.values()
-                   if isinstance(v, VarInfo) and v.xram_sym):
-                return None
-        new_text = _subst_text(node.text, reg_map)
-        return Statement(node.ea, new_text) if new_text != node.text else node
 
     if isinstance(node, Assign):
         from pseudo8051.ir.hir import TypedAssign

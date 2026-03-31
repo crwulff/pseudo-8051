@@ -7,7 +7,7 @@ and storing the result byte-by-byte into a declared XRAM local.
 
 from typing import Dict, List, Optional
 
-from pseudo8051.ir.hir import HIRNode, Statement, Assign, CompoundAssign, ExprStmt
+from pseudo8051.ir.hir import HIRNode, Assign, CompoundAssign, ExprStmt
 from pseudo8051.ir.expr import Reg, Const, XRAMRef, UnaryOp, Name, BinOp, Cast, Expr
 from pseudo8051.constants import dbg
 from pseudo8051.passes.patterns.base   import Pattern, Match, Simplify

@@ -12,7 +12,7 @@ import re
 import sys
 from typing import Callable, Dict, List, Optional, Tuple
 
-from pseudo8051.ir.hir import HIRNode, Statement, Assign, CompoundAssign, ExprStmt, ReturnStmt  # noqa: F401 (re-exported for patterns)
+from pseudo8051.ir.hir import HIRNode, Assign, CompoundAssign, ExprStmt, ReturnStmt  # noqa: F401 (re-exported for patterns)
 from pseudo8051.ir.expr import (  # noqa: F401
     Expr, Reg, Name, XRAMRef, RegGroup,
 )
@@ -168,35 +168,6 @@ def _const_str(value: int, type_str: str) -> str:
     return hex(value) if value > 9 else str(value)
 
 
-# ── Legacy statement folding helper ──────────────────────────────────────────
-
-def _fold_into_stmt(next_text: str, name_to_fold: str,
-                    replacement: str,
-                    reg_map: Dict[str, "VarInfo"]) -> Optional[str]:
-    """
-    Try to substitute `name_to_fold` → `replacement` in `next_text`.
-    Returns the folded text, or None when name_to_fold is not in an expr position.
-    """
-    if not next_text:
-        return None
-    pat = re.compile(r'\b' + re.escape(name_to_fold) + r'\b')
-    if not pat.search(next_text):
-        return None
-
-    if next_text.startswith("return "):
-        return _replace_pairs(pat.sub(replacement, next_text), reg_map)
-
-    eq_pos = next_text.find(" = ")
-    if eq_pos > 0:
-        rhs = next_text[eq_pos + 3:]
-        if pat.search(rhs):
-            new_rhs = pat.sub(replacement, rhs)
-            return _replace_pairs(next_text[:eq_pos + 3] + new_rhs, reg_map)
-        return None
-
-    return _replace_pairs(pat.sub(replacement, next_text), reg_map)
-
-
 # ── Expr tree-walk helpers (Phase 6) ─────────────────────────────────────────
 
 def _walk_expr(expr: Expr, fn: Callable[[Expr], Expr]) -> Expr:
@@ -303,13 +274,11 @@ def _subst_all_expr(expr: Expr, reg_map: Dict[str, "VarInfo"]) -> Expr:
 
 
 def _apply_expr_subst_to_node(node: HIRNode,
-                               expr_fn: Callable[[Expr], Expr],
-                               text_fn: Optional[Callable[[str], str]] = None) -> HIRNode:
-    """Apply expr_fn to every read-position Expr in node; text_fn to Statement text.
+                               expr_fn: Callable[[Expr], Expr]) -> HIRNode:
+    """Apply expr_fn to every read-position Expr in node.
 
-    Handles Assign/CompoundAssign (rhs), ExprStmt (expr), ReturnStmt (value),
-    and legacy Statement (text via text_fn). LHS is never transformed.
-    Returns node unchanged if nothing changed.
+    Handles Assign/CompoundAssign (rhs), ExprStmt (expr), ReturnStmt (value).
+    LHS is never transformed. Returns node unchanged if nothing changed.
     """
     if isinstance(node, Assign):
         new_rhs = expr_fn(node.rhs)
@@ -323,9 +292,6 @@ def _apply_expr_subst_to_node(node: HIRNode,
     if isinstance(node, ReturnStmt) and node.value is not None:
         new_val = expr_fn(node.value)
         return ReturnStmt(node.ea, new_val) if new_val is not node.value else node
-    if isinstance(node, Statement) and text_fn is not None:
-        new_text = text_fn(node.text)
-        return Statement(node.ea, new_text) if new_text != node.text else node
     return node
 
 
@@ -335,7 +301,6 @@ def _replace_pairs_in_node(node: HIRNode,
     return _apply_expr_subst_to_node(
         node,
         lambda e: _subst_pairs_in_expr(e, reg_map),
-        lambda t: _replace_pairs(t, reg_map),
     )
 
 
@@ -345,7 +310,6 @@ def _replace_single_regs_in_node(node: HIRNode,
     return _apply_expr_subst_to_node(
         node,
         lambda e: _subst_single_regs_in_expr(e, reg_map),
-        lambda t: _replace_single_regs(t, reg_map),
     )
 
 
@@ -357,7 +321,6 @@ def _fold_into_node(node: HIRNode, name_expr: Expr,
 
     For Assign: substitutes in rhs.
     For ReturnStmt/ExprStmt: substitutes in value/expr.
-    For legacy Statement: falls back to text-based _fold_into_stmt.
     Returns None if name_expr does not appear in an expression position.
     """
     name_str = name_expr.render() if isinstance(name_expr, Expr) else str(name_expr)
@@ -390,9 +353,5 @@ def _fold_into_node(node: HIRNode, name_expr: Expr,
             return None
         new_node = ExprStmt(node.ea, new_expr)
         return _replace_pairs_in_node(new_node, reg_map)
-
-    if isinstance(node, Statement):
-        folded = _fold_into_stmt(node.text, name_str, repl_str, reg_map)
-        return Statement(node.ea, folded) if folded is not None else None
 
     return None

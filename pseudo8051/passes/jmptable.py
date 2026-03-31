@@ -32,7 +32,7 @@ from typing import List, Optional, Tuple
 import ida_ua
 import ida_name
 
-from pseudo8051.ir.hir         import (HIRNode, Label, Assign, Statement,
+from pseudo8051.ir.hir         import (HIRNode, Label, Assign,
                                         SwitchNode, ComputedJump)
 from pseudo8051.ir.expr        import Reg, Const, BinOp, Expr
 from pseudo8051.ir.function    import Function

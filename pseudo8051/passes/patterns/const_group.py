@@ -2,40 +2,27 @@
 passes/patterns/const_group.py — ConstGroupPattern.
 
 Collapses a byte-by-byte constant load into a multi-byte register group.
-Handles both Assign (expression-tree) and legacy Statement nodes.
 """
 
-import re
 from typing import Dict, List, Optional, Tuple
 
-from pseudo8051.ir.hir import HIRNode, Statement, Assign, TypedAssign, ReturnStmt, ExprStmt
+from pseudo8051.ir.hir import HIRNode, Assign, TypedAssign, ReturnStmt, ExprStmt
 from pseudo8051.ir.expr import Reg, Const, Name, RegGroup
 from pseudo8051.constants import dbg
 from pseudo8051.passes.patterns.base   import Pattern, Match, Simplify
 from pseudo8051.passes.patterns._utils import (
-    VarInfo, _replace_pairs, _fold_into_stmt, _parse_int, _const_str, _type_bytes,
+    VarInfo, _replace_pairs, _parse_int, _const_str, _type_bytes,
     _walk_expr, _fold_into_node,
 )
 
-_RE_ASSIGN_IMM = re.compile(r"^(\w+) = (0x[0-9a-fA-F]+|\d+);$")
-_RE_ASSIGN_REG = re.compile(r"^(\w+) = (\w+);$")
-
 
 def _node_as_assign_imm(node: HIRNode):
-    """
-    If node assigns an immediate to a register (Assign or Statement), return
-    (dst_name, int_value).  Otherwise return None.
-    """
+    """If node assigns an immediate to a register, return (dst_name, int_value)."""
     if isinstance(node, Assign):
         lhs = node.lhs
         rhs = node.rhs
         if isinstance(lhs, Reg) and isinstance(rhs, Const):
             return (lhs.name, rhs.value)
-        return None
-    if isinstance(node, Statement):
-        m = _RE_ASSIGN_IMM.match(node.text)
-        if m:
-            return (m.group(1), _parse_int(m.group(2)))
     return None
 
 
@@ -46,11 +33,6 @@ def _node_as_assign_reg(node: HIRNode):
         rhs = node.rhs
         if isinstance(lhs, Reg) and isinstance(rhs, Reg):
             return (lhs.name, rhs.name)
-        return None
-    if isinstance(node, Statement):
-        m = _RE_ASSIGN_REG.match(node.text)
-        if m:
-            return (m.group(1), m.group(2))
     return None
 
 
@@ -140,19 +122,6 @@ class ConstGroupPattern(Pattern):
                     folded_node = _fold_into_node(next_node, pair_expr, const_expr, reg_map)
                 if folded_node is None and name_expr is not None:
                     folded_node = _fold_into_node(next_node, name_expr, const_expr, reg_map)
-
-                # Legacy text fold fallback
-                if folded_node is None and isinstance(next_node, Statement):
-                    next_text = next_node.text
-                    pair_in_next = (vinfo.pair_name in next_text or
-                                    (vinfo.name != vinfo.pair_name and
-                                     re.search(r"\b" + re.escape(vinfo.name) + r"\b", next_text)))
-                    if pair_in_next:
-                        folded = _fold_into_stmt(next_text, vinfo.pair_name, const_s, reg_map)
-                        if folded is None and vinfo.name != vinfo.pair_name:
-                            folded = _fold_into_stmt(next_text, vinfo.name, const_s, reg_map)
-                        if folded is not None:
-                            folded_node = Statement(nodes[i].ea, folded)
 
                 if folded_node is not None:
                     return ([folded_node], end_i + 1)

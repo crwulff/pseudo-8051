@@ -84,7 +84,7 @@ class TestUsercallParamSubst:
             return_type="void",
             params=[Param("val", "uint16_t", ("R6", "R7"))],
         )
-        func = make_single_block_func("p", ["XRAM[X] = R6R7;"])
+        func = make_single_block_func("p", [Assign(0x1000, XRAMRef(Name("X")), Reg("R6R7"))])
         TypeAwareSimplifier().run(func)
         texts = [t for n in func.hir for _, t in n.render()]
         assert "XRAM[X] = val;" in texts

@@ -23,7 +23,7 @@ chain collapses to a single "var++;" or "var--;" statement.
 
 from typing import Dict, List, Optional, Tuple
 
-from pseudo8051.ir.hir import HIRNode, Statement, Assign, ExprStmt, IfGoto, Label
+from pseudo8051.ir.hir import HIRNode, Assign, ExprStmt, IfGoto, Label
 from pseudo8051.ir.expr import Expr, Reg, Const, Name, XRAMRef, BinOp, UnaryOp
 from pseudo8051.constants import dbg
 from pseudo8051.passes.patterns.base   import Pattern, Match, Simplify

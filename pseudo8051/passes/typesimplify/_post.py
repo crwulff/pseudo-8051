@@ -5,7 +5,7 @@ passes/typesimplify/_post.py — Post-simplify passes and shared traversal helpe
 import re
 from typing import Callable, Dict, List, Optional
 
-from pseudo8051.ir.hir    import (HIRNode, Statement, Assign, TypedAssign, CompoundAssign,
+from pseudo8051.ir.hir    import (HIRNode, Assign, TypedAssign, CompoundAssign,
                                    ExprStmt, ReturnStmt, IfGoto, IfNode, WhileNode, ForNode,
                                    DoWhileNode, SwitchNode)
 from pseudo8051.constants import dbg
@@ -258,8 +258,6 @@ def _collapse_dpl_dph(nodes: List[HIRNode],
 
 # ── Post-simplify call-arg fold and dead-setup pruning ────────────────────────
 
-_RE_REG_TOKEN = re.compile(r'\b(R[0-7]+|DPTR|DPH|DPL|A)\b')
-
 
 def _collect_hir_name_refs(nodes: List[HIRNode]) -> set:
     """Collect all Reg/Name .name strings from expression positions in nodes."""
@@ -291,9 +289,6 @@ def _collect_hir_name_refs(nodes: List[HIRNode]) -> set:
             _add(node.value)
         elif isinstance(node, IfGoto):
             _add(node.cond)
-        elif isinstance(node, Statement):
-            for m in _RE_REG_TOKEN.finditer(node.text):
-                refs.add(m.group(1))
         elif isinstance(node, IfNode):
             for sub in list(node.then_nodes) + list(node.else_nodes):
                 _visit(sub)
@@ -361,9 +356,6 @@ def _subst_reg_in_call_node(node: HIRNode, reg: str, replacement: Expr) -> HIRNo
     if isinstance(node, Assign) and isinstance(node.rhs, Call):
         new_call = _patch(node.rhs)
         return Assign(node.ea, node.lhs, new_call) if new_call is not node.rhs else node
-    if isinstance(node, Statement):
-        new_text = re.sub(r'\b' + re.escape(reg) + r'\b', repl_str, node.text)
-        return Statement(node.ea, new_text) if new_text != node.text else node
     return node
 
 
@@ -719,8 +711,6 @@ def _count_reg_uses_in_node(r: str, node: HIRNode) -> int:
         _walk_expr(node.value, _fn)
     elif isinstance(node, IfGoto):
         _walk_expr(node.cond, _fn)
-    elif isinstance(node, Statement):
-        return len(re.findall(r'\b' + re.escape(r) + r'\b', node.text))
     return count[0]
 
 
@@ -769,19 +759,6 @@ def _subst_reg_in_node(node: HIRNode, r: str,
         if new_cond is node.cond:
             return None
         return IfGoto(node.ea, new_cond, node.label)
-
-    if isinstance(node, Statement):
-        pat = re.compile(r'\b' + re.escape(r) + r'\b')
-        if not pat.search(node.text):
-            return None
-        repl_str = replacement.render() if isinstance(replacement, Expr) else str(replacement)
-        eq = node.text.find(" = ")
-        if eq > 0:
-            rhs = node.text[eq + 3:]
-            if pat.search(rhs):
-                return Statement(node.ea, node.text[:eq + 3] + pat.sub(repl_str, rhs))
-            return None
-        return Statement(node.ea, pat.sub(repl_str, node.text))
 
     return None
 
