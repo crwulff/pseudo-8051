@@ -14,7 +14,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 from pseudo8051.ir.hir import HIRNode, Statement, Assign, CompoundAssign, ExprStmt, ReturnStmt  # noqa: F401 (re-exported for patterns)
 from pseudo8051.ir.expr import (  # noqa: F401
-    Expr, Reg, Const, Name, XRAMRef, IRAMRef, CROMRef, RegGroup, BinOp, UnaryOp, Call, Cast,
+    Expr, Reg, Const, Name, XRAMRef, IRAMRef, CROMRef, RegGroup, BinOp, UnaryOp, Call, Cast, Paren,
 )
 
 
@@ -242,6 +242,12 @@ def _walk_expr(expr: Expr, fn: Callable[[Expr], Expr]) -> Expr:
         new_inner = _walk_expr(expr.inner, fn)
         if new_inner is not expr.inner:
             expr = Cast(expr.type_str, new_inner)
+        return fn(expr)
+
+    if isinstance(expr, Paren):
+        new_inner = _walk_expr(expr.inner, fn)
+        if new_inner is not expr.inner:
+            expr = Paren(new_inner)
         return fn(expr)
 
     return fn(expr)
