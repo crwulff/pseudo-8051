@@ -14,8 +14,7 @@ from pseudo8051.passes.patterns._utils  import (
     _subst_all_expr,
     _walk_expr,
 )
-from pseudo8051.ir.expr import (Expr, UnaryOp, BinOp,
-                                 Reg as RegExpr, RegGroup as RegGroupExpr)
+from pseudo8051.ir.expr import (Expr, UnaryOp, BinOp)
 
 # ── Boolean condition simplification ─────────────────────────────────────────
 
@@ -62,16 +61,6 @@ def _simplify_bool_str(cond: str) -> str:
 
 _RE_DPTR_SETUP = re.compile(r'^DPTR = (.+?);')
 
-
-def _get_written_regs(node: HIRNode) -> frozenset:
-    """Return the set of register names written as the primary LHS of this node."""
-    if isinstance(node, (Assign, CompoundAssign)):
-        lhs = node.lhs
-        if isinstance(lhs, RegExpr):
-            return frozenset({lhs.name})
-        if isinstance(lhs, RegGroupExpr):
-            return frozenset(lhs.regs)
-    return frozenset()
 
 
 def _effective_map(node: HIRNode, base_eff: Dict[str, VarInfo]) -> Dict[str, VarInfo]:
@@ -305,7 +294,7 @@ def _simplify_once(nodes: List[HIRNode], reg_map: Dict[str, VarInfo],
             transformed = _transform_default(node, eff, simplify_fn)
             if transformed is not None:
                 out.append(transformed)
-        written.update(_get_written_regs(node))
+        written.update(node.written_regs)
         if isinstance(node, IfNode):
             written.update(_if_definite_kills(node))
     return out
@@ -325,7 +314,7 @@ def _if_definite_kills(node: IfNode) -> frozenset:
 def _definite_kills_list(nodes: List[HIRNode]) -> frozenset:
     result: set = set()
     for n in nodes:
-        result |= _get_written_regs(n)
+        result |= n.written_regs
         if isinstance(n, IfNode):
             result |= _if_definite_kills(n)
     return frozenset(result)
@@ -350,7 +339,7 @@ def _simplify(nodes: List[HIRNode], reg_map: Dict[str, VarInfo],
         return _simplify(ns, rm, killed)
 
     def _update_killed(node: HIRNode) -> None:
-        for r in _get_written_regs(node):
+        for r in node.written_regs:
             v = reg_map.get(r)
             if isinstance(v, VarInfo) and v.is_param:
                 killed.add(r)

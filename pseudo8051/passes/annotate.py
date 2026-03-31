@@ -13,22 +13,9 @@ from typing import Dict, List, Optional, Tuple
 
 from pseudo8051.ir.hir     import (HIRNode, NodeAnnotation, Assign, CompoundAssign,
                                     ExprStmt)
-from pseudo8051.ir.expr    import Reg as RegExpr, RegGroup as RegGroupExpr, XRAMRef, Name as NameExpr
+from pseudo8051.ir.expr    import Reg as RegExpr, XRAMRef, Name as NameExpr
 from pseudo8051.passes     import OptimizationPass
 from pseudo8051.constants  import PARAM_REG_ORDER, DEBUG, dbg
-
-
-# ── Helpers ────────────────────────────────────────────────────────────────────
-
-def _get_written_regs(node: HIRNode) -> frozenset:
-    """Return the set of register names written as the primary LHS of this node."""
-    if isinstance(node, (Assign, CompoundAssign)):
-        lhs = node.lhs
-        if isinstance(lhs, RegExpr):
-            return frozenset({lhs.name})
-        if isinstance(lhs, RegGroupExpr):
-            return frozenset(lhs.regs)
-    return frozenset()
 
 
 def _is_call_node(node: HIRNode):
@@ -154,7 +141,7 @@ def _backward_annotate_call(nodes: List[HIRNode], call_idx: int,
     remaining = set(callee_rm.keys())
     j = call_idx - 1
     while j >= 0 and remaining:
-        written = _get_written_regs(nodes[j])
+        written = nodes[j].written_regs
         for r in written & remaining:
             if nodes[j].ann is not None:
                 nodes[j].ann.call_arg_ann.setdefault(r, callee_rm[r])
@@ -323,13 +310,13 @@ class AnnotationPass(OptimizationPass):
                             from pseudo8051.constants import resolve_ext_addr
                             sym = resolve_ext_addr(dptr_val)
                     if sym is not None and sym in xram_locals:
-                        dst_regs = _get_written_regs(node)
+                        dst_regs = node.written_regs
                         for r in dst_regs:
                             name_state[r] = xram_locals[sym]
                         xram_loaded_regs = dst_regs
 
                 # (d) Kill defined regs (unless already set by XRAM load above)
-                for r in _get_written_regs(node):
+                for r in node.written_regs:
                     if r not in xram_loaded_regs:
                         name_state.pop(r, None)
                     const_state.pop(r, None)

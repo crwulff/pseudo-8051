@@ -14,7 +14,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 from pseudo8051.ir.hir import HIRNode, Statement, Assign, CompoundAssign, ExprStmt, ReturnStmt  # noqa: F401 (re-exported for patterns)
 from pseudo8051.ir.expr import (  # noqa: F401
-    Expr, Reg, Const, Name, XRAMRef, IRAMRef, CROMRef, RegGroup, BinOp, UnaryOp, Call, Cast, Paren,
+    Expr, Reg, Name, XRAMRef, RegGroup,
 )
 
 
@@ -205,51 +205,14 @@ def _walk_expr(expr: Expr, fn: Callable[[Expr], Expr]) -> Expr:
 
     fn receives each node (leaves first, composites after their children are
     updated) and may return a replacement or the same node.
+
+    Dispatch is via Expr.children() / Expr.rebuild(), so new Expr subclasses
+    are automatically handled as long as they implement those two methods.
     """
-    if isinstance(expr, (Reg, Const, Name)):
-        return fn(expr)
-
-    if isinstance(expr, (XRAMRef, IRAMRef, CROMRef)):
-        new_inner = _walk_expr(expr.inner, fn)
-        if new_inner is not expr.inner:
-            expr = type(expr)(new_inner)
-        return fn(expr)
-
-    if isinstance(expr, RegGroup):
-        # RegGroup holds string names, not Expr children
-        return fn(expr)
-
-    if isinstance(expr, BinOp):
-        new_lhs = _walk_expr(expr.lhs, fn)
-        new_rhs = _walk_expr(expr.rhs, fn)
-        if new_lhs is not expr.lhs or new_rhs is not expr.rhs:
-            expr = BinOp(new_lhs, expr.op, new_rhs)
-        return fn(expr)
-
-    if isinstance(expr, UnaryOp):
-        new_operand = _walk_expr(expr.operand, fn)
-        if new_operand is not expr.operand:
-            expr = UnaryOp(expr.op, new_operand, expr.post)
-        return fn(expr)
-
-    if isinstance(expr, Call):
-        new_args = [_walk_expr(a, fn) for a in expr.args]
-        if any(na is not oa for na, oa in zip(new_args, expr.args)):
-            expr = Call(expr.func_name, new_args)
-        return fn(expr)
-
-    if isinstance(expr, Cast):
-        new_inner = _walk_expr(expr.inner, fn)
-        if new_inner is not expr.inner:
-            expr = Cast(expr.type_str, new_inner)
-        return fn(expr)
-
-    if isinstance(expr, Paren):
-        new_inner = _walk_expr(expr.inner, fn)
-        if new_inner is not expr.inner:
-            expr = Paren(new_inner)
-        return fn(expr)
-
+    children = expr.children()
+    new_children = [_walk_expr(c, fn) for c in children]
+    if any(nc is not oc for nc, oc in zip(new_children, children)):
+        expr = expr.rebuild(new_children)
     return fn(expr)
 
 

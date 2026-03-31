@@ -6,6 +6,8 @@ Composite nodes: XRAMRef, IRAMRef, CROMRef, RegGroup, BinOp, UnaryOp, Call, Cast
 
 Each node implements:
   render(outer_prec=99) -> str  — produce C-like text, inserting parens as needed
+  children() -> List[Expr]      — direct child expressions (for tree walking)
+  rebuild(new_children)         — return copy with replaced children
   __eq__ / __hash__             — needed for use in replacement dicts and sets
 """
 
@@ -64,6 +66,15 @@ class Expr(ABC):
         weaker (higher number) than outer_prec.
         """
         ...
+
+    def children(self) -> List["Expr"]:
+        """Return direct child Expr nodes.  Leaf nodes return []."""
+        return []
+
+    def rebuild(self, new_children: List["Expr"]) -> "Expr":
+        """Return a copy of this node with children replaced.
+        Must accept exactly len(self.children()) elements."""
+        return self  # leaf: no children, return unchanged
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}({self.render()})"
@@ -147,6 +158,12 @@ class XRAMRef(Expr):
     def render(self, outer_prec: int = 0) -> str:
         return f"XRAM[{self.inner.render()}]"
 
+    def children(self) -> List["Expr"]:
+        return [self.inner]
+
+    def rebuild(self, new_children: List["Expr"]) -> "Expr":
+        return XRAMRef(new_children[0])
+
     def __eq__(self, other: object) -> bool:
         return isinstance(other, XRAMRef) and self.inner == other.inner
 
@@ -168,6 +185,12 @@ class IRAMRef(Expr):
     def render(self, outer_prec: int = 0) -> str:
         return f"IRAM[{self.inner.render()}]"
 
+    def children(self) -> List["Expr"]:
+        return [self.inner]
+
+    def rebuild(self, new_children: List["Expr"]) -> "Expr":
+        return IRAMRef(new_children[0])
+
     def __eq__(self, other: object) -> bool:
         return isinstance(other, IRAMRef) and self.inner == other.inner
 
@@ -188,6 +211,12 @@ class CROMRef(Expr):
 
     def render(self, outer_prec: int = 0) -> str:
         return f"CROM[{self.inner.render()}]"
+
+    def children(self) -> List["Expr"]:
+        return [self.inner]
+
+    def rebuild(self, new_children: List["Expr"]) -> "Expr":
+        return CROMRef(new_children[0])
 
     def __eq__(self, other: object) -> bool:
         return isinstance(other, CROMRef) and self.inner == other.inner
@@ -259,6 +288,12 @@ class BinOp(Expr):
         inner = f"{self.lhs.render(my_prec)} {self.op} {self.rhs.render(my_prec)}"
         return f"({inner})" if need_parens else inner
 
+    def children(self) -> List["Expr"]:
+        return [self.lhs, self.rhs]
+
+    def rebuild(self, new_children: List["Expr"]) -> "Expr":
+        return BinOp(new_children[0], self.op, new_children[1])
+
     def __eq__(self, other: object) -> bool:
         return (isinstance(other, BinOp)
                 and self.lhs == other.lhs
@@ -297,6 +332,12 @@ class UnaryOp(Expr):
             return f"{inner}{self.op}"
         return f"{self.op}{inner}"
 
+    def children(self) -> List["Expr"]:
+        return [self.operand]
+
+    def rebuild(self, new_children: List["Expr"]) -> "Expr":
+        return UnaryOp(self.op, new_children[0], self.post)
+
     def __eq__(self, other: object) -> bool:
         return (isinstance(other, UnaryOp)
                 and self.op      == other.op
@@ -325,6 +366,12 @@ class Call(Expr):
         args_str = ", ".join(a.render() for a in self.args)
         return f"{self.func_name}({args_str})"
 
+    def children(self) -> List["Expr"]:
+        return list(self.args)
+
+    def rebuild(self, new_children: List["Expr"]) -> "Expr":
+        return Call(self.func_name, new_children)
+
     def __eq__(self, other: object) -> bool:
         return (isinstance(other, Call)
                 and self.func_name == other.func_name
@@ -347,6 +394,12 @@ class Paren(Expr):
 
     def render(self, outer_prec: int = 0) -> str:
         return f"({self.inner.render()})"
+
+    def children(self) -> List["Expr"]:
+        return [self.inner]
+
+    def rebuild(self, new_children: List["Expr"]) -> "Expr":
+        return Paren(new_children[0])
 
     def __eq__(self, other: object) -> bool:
         return isinstance(other, Paren) and self.inner == other.inner
@@ -371,6 +424,12 @@ class Cast(Expr):
 
     def render(self, outer_prec: int = 0) -> str:
         return f"({self.type_str}){self.inner.render(_UNARY_PREC)}"
+
+    def children(self) -> List["Expr"]:
+        return [self.inner]
+
+    def rebuild(self, new_children: List["Expr"]) -> "Expr":
+        return Cast(self.type_str, new_children[0])
 
     def __eq__(self, other: object) -> bool:
         return (isinstance(other, Cast)

@@ -6,9 +6,9 @@ render() returns a list of (ea, indented_text) tuples.
 """
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Tuple, Union
 
-from pseudo8051.ir.expr import Expr
+from pseudo8051.ir.expr import Expr, Reg as _RegExpr, RegGroup as _RegGroupExpr
 
 if TYPE_CHECKING:
     from pseudo8051.passes.patterns._utils import VarInfo
@@ -37,6 +37,24 @@ class HIRNode(ABC):
         """Return list of (ea, text) tuples at the given indent level."""
         ...
 
+    @property
+    def written_regs(self) -> frozenset:
+        """Register/name strings written (defined) as the primary LHS of this node.
+
+        For RegGroup LHS includes both individual names and the pair key
+        (e.g. {"R6", "R7", "R6R7"}).  Returns frozenset() for nodes that
+        write no registers (structured nodes, ReturnStmt, etc.).
+        """
+        return frozenset()
+
+    def map_bodies(self, fn: "Callable[[List[HIRNode]], List[HIRNode]]") -> "HIRNode":
+        """Return a copy of this node with fn applied to every child body list.
+
+        Leaf nodes (Assign, ExprStmt, ReturnStmt, etc.) return self unchanged.
+        Structured nodes (IfNode, WhileNode, etc.) rebuild with mapped bodies.
+        """
+        return self
+
     @staticmethod
     def _ind(indent: int) -> str:
         return "    " * indent
@@ -51,6 +69,15 @@ def _render_expr(val: Union[str, Expr]) -> str:
     return str(val)
 
 
+def _lhs_written_regs(lhs: Expr) -> frozenset:
+    """Extract written register names from an assignment LHS expression."""
+    if isinstance(lhs, _RegExpr):
+        return frozenset({lhs.name})
+    if isinstance(lhs, _RegGroupExpr):
+        return frozenset(lhs.regs) | {"".join(lhs.regs)}
+    return frozenset()
+
+
 class Assign(HIRNode):
     """lhs = rhs;"""
 
@@ -58,6 +85,10 @@ class Assign(HIRNode):
         super().__init__(ea)
         self.lhs = lhs
         self.rhs = rhs
+
+    @property
+    def written_regs(self) -> frozenset:
+        return _lhs_written_regs(self.lhs)
 
     def render(self, indent: int = 0) -> List[Tuple[int, str]]:
         return [(self.ea, f"{self._ind(indent)}{_render_expr(self.lhs)} = {_render_expr(self.rhs)};")]
@@ -71,6 +102,10 @@ class CompoundAssign(HIRNode):
         self.lhs = lhs
         self.op  = op
         self.rhs = rhs
+
+    @property
+    def written_regs(self) -> frozenset:
+        return _lhs_written_regs(self.lhs)
 
     def render(self, indent: int = 0) -> List[Tuple[int, str]]:
         return [(self.ea, f"{self._ind(indent)}{_render_expr(self.lhs)} {self.op} {_render_expr(self.rhs)};")]
@@ -120,6 +155,14 @@ class Statement(HIRNode):
     def __init__(self, ea: int, text: str):
         super().__init__(ea)
         self.text = text
+
+    @property
+    def written_regs(self) -> frozenset:
+        eq = self.text.find(" = ")
+        if eq > 0:
+            lhs_tok = self.text[:eq].split()[-1]
+            return frozenset({lhs_tok})
+        return frozenset()
 
     def render(self, indent: int = 0) -> List[Tuple[int, str]]:
         return [(self.ea, f"{self._ind(indent)}{self.text}")]
@@ -189,6 +232,9 @@ class IfNode(HIRNode):
         self.then_nodes = then_nodes
         self.else_nodes = else_nodes or []
 
+    def map_bodies(self, fn: Callable[[List[HIRNode]], List[HIRNode]]) -> "IfNode":
+        return IfNode(self.ea, self.condition, fn(self.then_nodes), fn(self.else_nodes))
+
     def render(self, indent: int = 0) -> List[Tuple[int, str]]:
         ind = self._ind(indent)
         lines: List[Tuple[int, str]] = []
@@ -215,6 +261,9 @@ class WhileNode(HIRNode):
         super().__init__(ea)
         self.condition  = condition
         self.body_nodes = body_nodes
+
+    def map_bodies(self, fn: Callable[[List[HIRNode]], List[HIRNode]]) -> "WhileNode":
+        return WhileNode(self.ea, self.condition, fn(self.body_nodes))
 
     def render(self, indent: int = 0) -> List[Tuple[int, str]]:
         ind = self._ind(indent)
@@ -255,6 +304,9 @@ class ForNode(HIRNode):
             return self.init.render()
         return str(self.init)
 
+    def map_bodies(self, fn: Callable[[List[HIRNode]], List[HIRNode]]) -> "ForNode":
+        return ForNode(self.ea, self.init, self.condition, self.update, fn(self.body_nodes))
+
     def render(self, indent: int = 0) -> List[Tuple[int, str]]:
         ind = self._ind(indent)
         lines: List[Tuple[int, str]] = []
@@ -279,6 +331,9 @@ class DoWhileNode(HIRNode):
         super().__init__(ea)
         self.condition  = condition
         self.body_nodes = body_nodes
+
+    def map_bodies(self, fn: Callable[[List[HIRNode]], List[HIRNode]]) -> "DoWhileNode":
+        return DoWhileNode(self.ea, self.condition, fn(self.body_nodes))
 
     def render(self, indent: int = 0) -> List[Tuple[int, str]]:
         ind = self._ind(indent)
@@ -315,6 +370,14 @@ class SwitchNode(HIRNode):
         self.cases         = cases
         self.default_label = default_label
         self.default_body  = default_body
+
+    def map_bodies(self, fn: Callable[[List[HIRNode]], List[HIRNode]]) -> "SwitchNode":
+        new_cases = [
+            (vals, fn(body) if isinstance(body, list) else body)
+            for vals, body in self.cases
+        ]
+        new_default_body = fn(self.default_body) if isinstance(self.default_body, list) else self.default_body
+        return SwitchNode(self.ea, self.subject, new_cases, self.default_label, new_default_body)
 
     def render(self, indent: int = 0) -> List[Tuple[int, str]]:
         ind  = self._ind(indent)

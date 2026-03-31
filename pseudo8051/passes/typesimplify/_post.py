@@ -19,31 +19,8 @@ from pseudo8051.ir.expr import (Expr, UnaryOp, BinOp, Const, Call, Paren,
 # ── Shared traversal helper ───────────────────────────────────────────────────
 
 def recurse_bodies(nodes: List[HIRNode], fn: Callable) -> List[HIRNode]:
-    """Recurse fn into IfNode/WhileNode/ForNode/SwitchNode bodies; pass other nodes through."""
-    result = []
-    for node in nodes:
-        if isinstance(node, IfNode):
-            result.append(IfNode(node.ea, node.condition,
-                fn(node.then_nodes), fn(node.else_nodes)))
-        elif isinstance(node, WhileNode):
-            result.append(WhileNode(node.ea, node.condition, fn(node.body_nodes)))
-        elif isinstance(node, ForNode):
-            result.append(ForNode(node.ea, node.init, node.condition, node.update,
-                fn(node.body_nodes)))
-        elif isinstance(node, DoWhileNode):
-            result.append(DoWhileNode(node.ea, node.condition, fn(node.body_nodes)))
-        elif isinstance(node, SwitchNode):
-            new_cases = [
-                (vals, fn(body) if isinstance(body, list) else body)
-                for vals, body in node.cases
-            ]
-            new_default = fn(node.default_body) if isinstance(node.default_body, list) \
-                          else node.default_body
-            result.append(SwitchNode(node.ea, node.subject, new_cases,
-                                     node.default_label, new_default))
-        else:
-            result.append(node)
-    return result
+    """Recurse fn into structured node bodies; pass other nodes through."""
+    return [node.map_bodies(fn) for node in nodes]
 
 
 # ── Shared predicate ──────────────────────────────────────────────────────────
@@ -409,7 +386,7 @@ def _first_kill_before_read(reg: str, nodes: List[HIRNode]) -> bool:
                 and node.lhs.name == reg):
             return False  # CompoundAssign reads its LHS operand
         reads = _count_reg_uses_in_node(reg, node)
-        writes = reg in _get_written_regs(node)
+        writes = reg in node.written_regs
         if reads > 0:
             return False  # reg is read first
         if writes:
@@ -584,7 +561,7 @@ def _reads_any_reg(node: HIRNode, regs: set) -> bool:
 
 def _writes_any_reg(node: HIRNode, regs: set) -> bool:
     """True if node writes any register in regs."""
-    return bool(_get_written_regs(node) & regs)
+    return bool(node.written_regs & regs)
 
 
 def _fold_call_arg_pairs(nodes: List[HIRNode],
@@ -721,23 +698,6 @@ _RE_RETVAL_STMT = re.compile(
 )
 
 
-def _get_written_regs(node: HIRNode) -> frozenset:
-    """Return the set of register/name strings written (defined) by node."""
-    if isinstance(node, (Assign, CompoundAssign)):
-        lhs = node.lhs
-        if isinstance(lhs, RegExpr):
-            return frozenset({lhs.name})
-        if isinstance(lhs, RegGroupExpr):
-            names = set(lhs.regs)
-            names.add("".join(lhs.regs))
-            return frozenset(names)
-    if isinstance(node, Statement):
-        # Written reg is the LHS token before " = "
-        eq = node.text.find(" = ")
-        if eq > 0:
-            lhs_tok = node.text[:eq].split()[-1]
-            return frozenset({lhs_tok})
-    return frozenset()
 
 
 def _count_reg_uses_in_node(r: str, node: HIRNode) -> int:
@@ -864,7 +824,7 @@ def _subst_reg_in_scope(nodes: List[HIRNode], reg: str,
         else:
             result.append(node)
         # If this node writes reg, subsequent nodes see the new value — stop here.
-        if reg in _get_written_regs(node):
+        if reg in node.written_regs:
             result.extend(nodes[i + 1:])
             return result
     return result
@@ -942,7 +902,7 @@ def _propagate_values(nodes: List[HIRNode],
             total_uses = 0
             use_idx = None
             for j in range(i + 1, len(live)):
-                written = _get_written_regs(live[j])
+                written = live[j].written_regs
                 uses_here = _count_reg_uses_in_node(r, live[j])
                 total_uses += uses_here
                 if uses_here > 0 and use_idx is None:
@@ -1065,9 +1025,8 @@ def _simplify_carry_comparison(nodes: List[HIRNode]) -> List[HIRNode]:
     result: List[HIRNode] = []
     for node in nodes:
         if isinstance(node, WhileNode):
-            # Recurse into body first
+            # Recurse into body first (WhileNode needs special condition check)
             new_body = _simplify_carry_comparison(node.body_nodes)
-            # Check if condition is Reg("C")
             if isinstance(node.condition, RegExpr) and node.condition.name == "C":
                 transformed = _try_collapse_subb16(node.condition, new_body)
                 if transformed is not None:
@@ -1075,15 +1034,8 @@ def _simplify_carry_comparison(nodes: List[HIRNode]) -> List[HIRNode]:
                     result.append(WhileNode(node.ea, new_cond, new_body))
                     continue
             result.append(WhileNode(node.ea, node.condition, new_body))
-        elif isinstance(node, IfNode):
-            result.append(IfNode(node.ea, node.condition,
-                _simplify_carry_comparison(node.then_nodes),
-                _simplify_carry_comparison(node.else_nodes)))
-        elif isinstance(node, ForNode):
-            result.append(ForNode(node.ea, node.init, node.condition, node.update,
-                _simplify_carry_comparison(node.body_nodes)))
         else:
-            result.append(node)
+            result.append(node.map_bodies(_simplify_carry_comparison))
     return result
 
 
