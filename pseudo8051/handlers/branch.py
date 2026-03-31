@@ -197,7 +197,7 @@ class CjneHandler(MnemonicHandler):
 
 
 class JmpAtADptrHandler(MnemonicHandler):
-    """JMP @A+DPTR — indirect computed jump; produces a placeholder Statement.
+    """JMP @A+DPTR — indirect computed jump; produces a placeholder ComputedJump.
     JmpTableStructurer will replace it with a SwitchNode."""
 
     def use(self, insn) -> frozenset:
@@ -207,8 +207,8 @@ class JmpAtADptrHandler(MnemonicHandler):
         return frozenset()
 
     def lift(self, insn, state=None) -> List[HIRNode]:
-        from pseudo8051.ir.hir import Statement
-        return [Statement(insn.ea, "JMP @A+DPTR")]
+        from pseudo8051.ir.hir import ComputedJump
+        return [ComputedJump(insn.ea)]
 
 
 class DjnzHandler(MnemonicHandler):

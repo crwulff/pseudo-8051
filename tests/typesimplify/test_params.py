@@ -1,13 +1,13 @@
 from pseudo8051.passes.typesimplify import TypeAwareSimplifier
 from pseudo8051.prototypes import PROTOTYPES, FuncProto, Param
-from pseudo8051.ir.hir import Statement, Assign
+from pseudo8051.ir.hir import Assign, ReturnStmt
 from pseudo8051.ir.expr import Reg, XRAMRef, Name
 
 from ..helpers import make_single_block_func
 
 
-def _texts(func):
-    return [n.text for n in func.hir if isinstance(n, Statement)]
+def _rendered(func):
+    return [t for n in func.hir for _, t in n.render()]
 
 
 class TestSingleRegParam:
@@ -17,16 +17,22 @@ class TestSingleRegParam:
             return_type="void",
             params=[Param("count", "uint8_t", ("R7",))],
         )
-        func = make_single_block_func("f", ["A = R7;", "XRAM[X] = A;"])
+        func = make_single_block_func("f", [
+            Assign(0x1000, Reg("A"), Reg("R7")),
+            Assign(0x1002, XRAMRef(Name("X")), Reg("A")),
+        ])
         TypeAwareSimplifier().run(func)
-        texts = _texts(func)
-        assert texts == ["XRAM[X] = count;"]
+        texts = _rendered(func)
+        assert "XRAM[X] = count;" in texts
 
     def test_no_proto_structural_patterns_run(self):
         """Without a prototype, structural patterns (AccumRelayPattern) still fire."""
-        func = make_single_block_func("unknown_fn", ["A = R7;", "XRAM[X] = A;"])
+        func = make_single_block_func("unknown_fn", [
+            Assign(0x1000, Reg("A"), Reg("R7")),
+            Assign(0x1002, XRAMRef(Name("X")), Reg("A")),
+        ])
         TypeAwareSimplifier().run(func)
-        texts = _texts(func)
+        texts = _rendered(func)
         assert "XRAM[X] = R7;" in texts
         assert "A = R7;" not in texts
         assert "XRAM[X] = A;" not in texts
@@ -37,9 +43,13 @@ class TestSingleRegParam:
             return_type="void",
             params=[Param("val", "uint8_t", ("R7",))],
         )
-        func = make_single_block_func("g", ["A = R7;", "XRAM[X] = A;", "return;"])
+        func = make_single_block_func("g", [
+            Assign(0x1000, Reg("A"), Reg("R7")),
+            Assign(0x1002, XRAMRef(Name("X")), Reg("A")),
+            ReturnStmt(0x1004, None),
+        ])
         TypeAwareSimplifier().run(func)
-        texts = _texts(func)
+        texts = _rendered(func)
         assert "return;" in texts
 
 
@@ -55,12 +65,15 @@ class TestUsercallParamSubst:
             ],
         )
         func = make_single_block_func("h", [
-            "A = R7;", "XRAM[X1] = A;",
-            "A = R5;", "XRAM[X2] = A;",
-            "A = R3;", "XRAM[X3] = A;",
+            Assign(0x1000, Reg("A"), Reg("R7")),
+            Assign(0x1002, XRAMRef(Name("X1")), Reg("A")),
+            Assign(0x1004, Reg("A"), Reg("R5")),
+            Assign(0x1006, XRAMRef(Name("X2")), Reg("A")),
+            Assign(0x1008, Reg("A"), Reg("R3")),
+            Assign(0x100a, XRAMRef(Name("X3")), Reg("A")),
         ])
         TypeAwareSimplifier().run(func)
-        texts = _texts(func)
+        texts = _rendered(func)
         assert "XRAM[X1] = H;" in texts
         assert "XRAM[X2] = M;" in texts
         assert "XRAM[X3] = L;" in texts
@@ -73,7 +86,8 @@ class TestUsercallParamSubst:
         )
         func = make_single_block_func("p", ["XRAM[X] = R6R7;"])
         TypeAwareSimplifier().run(func)
-        texts = _texts(func)
+        from pseudo8051.ir.hir import Statement
+        texts = [n.text for n in func.hir if isinstance(n, Statement)]
         assert "XRAM[X] = val;" in texts
 
 

@@ -5,7 +5,7 @@ passes/typesimplify/_post.py — Post-simplify passes and shared traversal helpe
 import re
 from typing import Callable, Dict, List, Optional
 
-from pseudo8051.ir.hir    import (HIRNode, Statement, Assign, CompoundAssign,
+from pseudo8051.ir.hir    import (HIRNode, Statement, Assign, TypedAssign, CompoundAssign,
                                    ExprStmt, ReturnStmt, IfGoto, IfNode, WhileNode, ForNode,
                                    DoWhileNode, SwitchNode)
 from pseudo8051.constants import dbg
@@ -693,9 +693,6 @@ def _fold_call_arg_pairs(nodes: List[HIRNode],
 
 # ── Forward single-use propagation ────────────────────────────────────────────
 
-_RE_RETVAL_STMT = re.compile(
-    r'^(?:\w[\w\s*]*?\s+)?(\w*retval\d+)\s*=\s*(.+?);$'
-)
 
 
 
@@ -745,6 +742,8 @@ def _subst_reg_in_node(node: HIRNode, r: str,
             new_lhs = _walk_expr(node.lhs, _fn)
         if new_rhs is node.rhs and new_lhs is node.lhs:
             return None
+        if isinstance(node, TypedAssign):
+            return TypedAssign(node.ea, node.type_str, new_lhs, new_rhs)
         return Assign(node.ea, new_lhs, new_rhs)
 
     if isinstance(node, CompoundAssign):
@@ -831,12 +830,9 @@ def _subst_reg_in_scope(nodes: List[HIRNode], reg: str,
 
 
 def _as_retval_stmt(node: HIRNode) -> Optional[tuple]:
-    """Return (retval_name, call_expr_str) if node is a retval Statement; else None."""
-    if not isinstance(node, Statement):
-        return None
-    m = _RE_RETVAL_STMT.match(node.text)
-    if m:
-        return (m.group(1), m.group(2))
+    """Return (retval_name, call_expr) if node is a TypedAssign retval node; else None."""
+    if isinstance(node, TypedAssign) and isinstance(node.rhs, Call):
+        return (node.lhs.name, node.rhs)
     return None
 
 
@@ -929,7 +925,7 @@ def _propagate_values(nodes: List[HIRNode],
             if rv is None:
                 i += 1
                 continue
-            retval_name, call_expr_str = rv
+            retval_name, call_expr = rv
             remaining = live[i + 1:]
             total_uses = _count_name_uses_in_nodes(retval_name, remaining)
 
@@ -938,24 +934,14 @@ def _propagate_values(nodes: List[HIRNode],
                 for j, tgt in enumerate(remaining):
                     if _count_reg_uses_in_node(retval_name, tgt) == 1:
                         abs_j = i + 1 + j
-                        # Inline: build new node.
                         if (isinstance(tgt, Assign)
                                 and isinstance(tgt.rhs, (NameExpr, RegExpr))
                                 and tgt.rhs.name == retval_name):
-                            lhs_str = tgt.lhs.render() if isinstance(tgt.lhs, Expr) else str(tgt.lhs)
-                            live[abs_j] = Statement(tgt.ea,
-                                                    f"{lhs_str} = {call_expr_str};")
+                            live[abs_j] = Assign(tgt.ea, tgt.lhs, call_expr)
                         else:
-                            # Text substitution for Statement targets.
-                            new_node = _subst_reg_in_node(
-                                tgt, retval_name, NameExpr(call_expr_str))
+                            new_node = _subst_reg_in_node(tgt, retval_name, call_expr)
                             if new_node is not None:
-                                # Fix up: NameExpr renders with no parens; re-render
-                                # by doing a text sub on the resulting text.
-                                if isinstance(new_node, Statement):
-                                    live[abs_j] = new_node
-                                else:
-                                    live[abs_j] = new_node
+                                live[abs_j] = new_node
                         src_ea = hex(live[i].ea)
                         live[i] = None
                         dbg("typesimp",

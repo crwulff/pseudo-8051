@@ -20,7 +20,7 @@ owned by AccumRelayPattern.
 import re
 from typing import Dict, List, Optional
 
-from pseudo8051.ir.hir import HIRNode, Statement, Assign, CompoundAssign, ExprStmt, ReturnStmt, IfGoto, IfNode
+from pseudo8051.ir.hir import HIRNode, Assign, CompoundAssign, ExprStmt, ReturnStmt, IfGoto, IfNode
 from pseudo8051.ir.expr import Expr, Reg, Name, XRAMRef, BinOp, RegGroup, Const, Cast
 from pseudo8051.constants import dbg
 from pseudo8051.passes.patterns.base   import Pattern, Match, Simplify
@@ -286,21 +286,6 @@ class AccumFoldPattern(Pattern):
             if not (isinstance(cn, CompoundAssign)
                     and cn.lhs == Reg("A")
                     and not _contains_a(cn.rhs)):
-                # Statement fallback: "A op= rhs;"
-                if isinstance(cn, Statement):
-                    m_stmt = re.match(r'^A\s*(\+=|-=|\*=|&=|\|=|\^=|<<=|>>=)\s*(.+);$',
-                                      cn.text)
-                    if m_stmt:
-                        bin_op_stmt = _OP_WITHOUT_EQ.get(m_stmt.group(1))
-                        if bin_op_stmt is not None:
-                            rhs_node = _parse_simple_expr(m_stmt.group(2).strip())
-                            if rhs_node is not None and not _contains_a(rhs_node):
-                                a_expr = BinOp(a_expr, bin_op_stmt, rhs_node)
-                                if _pair_expr is not None:
-                                    _pair_expr = BinOp(_pair_expr, bin_op_stmt, rhs_node)
-                                num_compound += 1
-                                j += 1
-                                continue
                 # Safe interleaved: Assign to a non-accumulator register that
                 # doesn't read A.  Collect and re-emit in the output so that
                 # downstream pruning can handle them normally.
@@ -379,16 +364,6 @@ class AccumFoldPattern(Pattern):
                 and (num_compound > 0 or dptr_consumed)):
             dbg("typesimp", f"  [{hex(a_start_node.ea)}] accum_fold (ReturnStmt): folded {a_expr_subst.render()}")
             return (skipped + [ReturnStmt(a_start_node.ea, a_expr_subst)], j + 1)
-
-        # Statement terminal: "Rn = A;" — only if compound > 0 or DPTR consumed
-        if isinstance(terminal, Statement) and (num_compound > 0 or dptr_consumed):
-            m_term = re.match(r'^(\w+)\s*=\s*A;$', terminal.text)
-            if m_term and m_term.group(1) != "A":
-                target_name = m_term.group(1)
-                dbg("typesimp",
-                    f"  [{hex(a_start_node.ea)}] accum_fold (Stmt relay): folded {a_expr_subst.render()} into {target_name}")
-                return (skipped + [Statement(a_start_node.ea,
-                                             f"{target_name} = {a_expr_subst.render()};")], j + 1)
 
         # Carry-comparison terminal: A=val; A-=sub; if(C)/while(C) → if(val < sub)
         # After SUBB, carry is set iff the subtraction produced a borrow (val < sub unsigned).

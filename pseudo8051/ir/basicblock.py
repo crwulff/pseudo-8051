@@ -12,7 +12,8 @@ import ida_funcs
 import idc
 
 from pseudo8051.ir.instruction import Instruction
-from pseudo8051.ir.hir         import HIRNode, Statement, Label
+from pseudo8051.ir.hir         import HIRNode, Label, ReturnStmt, ExprStmt
+from pseudo8051.ir.expr        import Name, Call
 from pseudo8051.ir.cpstate     import CPState, propagate_insn
 
 
@@ -179,12 +180,7 @@ class BasicBlock:
                 continue
             stmts = instr.lift(state)
             propagate_insn(raw_insn, state)
-            for s in stmts:
-                if isinstance(s, str):
-                    # Legacy: wrap string result in Statement
-                    nodes.append(Statement(instr.ea, s))
-                else:
-                    nodes.append(s)
+            nodes.extend(stmts)
 
         # Fall-through tail call: append a synthetic call/return statement.
         ft = self._fallthrough_tail_call()
@@ -195,15 +191,16 @@ class BasicBlock:
             from pseudo8051.constants  import dbg
             if proto:
                 regs_list = _prs(proto)
-                args = ["".join(r) if r else "?" for r in regs_list]
-                call_expr = f"{target_name}({', '.join(args)})"
-                stmt = f"return {call_expr};" if proto.return_type != "void" \
-                       else f"{call_expr};"
+                args = [Name("".join(r)) if r else Name("?") for r in regs_list]
+                call_node = Call(target_name, args)
                 dbg("func", f"  fall-through tail call → {target_name}")
+                if proto.return_type != "void":
+                    nodes.append(ReturnStmt(ea, call_node))
+                else:
+                    nodes.append(ExprStmt(ea, call_node))
             else:
-                stmt = f"return {target_name}();  /* tail call */"
                 dbg("func", f"  fall-through tail call (no proto) → {target_name}")
-            nodes.append(Statement(ea, stmt))
+                nodes.append(ReturnStmt(ea, Call(target_name, []), comment="tail call"))
 
         return nodes
 

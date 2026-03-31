@@ -151,6 +151,7 @@ def _transform_default(node: HIRNode,
         return Statement(node.ea, new_text) if new_text != node.text else node
 
     if isinstance(node, Assign):
+        from pseudo8051.ir.hir import TypedAssign
         from pseudo8051.ir.expr import Reg as RegExpr, Name as NameExpr
         if isinstance(node.lhs, RegExpr) and node.lhs.name == "DPTR":
             sym = node.rhs.render()
@@ -159,6 +160,8 @@ def _transform_default(node: HIRNode,
                 return None
         new_rhs = _subst_expr(node.rhs, reg_map)
         if new_rhs is not node.rhs:
+            if isinstance(node, TypedAssign):
+                return TypedAssign(node.ea, node.type_str, node.lhs, new_rhs)
             return Assign(node.ea, node.lhs, new_rhs)
         return node
 

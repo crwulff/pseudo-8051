@@ -20,7 +20,7 @@ import re
 from collections import defaultdict
 from typing import List, Set, Optional, Tuple
 
-from pseudo8051.ir.hir      import (HIRNode, Statement, Assign, CompoundAssign, ExprStmt,
+from pseudo8051.ir.hir      import (HIRNode, Assign, CompoundAssign, ExprStmt,
                                     WhileNode, ForNode, DoWhileNode, Label, IfGoto, GotoStatement, IfNode)
 from pseudo8051.ir.expr     import Expr, Reg, Const, BinOp, UnaryOp
 from pseudo8051.passes      import OptimizationPass
@@ -28,13 +28,6 @@ from pseudo8051.constants import dbg
 
 from pseudo8051.ir.function   import Function
 from pseudo8051.ir.basicblock import BasicBlock
-
-
-# Regex to detect DJNZ-style conditional at the bottom of a loop body (legacy Statement)
-_RE_DJNZ = re.compile(r'^if \(--(\w+) != 0\) goto (\S+);$')
-
-# Regex to detect a simple register assignment: Rn = value; (legacy Statement)
-_RE_ASSIGN = re.compile(r'^(\w+) = (.+);$')
 
 
 _FLIP_OP = {"==": "!=", "!=": "==", "<": ">=", ">=": "<", ">": "<=", "<=": ">"}
@@ -57,10 +50,6 @@ def _is_djnz_node(node: HIRNode) -> Optional[str]:
             if (isinstance(lhs, UnaryOp) and lhs.op == "--" and not lhs.post
                     and isinstance(lhs.operand, Reg)):
                 return lhs.operand.name
-    if isinstance(node, Statement):
-        m = _RE_DJNZ.match(node.text)
-        if m:
-            return m.group(1)
     return None
 
 
@@ -135,10 +124,6 @@ def _node_to_update_if_writes(node: HIRNode, reg: str):
                 and isinstance(expr.operand, Reg)
                 and expr.operand.name == reg):
             return expr
-    if isinstance(node, Statement):
-        m = re.match(r'^(\w+)\s*(?:--|[+\-*/&|^]=)', node.text)
-        if m and m.group(1) == reg:
-            return node.text.rstrip(';').strip()
     return None
 
 
@@ -188,16 +173,6 @@ def _extract_dowhile_cond(tail: "BasicBlock", header: "BasicBlock",
         if target_ea in body_eas:
             return last.cond           # goto header → continue when true
         return _invert_cond(last.cond) # goto exit   → continue when not cond
-
-    if isinstance(last, Statement):
-        m = re.match(r'^if \((.+)\) goto (\S+?);$', last.text)
-        if m:
-            target_ea = label_map.get(m.group(2))
-            if target_ea is None:
-                return None
-            if target_ea in body_eas:
-                return m.group(1)
-            return _invert_cond(m.group(1))
 
     return None
 
@@ -253,8 +228,7 @@ class LoopStructurer(OptimizationPass):
         secondary_tails = []
         for t in tails:
             last = t.hir[-1] if t.hir else None
-            if last is None or isinstance(last, GotoStatement) or (
-                    isinstance(last, Statement) and last.text.startswith("goto ")):
+            if last is None or isinstance(last, GotoStatement):
                 primary_tail = t
             else:
                 secondary_tails.append(t)
@@ -277,10 +251,6 @@ class LoopStructurer(OptimizationPass):
         branch_node: Optional[HIRNode] = None
         for node in header.hir:
             if isinstance(node, (IfGoto, GotoStatement)):
-                branch_node = node
-                break
-            if isinstance(node, Statement) and (
-                    node.text.startswith("if ") or node.text.startswith("goto ")):
                 branch_node = node
                 break
             if isinstance(node, Label):
@@ -314,14 +284,6 @@ class LoopStructurer(OptimizationPass):
             if isinstance(branch_node, IfGoto):
                 cond: object = branch_node.cond  # Expr
                 branch_target = branch_node.label
-            elif isinstance(branch_node, Statement):
-                m = re.match(r'^if \((.+)\) goto (\S+?);$', branch_node.text)
-                if m:
-                    cond = m.group(1)
-                    branch_target = m.group(2)
-                else:
-                    dbg("loops", f"  → can't parse branch {branch_node.text!r}, skipping")
-                    return
             else:
                 dbg("loops", f"  → unhandled branch node type, skipping")
                 return
@@ -394,10 +356,6 @@ class LoopStructurer(OptimizationPass):
                     if blk is primary_tail and node is blk.hir[-1]:
                         if isinstance(node, (IfGoto, GotoStatement)):
                             continue
-                        if isinstance(node, Statement) and (
-                                node.text.startswith("goto ") or
-                                _RE_DJNZ.match(node.text)):
-                            continue
                     if isinstance(node, Label) and node.name == header.label:
                         continue
                     result.append(node)
@@ -424,10 +382,6 @@ class LoopStructurer(OptimizationPass):
                         if rem is primary_tail and node is rem.hir[-1]:
                             if isinstance(node, (IfGoto, GotoStatement)):
                                 break
-                            if isinstance(node, Statement) and (
-                                    node.text.startswith("goto ") or
-                                    _RE_DJNZ.match(node.text)):
-                                break
                         if isinstance(node, Label) and node.name == header.label:
                             continue
                         then_hir.append(node)
@@ -436,13 +390,6 @@ class LoopStructurer(OptimizationPass):
                 if isinstance(last, IfGoto):
                     inv = _invert_cond(last.cond)
                     result.append(IfNode(last.ea, inv, then_hir, []))
-                elif isinstance(last, Statement):
-                    m = re.match(r'^if \((.+)\) goto \S+;$', last.text)
-                    if m:
-                        inv = _invert_cond(m.group(1))
-                        result.append(IfNode(last.ea, inv, then_hir, []))
-                    else:
-                        result.extend(then_hir)
                 else:
                     result.extend(then_hir)
                 break   # all remaining blocks consumed
@@ -451,10 +398,6 @@ class LoopStructurer(OptimizationPass):
                 for node in blk.hir:
                     if blk is primary_tail and node is blk.hir[-1]:
                         if isinstance(node, (IfGoto, GotoStatement)):
-                            continue
-                        if isinstance(node, Statement) and (
-                                node.text.startswith("goto ") or
-                                _RE_DJNZ.match(node.text)):
                             continue
                     if isinstance(node, Label) and node.name == header.label:
                         continue
@@ -472,11 +415,7 @@ class LoopStructurer(OptimizationPass):
             if pred.start_ea in body_eas:   # skip back-edge predecessors
                 continue
             for node in reversed(pred.hir):
-                    if isinstance(node, Assign) and node.lhs == Reg(reg):
-                        return node.rhs.render()
-                    if isinstance(node, Statement):
-                        m = _RE_ASSIGN.match(node.text)
-                        if m and m.group(1) == reg:
-                            return m.group(2)
-                    break   # stop at first non-label node from the end
+                if isinstance(node, Assign) and node.lhs == Reg(reg):
+                    return node.rhs.render()
+                break   # stop at first non-label node from the end
         return None

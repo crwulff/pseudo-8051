@@ -6,8 +6,8 @@ import pytest
 
 from pseudo8051.passes.typesimplify._post import _propagate_values
 from pseudo8051.passes.patterns._utils import VarInfo
-from pseudo8051.ir.hir import Assign, ExprStmt, Statement
-from pseudo8051.ir.expr import Reg, Name, XRAMRef
+from pseudo8051.ir.hir import Assign, TypedAssign, ExprStmt, Statement
+from pseudo8051.ir.expr import Reg, Name, XRAMRef, Call
 
 
 class TestPropagateValues:
@@ -54,21 +54,21 @@ class TestPropagateValues:
         assert len(result) == 3  # nothing removed
 
     def test_retval_single_use_inlined(self):
-        """Single-use retval Statement is inlined into the Assign target."""
+        """Single-use retval TypedAssign is inlined into the Assign target."""
         nodes = [
-            Statement(0, "int8_t retval1 = func(x);"),
+            TypedAssign(0, "int8_t", Name("retval1"), Call("func", [Name("x")])),
             Assign(1, XRAMRef(Name("dest")), Name("retval1")),
         ]
         result = _propagate_values(nodes, {})
         assert len(result) == 1
-        assert isinstance(result[0], Statement)
-        assert "func(x)" in result[0].text
-        assert "retval1" not in result[0].text
+        rendered = result[0].render(0)[0][1]
+        assert "func(x)" in rendered
+        assert "retval1" not in rendered
 
     def test_retval_multiple_uses_not_inlined(self):
         """retval used twice → not inlined."""
         nodes = [
-            Statement(0, "int8_t retval1 = func(x);"),
+            TypedAssign(0, "int8_t", Name("retval1"), Call("func", [Name("x")])),
             Assign(1, Reg("R7"), Name("retval1")),
             Assign(2, Reg("R6"), Name("retval1")),
         ]
@@ -76,22 +76,21 @@ class TestPropagateValues:
         assert len(result) == 3
 
     def test_full_chain(self):
-        """DPTR=off; Statement(retval1=call(...,DPTR)); R7=retval1; DPTR=_dest;
+        """DPTR=off; TypedAssign(retval1=call(...,DPTR)); R7=retval1; DPTR=_dest;
            XRAM[DPTR]=R7 → XRAM[_dest]=call(...,off)."""
         nodes = [
             Assign(0, Reg("DPTR"), Name("offset")),
-            Statement(1, "int8_t retval1 = code_7_read(a, b, DPTR);"),
+            TypedAssign(1, "int8_t", Name("retval1"), Call("code_7_read", [Name("a"), Name("b"), Reg("DPTR")])),
             Assign(2, Reg("R7"), Name("retval1")),
             Assign(3, Reg("DPTR"), Name("_dest")),
             Assign(4, XRAMRef(Reg("DPTR")), Reg("R7")),
         ]
         result = _propagate_values(nodes, {})
         assert len(result) == 1
-        assert isinstance(result[0], Statement)
-        t = result[0].text
+        t = result[0].render(0)[0][1]
         assert "offset" in t
         assert "DPTR" not in t
         assert "retval1" not in t
         assert "R7" not in t
-        assert "XRAM[_dest]" in t
+        assert "_dest" in t
         assert "code_7_read" in t

@@ -227,13 +227,11 @@ class Function:
 
     def _walk_fix_returns(self, nodes: List[HIRNode],
                           ret_expr: str, ret_reg: str) -> None:
-        from pseudo8051.ir.hir import (Statement, ReturnStmt,
+        from pseudo8051.ir.hir import (ReturnStmt,
                                        IfNode, WhileNode, ForNode, DoWhileNode, SwitchNode)
         from pseudo8051.ir.expr import Reg
         for node in nodes:
-            if isinstance(node, Statement) and node.text == "return;":
-                node.text = f"return {ret_expr};"
-            elif isinstance(node, ReturnStmt) and node.value is None:
+            if isinstance(node, ReturnStmt) and node.value is None:
                 node.value = Reg(ret_reg)
             elif isinstance(node, IfNode):
                 self._walk_fix_returns(node.then_nodes, ret_expr, ret_reg)

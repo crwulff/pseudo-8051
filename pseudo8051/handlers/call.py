@@ -99,8 +99,7 @@ class RetiHandler(MnemonicHandler):
         return frozenset()
 
     def lift(self, insn, state=None) -> List[HIRNode]:
-        from pseudo8051.ir.hir import Statement
-        return [Statement(insn.ea, "return;  /* interrupt return */")]
+        return [ReturnStmt(insn.ea, comment="interrupt return")]
 
 
 class NopHandler(MnemonicHandler):

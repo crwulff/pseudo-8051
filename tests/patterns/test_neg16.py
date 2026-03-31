@@ -1,4 +1,5 @@
-from pseudo8051.ir.hir import Statement, Assign
+from pseudo8051.ir.hir import Assign, CompoundAssign
+from pseudo8051.ir.expr import Reg, Const, BinOp
 from pseudo8051.passes.patterns._utils import VarInfo
 from pseudo8051.passes.patterns.neg16 import Neg16Pattern
 
@@ -11,17 +12,17 @@ class TestNeg16Pattern:
 
     def _neg_nodes(self, r_lo="R7", r_hi="R6"):
         return [
-            Statement(0,  "C = 0;"),
-            Statement(2,  "A = 0;"),
-            Statement(4,  f"A -= {r_lo} + C;"),
-            Statement(6,  f"{r_lo} = A;"),
-            Statement(8,  "A = 0;"),
-            Statement(10, f"A -= {r_hi} + C;"),
-            Statement(12, f"{r_hi} = A;"),
+            Assign(0,  Reg("C"), Const(0)),
+            Assign(2,  Reg("A"), Const(0)),
+            CompoundAssign(4,  Reg("A"), "-=", BinOp(Reg(r_lo), "+", Reg("C"))),
+            Assign(6,  Reg(r_lo), Reg("A")),
+            Assign(8,  Reg("A"), Const(0)),
+            CompoundAssign(10, Reg("A"), "-=", BinOp(Reg(r_hi), "+", Reg("C"))),
+            Assign(12, Reg(r_hi), Reg("A")),
         ]
 
     def test_basic_neg16(self):
-        """7-statement SUBB negation collapses to 'x = -x;'."""
+        """7-node SUBB negation collapses to 'x = -x;'."""
         vinfo = VarInfo("x", "int16_t", ("R6", "R7"))
         reg_map = {"R6": vinfo, "R7": vinfo}
         nodes = self._neg_nodes()
@@ -54,13 +55,13 @@ class TestNeg16Pattern:
         vinfo = VarInfo("x", "int16_t", ("R6", "R7"))
         reg_map = {"R6": vinfo, "R7": vinfo}
         nodes = [
-            Statement(0,  "C = 0;"),
-            Statement(2,  "A = 0;"),
-            Statement(4,  "A -= R7 + C;"),
-            Statement(6,  "R6 = A;"),   # should be R7
-            Statement(8,  "A = 0;"),
-            Statement(10, "A -= R6 + C;"),
-            Statement(12, "R6 = A;"),
+            Assign(0,  Reg("C"), Const(0)),
+            Assign(2,  Reg("A"), Const(0)),
+            CompoundAssign(4,  Reg("A"), "-=", BinOp(Reg("R7"), "+", Reg("C"))),
+            Assign(6,  Reg("R6"), Reg("A")),   # should be R7
+            Assign(8,  Reg("A"), Const(0)),
+            CompoundAssign(10, Reg("A"), "-=", BinOp(Reg("R6"), "+", Reg("C"))),
+            Assign(12, Reg("R6"), Reg("A")),
         ]
         result = self._pat().match(nodes, 0, reg_map, _noop_simplify)
         assert result is None

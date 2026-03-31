@@ -19,7 +19,7 @@ from typing import Dict, List, Optional, Tuple, Union
 
 from pseudo8051.ir.hir import (
     HIRNode, Label, Assign, CompoundAssign, IfGoto, SwitchNode,
-    Statement, GotoStatement, BreakStmt, IfNode, WhileNode, ForNode, DoWhileNode, ReturnStmt)
+    GotoStatement, BreakStmt, IfNode, WhileNode, ForNode, DoWhileNode, ReturnStmt)
 from pseudo8051.ir.expr import Reg, Const, BinOp, Expr, UnaryOp
 from pseudo8051.ir.function   import Function
 from pseudo8051.ir.basicblock import BasicBlock
@@ -265,8 +265,7 @@ def _replace_goto_with_break(nodes: List[HIRNode],
         if isinstance(node, GotoStatement) and node.label == merge_label:
             result.append(BreakStmt(node.ea))
         elif isinstance(node, IfGoto) and node.label == merge_label:
-            result.append(Statement(node.ea,
-                                    f"if ({node.cond.render()}) break;"))
+            result.append(IfNode(node.ea, node.cond, [BreakStmt(node.ea)]))
         elif isinstance(node, IfNode):
             node.then_nodes = _replace_goto_with_break(node.then_nodes,
                                                         merge_label)
@@ -292,11 +291,6 @@ def _needs_break(body_nodes: List[HIRNode]) -> bool:
         return False
     if isinstance(last, BreakStmt):
         return False
-    if isinstance(last, Statement):
-        if last.text in ("break;", "return;"):
-            return False
-        if last.text.startswith("goto "):
-            return False
     return True
 
 

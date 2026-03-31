@@ -3,32 +3,22 @@ passes/patterns/reg_copy_group.py — RegCopyGroupPattern.
 
 Recognises a consecutive sequence of single-register copy statements that
 together copy a complete multi-byte variable into a new set of registers.
-
-Handles both Assign (expression-tree) and legacy Statement nodes.
 """
 
-import re
 from typing import Dict, List, Optional
 
-from pseudo8051.ir.hir import HIRNode, Statement, Assign
+from pseudo8051.ir.hir import HIRNode, Assign
 from pseudo8051.ir.expr import Reg
 from pseudo8051.constants import dbg
 from pseudo8051.passes.patterns.base   import Pattern, Match, Simplify
 from pseudo8051.passes.patterns._utils import VarInfo
 
 
-_RE_COPY = re.compile(r'^(\w+) = (\w+);$')
-
-
 def _as_reg_copy(node: HIRNode) -> Optional[tuple]:
-    """Return (dst_name, src_name) if node is a simple reg=reg copy; else None."""
+    """Return (dst_name, src_name) if node is a simple Reg=Reg copy; else None."""
     if isinstance(node, Assign):
         if isinstance(node.lhs, Reg) and isinstance(node.rhs, Reg):
             return (node.lhs.name, node.rhs.name)
-    if isinstance(node, Statement):
-        m = _RE_COPY.match(node.text)
-        if m:
-            return (m.group(1), m.group(2))
     return None
 
 

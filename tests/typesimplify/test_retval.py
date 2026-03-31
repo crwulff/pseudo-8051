@@ -1,12 +1,13 @@
 from pseudo8051.passes.typesimplify import TypeAwareSimplifier
 from pseudo8051.prototypes import PROTOTYPES, FuncProto, Param
-from pseudo8051.ir.hir import Statement
+from pseudo8051.ir.hir import Assign, TypedAssign
+from pseudo8051.ir.expr import Reg, RegGroup, Call
 
 from ..helpers import make_single_block_func
 
 
-def _texts(func):
-    return [n.text for n in func.hir if isinstance(n, Statement)]
+def _render_all(func):
+    return [n.render(0)[0][1] for n in func.hir]
 
 
 class TestRetvalRenaming:
@@ -17,11 +18,13 @@ class TestRetvalRenaming:
             return_regs=("R4", "R5", "R6", "R7"),
             params=[Param("arg", "uint16_t", ("R6", "R7"))],
         )
-        func = make_single_block_func("caller", ["R4R5R6R7 = callee(R6R7);"])
+        func = make_single_block_func("caller", [
+            Assign(0x1000, RegGroup(("R4", "R5", "R6", "R7")), Call("callee", [RegGroup(("R6", "R7"))])),
+        ])
         TypeAwareSimplifier().run(func)
-        texts = _texts(func)
-        assert len(texts) == 1
-        assert texts[0] == "uint32_t retval1 = callee(arg);"
+        rendered = _render_all(func)
+        assert len(rendered) == 1
+        assert rendered[0] == "uint32_t retval1 = callee(arg);"
 
     def test_u8_retval(self):
         """A = getter(); with no caller proto → A stays as-is (A excluded from callee regmap)."""
@@ -30,7 +33,9 @@ class TestRetvalRenaming:
             return_regs=("A",),
             params=[],
         )
-        func = make_single_block_func("user", ["A = getter();"])
+        func = make_single_block_func("user", [
+            Assign(0x1000, Reg("A"), Call("getter", [])),
+        ])
         TypeAwareSimplifier().run(func)
-        texts = _texts(func)
-        assert texts[0] == "A = getter();"
+        rendered = _render_all(func)
+        assert rendered[0] == "A = getter();"

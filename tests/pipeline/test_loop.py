@@ -1,4 +1,4 @@
-from pseudo8051.ir.hir import Statement, ForNode, WhileNode, DoWhileNode, IfNode, IfGoto, GotoStatement, CompoundAssign
+from pseudo8051.ir.hir import Statement, Assign, ForNode, WhileNode, DoWhileNode, IfNode, IfGoto, GotoStatement, CompoundAssign
 from pseudo8051.ir.expr import BinOp, Const, Reg, UnaryOp
 from pseudo8051.passes.loops import LoopStructurer, _dfs_back_edges
 
@@ -23,11 +23,11 @@ class TestLoopStructurer:
                              → [header (back-edge), after]
             after (0x1020):  (empty)
         """
-        init   = FakeBlock(0x1000, hir=[Statement(0x1000, "R7 = 5;")])
+        init   = FakeBlock(0x1000, hir=[Assign(0x1000, Reg("R7"), Const(5))])
         header = FakeBlock(0x1010, hir=[])
         body   = FakeBlock(0x1018, hir=[
             Statement(0x1018, "XRAM[S] = A;"),
-            Statement(0x101a, "if (--R7 != 0) goto label_1010;"),
+            IfGoto(0x101a, BinOp(UnaryOp("--", Reg("R7")), "!=", Const(0)), "label_1010"),
         ])
         after  = FakeBlock(0x1020, hir=[])
 
@@ -55,7 +55,7 @@ class TestLoopStructurer:
         """DJNZ loop without a detectable init value → WhileNode."""
         header = FakeBlock(0x1000, hir=[])
         body   = FakeBlock(0x1008, hir=[
-            Statement(0x1008, "if (--R7 != 0) goto label_1000;"),
+            IfGoto(0x1008, BinOp(UnaryOp("--", Reg("R7")), "!=", Const(0)), "label_1000"),
         ])
         after  = FakeBlock(0x1010, hir=[])
 
@@ -83,7 +83,7 @@ class TestLoopStructurer:
         """
         header = FakeBlock(0x1000, hir=[
             Statement(0x1000, "XRAM[S] = A;"),
-            Statement(0x1002, "if (C != 0) goto label_1000;"),
+            IfGoto(0x1002, BinOp(Reg("C"), "!=", Const(0)), "label_1000"),
         ])
         after  = FakeBlock(0x1010, hir=[])
 
@@ -96,7 +96,7 @@ class TestLoopStructurer:
         assert len(header.hir) == 1
         wn = header.hir[0]
         assert isinstance(wn, WhileNode)
-        assert wn.condition == "C != 0"
+        assert _cond_str(wn.condition) == "C != 0"
         assert len(wn.body_nodes) == 1
         assert wn.body_nodes[0].text == "XRAM[S] = A;"
 

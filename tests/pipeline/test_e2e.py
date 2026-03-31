@@ -1,4 +1,5 @@
-from pseudo8051.ir.hir import Statement, Assign
+from pseudo8051.ir.hir import Assign, CompoundAssign, ReturnStmt
+from pseudo8051.ir.expr import Reg, Const, Name, XRAMRef, BinOp, Call
 from pseudo8051.passes.typesimplify import TypeAwareSimplifier
 from pseudo8051.prototypes import PROTOTYPES, FuncProto, Param
 
@@ -9,7 +10,7 @@ class TestEndToEndPipeline:
 
     def test_accum_relay_with_param(self):
         """
-        Single block: ["A = R7;", "XRAM[PORT] = A;", "return;"]
+        Single block: A=R7; XRAM[PORT]=A; return;
         Proto: void f(uint8_t H) with H in R7.
         Expected hir after TypeAwareSimplifier: ["XRAM[PORT] = H;", "return;"]
         """
@@ -18,15 +19,17 @@ class TestEndToEndPipeline:
             params=[Param("H", "uint8_t", ("R7",))],
         )
         func = make_single_block_func("f", [
-            "A = R7;", "XRAM[PORT] = A;", "return;",
+            Assign(0x1000, Reg("A"), Reg("R7")),
+            Assign(0x1002, XRAMRef(Name("PORT")), Reg("A")),
+            ReturnStmt(0x1004, None),
         ])
         TypeAwareSimplifier().run(func)
 
-        texts = [n.text for n in func.hir if isinstance(n, Statement)]
-        assert "XRAM[PORT] = H;" in texts
-        assert "return;" in texts
-        assert "A = R7;" not in texts
-        assert "XRAM[PORT] = A;" not in texts
+        rendered = [t for n in func.hir for _, t in n.render()]
+        assert "XRAM[PORT] = H;" in rendered
+        assert "return;" in rendered
+        assert "A = R7;" not in rendered
+        assert "XRAM[PORT] = A;" not in rendered
 
     def test_const_group_no_proto(self):
         """
@@ -42,14 +45,17 @@ class TestEndToEndPipeline:
             ],
         )
         func = make_single_block_func("caller", [
-            "R4 = 0x00;", "R5 = 0x00;", "R6 = 0x5d;", "R7 = 0xc0;",
-            "return div32(R4R5R6R7, R0R1R2R3);",
+            Assign(0x1000, Reg("R4"), Const(0x00)),
+            Assign(0x1002, Reg("R5"), Const(0x00)),
+            Assign(0x1004, Reg("R6"), Const(0x5d)),
+            Assign(0x1006, Reg("R7"), Const(0xc0)),
+            ReturnStmt(0x1008, Call("div32", [Name("R4R5R6R7"), Name("R0R1R2R3")])),
         ])
         TypeAwareSimplifier().run(func)
 
-        texts = [n.text for n in func.hir if isinstance(n, Statement)]
-        assert any("0x00005dc0" in t for t in texts), \
-            f"Expected 0x00005dc0 in output, got: {texts}"
+        rendered = [t for n in func.hir for _, t in n.render()]
+        assert any("0x00005dc0" in t for t in rendered), \
+            f"Expected 0x00005dc0 in output, got: {rendered}"
 
     def test_neg16_in_pipeline(self):
         """7-statement SUBB negation in a single-block function → x = -x;"""
@@ -58,9 +64,13 @@ class TestEndToEndPipeline:
             params=[Param("x", "int16_t", ("R6", "R7"))],
         )
         func = make_single_block_func("neg_fn", [
-            "C = 0;",
-            "A = 0;", "A -= R7 + C;", "R7 = A;",
-            "A = 0;", "A -= R6 + C;", "R6 = A;",
+            Assign(0x1000, Reg("C"), Const(0)),
+            Assign(0x1002, Reg("A"), Const(0)),
+            CompoundAssign(0x1004, Reg("A"), "-=", BinOp(Reg("R7"), "+", Reg("C"))),
+            Assign(0x1006, Reg("R7"), Reg("A")),
+            Assign(0x1008, Reg("A"), Const(0)),
+            CompoundAssign(0x100a, Reg("A"), "-=", BinOp(Reg("R6"), "+", Reg("C"))),
+            Assign(0x100c, Reg("R6"), Reg("A")),
         ])
         TypeAwareSimplifier().run(func)
 

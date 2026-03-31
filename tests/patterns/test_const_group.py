@@ -31,7 +31,7 @@ class TestConstGroupPattern:
         replacement, new_i = result
         assert new_i == 5
         assert len(replacement) == 1
-        assert replacement[0].text == "uint32_t dividend = 0x00005dc0;"
+        assert replacement[0].render(0)[0][1] == "uint32_t dividend = 0x00005dc0;"
 
     def test_u32_fold_into_call(self):
         """Const group immediately followed by return with the pair → fold."""
@@ -60,7 +60,7 @@ class TestConstGroupPattern:
         ]
         result = self._pat().match(nodes, 0, reg_map, _noop_simplify)
         assert result is not None
-        assert result[0][0].text == "uint16_t val = 0x1234;"
+        assert result[0][0].render(0)[0][1] == "uint16_t val = 0x1234;"
 
     def test_no_fire_incomplete_group(self):
         """Only R6 loaded, R7 missing → no match."""

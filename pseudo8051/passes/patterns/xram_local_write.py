@@ -8,7 +8,7 @@ typed assignment.
 import re
 from typing import Dict, List, Optional, Tuple
 
-from pseudo8051.ir.hir import HIRNode, Statement, Assign, ExprStmt
+from pseudo8051.ir.hir import HIRNode, Assign, ExprStmt
 from pseudo8051.ir.expr import Reg, Name, XRAMRef, UnaryOp
 from pseudo8051.constants import dbg
 from pseudo8051.passes.patterns.base   import Pattern, Match, Simplify
@@ -119,6 +119,6 @@ class XRAMLocalWritePattern(Pattern):
                 else:
                     continue
             dbg("typesimp", f"  [{hex(nodes[i].ea)}] xram-local-write: {vinfo.name} = {value_str}")
-            return ([Statement(nodes[i].ea, f"{vinfo.name} = {value_str};")], end_i)
+            return ([Assign(nodes[i].ea, Name(vinfo.name), Name(value_str))], end_i)
 
         return None

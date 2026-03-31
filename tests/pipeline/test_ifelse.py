@@ -1,7 +1,13 @@
-from pseudo8051.ir.hir import Statement, IfNode
+from pseudo8051.ir.hir import Statement, IfNode, IfGoto, GotoStatement
+from pseudo8051.ir.expr import Reg, Const, Name, BinOp
 from pseudo8051.passes.ifelse import IfElseStructurer
 
 from ..helpers import FakeBlock, FakeFunction, connect
+
+
+def _cond_str(c) -> str:
+    """Return rendered string for a str-or-Expr condition."""
+    return c if isinstance(c, str) else c.render()
 
 
 class TestIfElseStructurer:
@@ -11,7 +17,7 @@ class TestIfElseStructurer:
         Block A → [B (true), C (false/merge)], B → C.
         Result: A.hir = [IfNode(cond, then=[...], else=[])]
         """
-        A = FakeBlock(0x1000, hir=[Statement(0x1000, "if (A != 0) goto label_b;")])
+        A = FakeBlock(0x1000, hir=[IfGoto(0x1000, BinOp(Reg("A"), "!=", Const(0)), "label_b")])
         B = FakeBlock(0x1010, hir=[Statement(0x1010, "R7 = 0;")], label="label_b")
         C = FakeBlock(0x1020, hir=[Statement(0x1020, "return;")])
 
@@ -25,7 +31,7 @@ class TestIfElseStructurer:
         assert len(A.hir) == 1
         node = A.hir[0]
         assert isinstance(node, IfNode)
-        assert node.condition == "A != 0"
+        assert _cond_str(node.condition) == "A != 0"
         assert len(node.then_nodes) == 1
         assert node.then_nodes[0].text == "R7 = 0;"
         assert node.else_nodes == []
@@ -35,7 +41,7 @@ class TestIfElseStructurer:
         """
         Block A → [B (true), D (false)], both converge at E.
         """
-        A = FakeBlock(0x1000, hir=[Statement(0x1000, "if (A != 0) goto label_b;")])
+        A = FakeBlock(0x1000, hir=[IfGoto(0x1000, BinOp(Reg("A"), "!=", Const(0)), "label_b")])
         B = FakeBlock(0x1010, hir=[Statement(0x1010, "R7 = 1;")], label="label_b")
         D = FakeBlock(0x1020, hir=[Statement(0x1020, "R7 = 2;")])
         E = FakeBlock(0x1030, hir=[Statement(0x1030, "return;")])
@@ -50,7 +56,7 @@ class TestIfElseStructurer:
 
         node = A.hir[0]
         assert isinstance(node, IfNode)
-        assert node.condition == "A != 0"
+        assert _cond_str(node.condition) == "A != 0"
         assert node.then_nodes[0].text == "R7 = 1;"
         assert node.else_nodes[0].text == "R7 = 2;"
 
@@ -68,7 +74,7 @@ class TestIfElseStructurer:
         When true arm is empty (jumps straight to merge), arms are swapped
         and condition is inverted so then_nodes is always non-empty.
         """
-        A = FakeBlock(0x1000, hir=[Statement(0x1000, "if (A != 0) goto label_c;")])
+        A = FakeBlock(0x1000, hir=[IfGoto(0x1000, BinOp(Reg("A"), "!=", Const(0)), "label_c")])
         B = FakeBlock(0x1010, hir=[Statement(0x1010, "R7 = 0;")])
         C = FakeBlock(0x1020, hir=[Statement(0x1020, "return;")], label="label_c")
 
@@ -81,7 +87,7 @@ class TestIfElseStructurer:
 
         node = A.hir[0]
         assert isinstance(node, IfNode)
-        assert "A != 0" in node.condition
+        assert "A != 0" in _cond_str(node.condition)
         assert node.then_nodes[0].text == "R7 = 0;"
         assert node.else_nodes == []
 
@@ -89,7 +95,7 @@ class TestIfElseStructurer:
         """
         False arm is a terminal block (no successors) — the 'if-with-exit' pattern.
         """
-        A = FakeBlock(0x1000, hir=[Statement(0x1000, "if (A != 0) goto label_b;")])
+        A = FakeBlock(0x1000, hir=[IfGoto(0x1000, BinOp(Reg("A"), "!=", Const(0)), "label_b")])
         C = FakeBlock(0x1010, hir=[Statement(0x1010, "return;")])
         B = FakeBlock(0x1020, hir=[Statement(0x1020, "R7 = 1;")], label="label_b")
 
@@ -101,8 +107,7 @@ class TestIfElseStructurer:
 
         node = A.hir[0]
         assert isinstance(node, IfNode)
-        assert "A != 0" in (node.condition if isinstance(node.condition, str)
-                            else node.condition.render())
+        assert "A != 0" in _cond_str(node.condition)
         assert len(node.then_nodes) == 1
         assert node.then_nodes[0].text == "return;"
         assert node.else_nodes == []
@@ -112,7 +117,7 @@ class TestIfElseStructurer:
         """
         False arm spans two blocks before terminating — multi-block dead-end path.
         """
-        A = FakeBlock(0x1000, hir=[Statement(0x1000, "if (A != 0) goto label_b;")])
+        A = FakeBlock(0x1000, hir=[IfGoto(0x1000, BinOp(Reg("A"), "!=", Const(0)), "label_b")])
         C = FakeBlock(0x1010, hir=[Statement(0x1010, "R6 = 0;")])
         D = FakeBlock(0x1020, hir=[Statement(0x1020, "return;")])
         B = FakeBlock(0x1030, hir=[Statement(0x1030, "R7 = 1;")], label="label_b")
@@ -126,8 +131,7 @@ class TestIfElseStructurer:
 
         node = A.hir[0]
         assert isinstance(node, IfNode)
-        assert "A != 0" in (node.condition if isinstance(node.condition, str)
-                            else node.condition.render())
+        assert "A != 0" in _cond_str(node.condition)
         texts = [n.text for n in node.then_nodes]
         assert "R6 = 0;" in texts
         assert "return;" in texts
@@ -137,13 +141,14 @@ class TestIfElseStructurer:
 
     def test_arm_goto_stripped_with_ida_label(self):
         """
-        Else arm ends with 'goto code_7_2cfa;' to the merge block.
+        Else arm ends with GotoStatement to the merge block.
         When the merge block has an IDA-assigned label, the goto must still be stripped.
         """
-        A = FakeBlock(0x1000, hir=[Statement(0x1000,
-                                             "if (A != 0) goto code_7_2cf8;")])
+        A = FakeBlock(0x1000, hir=[IfGoto(0x1000,
+                                          BinOp(Reg("A"), "!=", Const(0)),
+                                          "code_7_2cf8")])
         B = FakeBlock(0x1010, hir=[Statement(0x1010, "R7 = 1;"),
-                                   Statement(0x1012, "goto code_7_2cfa;")])
+                                   GotoStatement(0x1012, "code_7_2cfa")])
         C = FakeBlock(0x1020, hir=[Statement(0x1020, "R7 = 0;")],
                       label="code_7_2cf8")
         E = FakeBlock(0x1030, hir=[Statement(0x1030, "A = R7;")],
@@ -167,9 +172,9 @@ class TestIfElseStructurer:
         E's dead-end false arm (F, label 'label_f') is also the target of A's goto.
         E must NOT be structured (F cannot be absorbed), but A can be structured.
         """
-        A = FakeBlock(0x1000, hir=[Statement(0x1000, "if (X == 0) goto label_f;")])
+        A = FakeBlock(0x1000, hir=[IfGoto(0x1000, BinOp(Name("X"), "==", Const(0)), "label_f")])
         B = FakeBlock(0x1010, hir=[Statement(0x1010, "R7 = 1;")])
-        E = FakeBlock(0x1020, hir=[Statement(0x1020, "if (R7 != 0) goto label_g;")])
+        E = FakeBlock(0x1020, hir=[IfGoto(0x1020, BinOp(Reg("R7"), "!=", Const(0)), "label_g")])
         F = FakeBlock(0x1030, hir=[Statement(0x1030, "return;")], label="label_f")
         G = FakeBlock(0x1040, hir=[Statement(0x1040, "R7 = 2;")])
 

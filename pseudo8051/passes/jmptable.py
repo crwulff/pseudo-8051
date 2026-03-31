@@ -33,7 +33,7 @@ import ida_ua
 import ida_name
 
 from pseudo8051.ir.hir         import (HIRNode, Label, Assign, Statement,
-                                        SwitchNode)
+                                        SwitchNode, ComputedJump)
 from pseudo8051.ir.expr        import Reg, Const, BinOp, Expr
 from pseudo8051.ir.function    import Function
 from pseudo8051.ir.basicblock  import BasicBlock
@@ -57,9 +57,9 @@ def _find_jmp_hir_idx(block: BasicBlock) -> Optional[int]:
     2. Instruction mnemonic scan + EA match — works even when DefaultHandler
        fired (e.g. module not fully reloaded) and produced '/* JMP @A+... */'.
     """
-    # Strategy 1: literal text produced by JmpAtADptrHandler
+    # Strategy 1: ComputedJump node produced by JmpAtADptrHandler
     for i, node in enumerate(block.hir):
-        if isinstance(node, Statement) and node.text == "JMP @A+DPTR":
+        if isinstance(node, ComputedJump):
             return i
 
     # Strategy 2: find the JMP instruction by mnemonic, then match its EA

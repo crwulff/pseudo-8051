@@ -13,10 +13,9 @@ After all inner ifs are structured (reverse-EA order + repeat-until-stable),
 the pass removes Label nodes that are no longer targeted by any goto.
 """
 
-import re
 from typing import List, Optional, Tuple, Union
 
-from pseudo8051.ir.hir      import HIRNode, Statement, IfNode, WhileNode, ForNode, DoWhileNode, Label, IfGoto, GotoStatement, SwitchNode
+from pseudo8051.ir.hir      import HIRNode, IfNode, WhileNode, ForNode, DoWhileNode, Label, IfGoto, GotoStatement, SwitchNode
 from pseudo8051.ir.expr     import Expr, UnaryOp
 from pseudo8051.passes    import OptimizationPass
 from pseudo8051.constants import dbg
@@ -29,18 +28,10 @@ _Cond = Union[str, Expr]
 
 # ── Condition helpers ─────────────────────────────────────────────────────────
 
-def _extract_condition(text: str) -> Optional[Tuple[str, str]]:
-    """Parse 'if (cond) goto label;' → (cond_str, label) or None."""
-    m = re.match(r'^if \((.+)\) goto (\S+);$', text)
-    return (m.group(1), m.group(2)) if m else None
-
-
 def _extract_condition_node(node: HIRNode) -> Optional[Tuple[_Cond, str]]:
-    """Return (condition, label) from an IfGoto or conditional Statement, else None."""
+    """Return (condition, label) from an IfGoto node, else None."""
     if isinstance(node, IfGoto):
         return (node.cond, node.label)
-    if isinstance(node, Statement):
-        return _extract_condition(node.text)
     return None
 
 
@@ -169,12 +160,6 @@ def _build_arm_hir(blocks: List[BasicBlock], merge_label: str) -> List[HIRNode]:
                 continue
             if isinstance(node, IfGoto) and node.label == merge_label:
                 continue
-            if isinstance(node, Statement):
-                if node.text == f"goto {merge_label};":
-                    continue
-                parsed = _extract_condition(node.text)
-                if parsed and parsed[1] == merge_label:
-                    continue
             nodes.append(node)
 
     return nodes
@@ -190,13 +175,6 @@ def _collect_goto_targets(nodes: List[HIRNode]) -> set:
             targets.add(node.label)
         elif isinstance(node, IfGoto):
             targets.add(node.label)
-        elif isinstance(node, Statement):
-            if node.text.startswith("goto "):
-                targets.add(node.text[5:].rstrip(";"))
-            else:
-                parsed = _extract_condition(node.text)
-                if parsed:
-                    targets.add(parsed[1])
         elif isinstance(node, IfNode):
             targets |= _collect_goto_targets(node.then_nodes)
             targets |= _collect_goto_targets(node.else_nodes)

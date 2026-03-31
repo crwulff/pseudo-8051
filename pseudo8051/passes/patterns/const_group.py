@@ -8,7 +8,7 @@ Handles both Assign (expression-tree) and legacy Statement nodes.
 import re
 from typing import Dict, List, Optional, Tuple
 
-from pseudo8051.ir.hir import HIRNode, Statement, Assign, ReturnStmt, ExprStmt
+from pseudo8051.ir.hir import HIRNode, Statement, Assign, TypedAssign, ReturnStmt, ExprStmt
 from pseudo8051.ir.expr import Reg, Const, Name, RegGroup
 from pseudo8051.constants import dbg
 from pseudo8051.passes.patterns.base   import Pattern, Match, Simplify
@@ -158,6 +158,5 @@ class ConstGroupPattern(Pattern):
                     return ([folded_node], end_i + 1)
 
             # Declare with type
-            return ([Statement(nodes[i].ea,
-                               f"{vinfo.type} {vinfo.name} = {const_s};")], end_i)
+            return ([TypedAssign(nodes[i].ea, vinfo.type, Name(vinfo.name), const_expr)], end_i)
         return None

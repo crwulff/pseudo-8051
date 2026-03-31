@@ -5,7 +5,7 @@ passes/typesimplify/_regmap.py — Register-map construction and augmentation.
 import re
 from typing import Dict, List, Tuple
 
-from pseudo8051.ir.hir    import (HIRNode, Statement, Assign, ExprStmt, ReturnStmt,
+from pseudo8051.ir.hir    import (HIRNode, Assign, ExprStmt, ReturnStmt,
                                    IfNode, WhileNode, ForNode, DoWhileNode)
 from pseudo8051.constants import dbg
 from pseudo8051.passes.patterns._utils import (
@@ -14,8 +14,6 @@ from pseudo8051.passes.patterns._utils import (
 from pseudo8051.ir.expr import UnaryOp, BinOp, Call
 from pseudo8051.ir.function import Function
 from pseudo8051.prototypes  import FuncProto
-
-_RE_CALL_NAME = re.compile(r'\b([A-Za-z_]\w*)\(')
 
 # ── Standard 8051 calling-convention register assignment ─────────────────────
 
@@ -122,10 +120,7 @@ def _collect_call_names(hir: List[HIRNode]) -> set:
     """Recursively collect all called function names from HIR."""
     names: set = set()
     for node in hir:
-        if isinstance(node, Statement):
-            for m in _RE_CALL_NAME.finditer(node.text):
-                names.add(m.group(1))
-        elif isinstance(node, (Assign, ExprStmt, ReturnStmt)):
+        if isinstance(node, (Assign, ExprStmt, ReturnStmt)):
             expr = None
             if isinstance(node, Assign):
                 expr = node.rhs

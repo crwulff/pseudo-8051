@@ -94,6 +94,17 @@ class Assign(HIRNode):
         return [(self.ea, f"{self._ind(indent)}{_render_expr(self.lhs)} = {_render_expr(self.rhs)};")]
 
 
+class TypedAssign(Assign):
+    """type lhs = rhs;  — typed variable declaration (e.g. retval nodes)."""
+
+    def __init__(self, ea: int, type_str: str, lhs: Expr, rhs: Expr):
+        super().__init__(ea, lhs, rhs)
+        self.type_str = type_str
+
+    def render(self, indent: int = 0) -> List[Tuple[int, str]]:
+        return [(self.ea, f"{self._ind(indent)}{self.type_str} {_render_expr(self.lhs)} = {_render_expr(self.rhs)};")]
+
+
 class CompoundAssign(HIRNode):
     """lhs op= rhs;  e.g. A += rhs;"""
 
@@ -123,16 +134,18 @@ class ExprStmt(HIRNode):
 
 
 class ReturnStmt(HIRNode):
-    """return;  or  return expr;"""
+    """return;  or  return expr;  with optional trailing comment."""
 
-    def __init__(self, ea: int, value: Optional[Expr] = None):
+    def __init__(self, ea: int, value: Optional[Expr] = None, comment: str = ""):
         super().__init__(ea)
-        self.value = value
+        self.value   = value
+        self.comment = comment
 
     def render(self, indent: int = 0) -> List[Tuple[int, str]]:
+        suffix = f"  /* {self.comment} */" if self.comment else ""
         if self.value is None:
-            return [(self.ea, f"{self._ind(indent)}return;")]
-        return [(self.ea, f"{self._ind(indent)}return {_render_expr(self.value)};")]
+            return [(self.ea, f"{self._ind(indent)}return;{suffix}")]
+        return [(self.ea, f"{self._ind(indent)}return {_render_expr(self.value)};{suffix}")]
 
 
 class IfGoto(HIRNode):
@@ -186,6 +199,30 @@ class BreakStmt(HIRNode):
 
     def render(self, indent: int = 0) -> List[Tuple[int, str]]:
         return [(self.ea, f"{self._ind(indent)}break;")]
+
+
+class VarDecl(HIRNode):
+    """type name;  — forward declaration of a local variable."""
+
+    def __init__(self, ea: int, type_str: str, name: str,
+                 xram_sym: Optional[str] = None, xram_addr: Optional[int] = None):
+        super().__init__(ea)
+        self.type_str  = type_str
+        self.name      = name
+        self.xram_sym  = xram_sym
+        self.xram_addr = xram_addr
+
+    def render(self, indent: int = 0) -> List[Tuple[int, str]]:
+        comment = (f"  /* {self.xram_sym} @ {hex(self.xram_addr)} */"
+                   if self.xram_addr else "")
+        return [(self.ea, f"{self._ind(indent)}{self.type_str} {self.name};{comment}")]
+
+
+class ComputedJump(HIRNode):
+    """JMP @A+DPTR — computed table-jump placeholder; replaced by SwitchNode."""
+
+    def render(self, indent: int = 0) -> List[Tuple[int, str]]:
+        return [(self.ea, f"{self._ind(indent)}JMP @A+DPTR")]
 
 
 class Label(HIRNode):

@@ -1,4 +1,5 @@
-from pseudo8051.ir.hir import Statement
+from pseudo8051.ir.hir import Assign
+from pseudo8051.ir.expr import Reg
 from pseudo8051.passes.patterns._utils import VarInfo
 from pseudo8051.passes.patterns.reg_copy_group import RegCopyGroupPattern
 
@@ -17,10 +18,10 @@ class TestRegCopyGroupPattern:
             "R6": vinfo, "R7": vinfo,
         }
         nodes = [
-            Statement(0, "R0 = R4;"),
-            Statement(2, "R1 = R5;"),
-            Statement(4, "R2 = R6;"),
-            Statement(6, "R3 = R7;"),
+            Assign(0, Reg("R0"), Reg("R4")),
+            Assign(2, Reg("R1"), Reg("R5")),
+            Assign(4, Reg("R2"), Reg("R6")),
+            Assign(6, Reg("R3"), Reg("R7")),
         ]
         result = self._pat().match(nodes, 0, reg_map, _noop_simplify)
         assert result is not None
@@ -38,10 +39,10 @@ class TestRegCopyGroupPattern:
         reg_map = {"R4R5R6R7": vinfo, "R4": vinfo, "R5": vinfo,
                    "R6": vinfo, "R7": vinfo}
         nodes = [
-            Statement(0, "R0 = R7;"),  # starts from low byte
-            Statement(2, "R1 = R6;"),
-            Statement(4, "R2 = R5;"),
-            Statement(6, "R3 = R4;"),
+            Assign(0, Reg("R0"), Reg("R7")),   # starts from low byte
+            Assign(2, Reg("R1"), Reg("R6")),
+            Assign(4, Reg("R2"), Reg("R5")),
+            Assign(6, Reg("R3"), Reg("R4")),
         ]
         result = self._pat().match(nodes, 0, reg_map, _noop_simplify)
         assert result is None
@@ -51,7 +52,7 @@ class TestRegCopyGroupPattern:
         vinfo = VarInfo("local1", "uint16_t", ("R6", "R7"),
                         xram_sym="EXT_DC00")
         reg_map = {"R6R7": vinfo, "R6": vinfo, "R7": vinfo}
-        nodes = [Statement(0, "R0 = R6;"), Statement(2, "R1 = R7;")]
+        nodes = [Assign(0, Reg("R0"), Reg("R6")), Assign(2, Reg("R1"), Reg("R7"))]
         result = self._pat().match(nodes, 0, reg_map, _noop_simplify)
         assert result is None
 
@@ -60,8 +61,8 @@ class TestRegCopyGroupPattern:
         vinfo = VarInfo("retval1", "uint16_t", ("R6", "R7"))
         reg_map = {"R6R7": vinfo, "R6": vinfo, "R7": vinfo}
         nodes = [
-            Statement(0, "R0 = R6;"),
-            Statement(2, "R1 = R6;"),  # should be R7
+            Assign(0, Reg("R0"), Reg("R6")),
+            Assign(2, Reg("R1"), Reg("R6")),  # should be R7
         ]
         result = self._pat().match(nodes, 0, reg_map, _noop_simplify)
         assert result is None

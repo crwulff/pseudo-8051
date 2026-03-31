@@ -2,27 +2,15 @@
 passes/patterns/retval.py — RetvalPattern.
 
 Renames the return value of a function call to a fresh ``retvalN`` variable.
-Handles both Assign (expression-tree) and legacy Statement nodes.
 """
 
-import re
 from typing import Dict, List, Optional
 
-from pseudo8051.ir.hir import HIRNode, Statement, Assign
+from pseudo8051.ir.hir import HIRNode, Assign, TypedAssign
 from pseudo8051.ir.expr import Reg, Name, RegGroup, Call
 from pseudo8051.constants import dbg
 from pseudo8051.passes.patterns.base   import Pattern, Match, Simplify
-from pseudo8051.passes.patterns._utils import VarInfo, _replace_pairs, _replace_xram_syms
-
-_RE_CALL_STMT = re.compile(r'^(\w+) = ([A-Za-z_]\w*)\((.*)\);$', re.DOTALL)
-
-
-def _expr_to_str(expr) -> str:
-    """Render an expr or return str as-is."""
-    from pseudo8051.ir.expr import Expr as ExprCls
-    if isinstance(expr, ExprCls):
-        return expr.render()
-    return str(expr)
+from pseudo8051.passes.patterns._utils import VarInfo, _subst_all_expr
 
 
 class RetvalPattern(Pattern):
@@ -35,35 +23,15 @@ class RetvalPattern(Pattern):
               simplify: Simplify) -> Optional[Match]:
         node = nodes[i]
 
-        lhs_name = None
-        callee   = None
-        args_str = None
-
-        # ── Expr-tree path ────────────────────────────────────────────────
-        if isinstance(node, Assign):
-            lhs = node.lhs
-            rhs = node.rhs
-            if isinstance(rhs, Call):
-                callee   = rhs.func_name
-                args_str = ", ".join(_expr_to_str(a) for a in rhs.args)
-                if isinstance(lhs, (Reg, Name)):
-                    lhs_name = lhs.render()
-                elif isinstance(lhs, RegGroup):
-                    lhs_name = lhs.render()
-                else:
-                    lhs_name = lhs.render()
-
-        # ── Legacy Statement path ─────────────────────────────────────────
-        if lhs_name is None:
-            if not isinstance(node, Statement):
-                return None
-            m = _RE_CALL_STMT.match(node.text)
-            if not m:
-                return None
-            lhs_name, callee, args_str = m.group(1), m.group(2), m.group(3)
-
-        if lhs_name is None or callee is None:
+        if not isinstance(node, Assign) or isinstance(node, TypedAssign):
             return None
+        rhs = node.rhs
+        if not isinstance(rhs, Call):
+            return None
+
+        lhs = node.lhs
+        lhs_name = lhs.render()
+        callee   = rhs.func_name
 
         vinfo = reg_map.get(lhs_name)
         if not isinstance(vinfo, VarInfo):
@@ -84,7 +52,8 @@ class RetvalPattern(Pattern):
         counter[0] += 1
         retval_name = f"retval{n + 1}"
 
-        subst_args = _replace_pairs(_replace_xram_syms(args_str, reg_map), reg_map)
+        # Substitute args using the pre-retval reg_map (before return regs are remapped).
+        subst_call = _subst_all_expr(rhs, reg_map)
 
         new_info = VarInfo(retval_name, proto.return_type, proto.return_regs)
         pair = "".join(proto.return_regs)
@@ -96,6 +65,6 @@ class RetvalPattern(Pattern):
         if lhs_name in reg_map and lhs_name != pair:
             reg_map[lhs_name] = new_info
 
-        text = f"{proto.return_type} {retval_name} = {callee}({subst_args});"
-        dbg("typesimp", f"  retval: {text}")
-        return ([Statement(node.ea, text)], i + 1)
+        out_node: HIRNode = TypedAssign(node.ea, proto.return_type, Name(retval_name), subst_call)
+        dbg("typesimp", f"  retval: {out_node.render(0)[0][1]}")
+        return ([out_node], i + 1)

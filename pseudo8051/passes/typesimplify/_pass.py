@@ -2,7 +2,7 @@
 passes/typesimplify/_pass.py — TypeAwareSimplifier pass class.
 """
 
-from pseudo8051.ir.hir    import Statement
+from pseudo8051.ir.hir    import VarDecl
 from pseudo8051.passes    import OptimizationPass
 from pseudo8051.passes.patterns.mb_assign import collapse_mb_assigns
 from pseudo8051.passes.patterns._utils  import VarInfo
@@ -88,10 +88,7 @@ class TypeAwareSimplifier(OptimizationPass):
         if local_decls:
             local_decls.sort(key=lambda v: v.xram_sym)
             func.hir = [
-                Statement(func.ea,
-                          f"{v.type} {v.name};"
-                          + (f"  /* {v.xram_sym} @ {hex(v.xram_addr)} */"
-                             if v.xram_addr else ""))
+                VarDecl(func.ea, v.type, v.name, v.xram_sym, v.xram_addr)
                 for v in local_decls
             ] + func.hir
 

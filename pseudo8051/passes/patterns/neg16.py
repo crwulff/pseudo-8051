@@ -3,14 +3,11 @@ passes/patterns/neg16.py — Neg16Pattern.
 
 Collapses the 7-statement 8051 16-bit two's-complement negation into:
     var = -var;
-
-Handles both Assign (expression-tree) and legacy Statement nodes.
 """
 
-import re
 from typing import Dict, List, Optional
 
-from pseudo8051.ir.hir import HIRNode, Statement, Assign, CompoundAssign
+from pseudo8051.ir.hir import HIRNode, Assign, CompoundAssign
 from pseudo8051.ir.expr import Reg, Const, BinOp, UnaryOp, Name
 from pseudo8051.constants import dbg
 from pseudo8051.passes.patterns.base   import Pattern, Match, Simplify
@@ -18,12 +15,8 @@ from pseudo8051.passes.patterns._utils import VarInfo
 
 
 def _is_clr_zero(node: HIRNode, reg: str) -> bool:
-    """True if node clears reg to zero (Assign or Statement form)."""
-    if isinstance(node, Assign):
-        return node.lhs == Reg(reg) and node.rhs == Const(0)
-    if isinstance(node, Statement):
-        return re.match(rf'^{re.escape(reg)} = 0;$', node.text) is not None
-    return False
+    """True if node clears reg to zero."""
+    return isinstance(node, Assign) and node.lhs == Reg(reg) and node.rhs == Const(0)
 
 
 def _is_subb_reg(node: HIRNode) -> Optional[str]:
@@ -35,20 +28,12 @@ def _is_subb_reg(node: HIRNode) -> Optional[str]:
                 and node.rhs.rhs == Reg("C")
                 and isinstance(node.rhs.lhs, Reg)):
             return node.rhs.lhs.name
-    if isinstance(node, Statement):
-        m = re.match(r"^A -= (\w+) \+ C;", node.text)
-        if m:
-            return m.group(1)
     return None
 
 
 def _is_store_a(node: HIRNode, reg: str) -> bool:
     """True if node is 'reg = A;'."""
-    if isinstance(node, Assign):
-        return node.lhs == Reg(reg) and node.rhs == Reg("A")
-    if isinstance(node, Statement):
-        return node.text == f"{reg} = A;"
-    return False
+    return isinstance(node, Assign) and node.lhs == Reg(reg) and node.rhs == Reg("A")
 
 
 class Neg16Pattern(Pattern):
