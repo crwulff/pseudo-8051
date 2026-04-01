@@ -295,3 +295,191 @@ class TestMulABPairLookaheadInterleaved:
         node = replacement[0]
         assert isinstance(node, Assign)
         assert node.lhs == Reg("R7")
+
+
+class TestCjneCarryPattern:
+    """Tests for the CJNE no-op + JNC/JC combined terminal in AccumFoldPattern."""
+
+    def _match(self, nodes):
+        from pseudo8051.passes.patterns.accum_fold import AccumFoldPattern
+        return AccumFoldPattern().match(nodes, 0, {}, lambda ns, rm: ns)
+
+    def _cjne_ifgoto(self, ea, limit, label):
+        return IfGoto(ea, BinOp(Reg("A"), "!=", Const(limit)), label)
+
+    def _carry_ifgoto_jnc(self, ea, label):
+        return IfGoto(ea, UnaryOp("!", Reg("C"), post=False), label)
+
+    def _carry_ifgoto_jc(self, ea, label):
+        return IfGoto(ea, Reg("C"), label)
+
+    # ── Basic cases ───────────────────────────────────────────────────────────
+
+    def test_basic_jnc_no_downstream_a(self):
+        """A=R7; A+=2; if(A!=4) L; L: if(!C) target → if(R7+2 >= 4) target."""
+        from pseudo8051.ir.hir import Label
+        nodes = [
+            Assign(0x100, Reg("A"), Reg("R7")),
+            CompoundAssign(0x102, Reg("A"), "+=", Const(2)),
+            self._cjne_ifgoto(0x104, 4, "L"),
+            Label(0x106, "L"),
+            self._carry_ifgoto_jnc(0x106, "target"),
+        ]
+        result = self._match(nodes)
+        assert result is not None
+        repl, new_i = result
+        assert new_i == 5
+        assert len(repl) == 1
+        node = repl[0]
+        assert isinstance(node, IfGoto)
+        rendered = node.cond.render()
+        assert "R7" in rendered
+        assert ">=" in rendered
+        assert "4" in rendered
+        assert node.label == "target"
+
+    def test_basic_jc_lt(self):
+        """A=R7; A+=2; if(A!=4) L; L: if(C) target → if(R7+2 < 4) target."""
+        from pseudo8051.ir.hir import Label
+        nodes = [
+            Assign(0x100, Reg("A"), Reg("R7")),
+            CompoundAssign(0x102, Reg("A"), "+=", Const(2)),
+            self._cjne_ifgoto(0x104, 4, "L"),
+            Label(0x106, "L"),
+            self._carry_ifgoto_jc(0x106, "target"),
+        ]
+        result = self._match(nodes)
+        assert result is not None
+        repl, new_i = result
+        assert new_i == 5
+        node = repl[0]
+        assert isinstance(node, IfGoto)
+        rendered = node.cond.render()
+        assert "<" in rendered
+        assert "R7" in rendered
+        assert node.label == "target"
+
+    # ── ea preserved ─────────────────────────────────────────────────────────
+
+    def test_ea_from_a_start(self):
+        """Output IfGoto.ea matches A=... start node's ea."""
+        from pseudo8051.ir.hir import Label
+        nodes = [
+            Assign(0xDEAD, Reg("A"), Reg("R7")),
+            CompoundAssign(0xDEAE, Reg("A"), "+=", Const(2)),
+            self._cjne_ifgoto(0xDEB0, 4, "L"),
+            Label(0xDEB2, "L"),
+            self._carry_ifgoto_jnc(0xDEB2, "tgt"),
+        ]
+        result = self._match(nodes)
+        assert result is not None
+        node = result[0][0]
+        assert node.ea == 0xDEAD
+
+    # ── Re-emit A when used downstream ───────────────────────────────────────
+
+    def test_a_reemitted_when_downstream_uses_a(self):
+        """When a later node reads A, Assign(A, expr) is prepended."""
+        from pseudo8051.ir.hir import Label
+        nodes = [
+            Assign(0x100, Reg("A"), Reg("R7")),
+            CompoundAssign(0x102, Reg("A"), "+=", Const(2)),
+            self._cjne_ifgoto(0x104, 4, "L"),
+            Label(0x106, "L"),
+            self._carry_ifgoto_jnc(0x106, "target"),
+            Assign(0x108, Reg("DPL"), Reg("A")),   # downstream uses A
+        ]
+        result = self._match(nodes)
+        assert result is not None
+        repl, new_i = result
+        assert new_i == 5
+        assert len(repl) == 2
+        assert isinstance(repl[0], Assign)
+        assert repl[0].lhs == Reg("A")
+        assert "R7" in repl[0].rhs.render()
+        assert isinstance(repl[1], IfGoto)
+        assert ">=" in repl[1].cond.render()
+
+    def test_a_not_reemitted_when_not_used_downstream(self):
+        """No downstream A use → no extra Assign node."""
+        from pseudo8051.ir.hir import Label
+        nodes = [
+            Assign(0x100, Reg("A"), Reg("R7")),
+            CompoundAssign(0x102, Reg("A"), "+=", Const(2)),
+            self._cjne_ifgoto(0x104, 4, "L"),
+            Label(0x106, "L"),
+            self._carry_ifgoto_jnc(0x106, "target"),
+            Assign(0x108, Reg("DPL"), Reg("R5")),   # does NOT read A
+        ]
+        result = self._match(nodes)
+        assert result is not None
+        repl, _ = result
+        assert len(repl) == 1
+        assert isinstance(repl[0], IfGoto)
+
+    # ── No-match cases ────────────────────────────────────────────────────────
+
+    def test_no_match_label_mismatch(self):
+        """Label name differs from CJNE target → falls through to normal IfGoto."""
+        from pseudo8051.ir.hir import Label
+        nodes = [
+            Assign(0x100, Reg("A"), Reg("R7")),
+            CompoundAssign(0x102, Reg("A"), "+=", Const(2)),
+            self._cjne_ifgoto(0x104, 4, "L_cjne"),
+            Label(0x106, "L_other"),               # mismatch
+            self._carry_ifgoto_jnc(0x106, "target"),
+        ]
+        result = self._match(nodes)
+        # Falls through to normal IfGoto: condition has "!=" not ">="
+        if result is not None:
+            for node in result[0]:
+                if isinstance(node, IfGoto):
+                    assert ">=" not in node.cond.render()
+
+    def test_no_match_no_label_after_cjne(self):
+        """Missing Label node → no combined match."""
+        from pseudo8051.ir.hir import Label
+        nodes = [
+            Assign(0x100, Reg("A"), Reg("R7")),
+            CompoundAssign(0x102, Reg("A"), "+=", Const(2)),
+            self._cjne_ifgoto(0x104, 4, "L"),
+            # Label missing — carry IfGoto immediately follows
+            self._carry_ifgoto_jnc(0x106, "target"),
+        ]
+        result = self._match(nodes)
+        if result is not None:
+            for node in result[0]:
+                if isinstance(node, IfGoto):
+                    assert ">=" not in node.cond.render()
+
+    def test_no_match_carry_node_missing(self):
+        """Label present but next node is not a carry IfGoto."""
+        from pseudo8051.ir.hir import Label
+        nodes = [
+            Assign(0x100, Reg("A"), Reg("R7")),
+            CompoundAssign(0x102, Reg("A"), "+=", Const(2)),
+            self._cjne_ifgoto(0x104, 4, "L"),
+            Label(0x106, "L"),
+            Assign(0x106, Reg("DPL"), Reg("R0")),
+        ]
+        result = self._match(nodes)
+        if result is not None:
+            for node in result[0]:
+                if isinstance(node, IfGoto):
+                    assert ">=" not in node.cond.render()
+
+    def test_no_match_carry_cond_not_c(self):
+        """IfGoto after label uses non-carry condition → no combined match."""
+        from pseudo8051.ir.hir import Label
+        nodes = [
+            Assign(0x100, Reg("A"), Reg("R7")),
+            CompoundAssign(0x102, Reg("A"), "+=", Const(2)),
+            self._cjne_ifgoto(0x104, 4, "L"),
+            Label(0x106, "L"),
+            IfGoto(0x106, BinOp(Reg("R0"), "==", Const(0)), "target"),
+        ]
+        result = self._match(nodes)
+        if result is not None:
+            for node in result[0]:
+                if isinstance(node, IfGoto):
+                    assert ">=" not in node.cond.render()

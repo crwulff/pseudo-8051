@@ -20,14 +20,15 @@ owned by AccumRelayPattern.
 import re
 from typing import Dict, List, Optional
 
-from pseudo8051.ir.hir import HIRNode, Assign, CompoundAssign, ExprStmt, ReturnStmt, IfGoto, IfNode
-from pseudo8051.ir.expr import Expr, Reg, Name, XRAMRef, BinOp, RegGroup, Const, Cast
+from pseudo8051.ir.hir import HIRNode, Assign, CompoundAssign, ExprStmt, ReturnStmt, IfGoto, IfNode, Label
+from pseudo8051.ir.expr import Expr, Reg, Name, XRAMRef, BinOp, RegGroup, Const, Cast, UnaryOp
 from pseudo8051.constants import dbg
 from pseudo8051.passes.patterns.base   import Pattern, Match, Simplify
 from pseudo8051.passes.patterns._utils import (
     VarInfo,
     _subst_all_expr,
     _walk_expr,
+    _count_reg_uses_in_node,
 )
 
 # Map CompoundAssign op to the corresponding binary op
@@ -198,6 +199,81 @@ def _subst_a(expr: Expr, replacement: Expr) -> Expr:
     return _walk_expr(expr, _fn)
 
 
+def _carry_cmp_op(cond: Expr) -> Optional[str]:
+    """
+    If cond is Reg("C") (jc) return "<"; if UnaryOp("!", Reg("C")) (jnc) return ">=".
+    Else return None.
+    """
+    if cond == Reg("C"):
+        return "<"
+    if (isinstance(cond, UnaryOp) and cond.op == "!"
+            and cond.operand == Reg("C")):
+        return ">="
+    return None
+
+
+def _try_cjne_carry(nodes: List[HIRNode], j: int,
+                    terminal: HIRNode,
+                    a_expr_subst: Expr,
+                    a_start_node: HIRNode,
+                    skipped: List[HIRNode]) -> Optional["Match"]:
+    """
+    Detect the 8051 CJNE-no-op + JNC/JC terminal pattern:
+
+        IfGoto(A != LIMIT, label_L)   ← cjne (sets carry; jump is always to next insn)
+        Label(label_L)                ← confirms the branch is a no-op
+        IfGoto(!C / C, target)        ← jnc / jc uses the carry set by cjne
+
+    This is equivalent to:  if (A_new >= LIMIT) goto target;   (jnc)
+                       or:  if (A_new < LIMIT)  goto target;   (jc)
+
+    Returns the AccumFoldPattern Match tuple, or None if the pattern does not apply.
+
+    Also re-emits Assign(Reg("A"), a_expr_subst) before the IfGoto when A is read
+    by any subsequent node, so that downstream uses of A see the updated value.
+    """
+    if not (isinstance(terminal, IfGoto)
+            and isinstance(terminal.cond, BinOp)
+            and terminal.cond.op == "!="
+            and isinstance(terminal.cond.rhs, Const)
+            and _contains_a(terminal.cond)):
+        return None
+
+    limit      = terminal.cond.rhs
+    cjne_label = terminal.label
+    jj = j + 1
+
+    # Require a matching Label immediately after — confirms the branch is no-op
+    if not (jj < len(nodes)
+            and isinstance(nodes[jj], Label)
+            and nodes[jj].name == cjne_label):
+        return None
+    jj += 1   # skip the label
+
+    # Require IfGoto(C or !C, target)
+    if jj >= len(nodes) or not isinstance(nodes[jj], IfGoto):
+        return None
+    carry_node = nodes[jj]
+    cmp_op = _carry_cmp_op(carry_node.cond)
+    if cmp_op is None:
+        return None
+
+    new_cond = BinOp(a_expr_subst, cmp_op, limit)
+    new_if   = IfGoto(a_start_node.ea, new_cond, carry_node.label)
+
+    # Re-emit A = a_expr_subst when A is read by any later node,
+    # so that downstream uses (e.g. DPL = A) see the correct updated value.
+    result: List[HIRNode] = [new_if]
+    if any(_count_reg_uses_in_node("A", nodes[k]) > 0
+           for k in range(jj + 1, len(nodes))):
+        result = [Assign(a_start_node.ea, Reg("A"), a_expr_subst)] + result
+
+    dbg("typesimp",
+        f"  [{hex(a_start_node.ea)}] accum_fold (cjne+carry): "
+        f"{a_expr_subst.render()} {cmp_op} {limit.render()} → {carry_node.label}")
+    return (skipped + result, jj + 1)
+
+
 class AccumFoldPattern(Pattern):
     """Collapse A-expression chains into a single terminal node."""
 
@@ -312,6 +388,12 @@ class AccumFoldPattern(Pattern):
         terminal = nodes[j]
 
         a_expr_subst = _subst_all_expr(a_expr, reg_map)
+
+        # CJNE no-op + JNC/JC: IfGoto(A!=LIMIT, L) + Label(L) + IfGoto(!C/C, target)
+        cjne_result = _try_cjne_carry(nodes, j, terminal, a_expr_subst,
+                                      a_start_node, skipped)
+        if cjne_result is not None:
+            return cjne_result
 
         # IfGoto: substitute A in condition
         if isinstance(terminal, IfGoto) and _contains_a(terminal.cond):
