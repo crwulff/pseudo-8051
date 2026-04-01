@@ -502,6 +502,66 @@ class TestSwitchBodyAbsorber:
         assert b_def._absorbed
         assert not merge._absorbed
 
+    def test_identical_bodies_merged(self):
+        """Cases that map to different labels but identical body HIR are merged.
+
+        This happens when a JMP @A+DPTR table has multiple entries pointing at
+        the same code block but with different labels assigned.
+
+        Layout:
+          switch head: case 0 → label_a, case 1 → label_b, case 2 → label_c
+          b_a (label_a): R7 = 1; goto merge   ← same body as b_b
+          b_b (label_b): R7 = 1; goto merge   ← same body as b_a
+          b_c (label_c): R7 = 99; goto merge  ← distinct body
+          merge: return;
+
+        After absorption + dedup: cases 0 and 1 are merged into one entry.
+        """
+        merge = FakeBlock(0x3000, hir=[
+            Label(0x3000, "label_merge"),
+            ReturnStmt(0x3000),
+        ], label="label_merge")
+        b_c = FakeBlock(0x2020, hir=[
+            Label(0x2020, "label_c"),
+            Assign(0x2020, Reg("R7"), Const(99)),
+            GotoStatement(0x2022, "label_merge"),
+        ], label="label_c")
+        b_b = FakeBlock(0x2010, hir=[
+            Label(0x2010, "label_b"),
+            Assign(0x2010, Reg("R7"), Const(1)),
+            GotoStatement(0x2012, "label_merge"),
+        ], label="label_b")
+        b_a = FakeBlock(0x2000, hir=[
+            Label(0x2000, "label_a"),
+            Assign(0x2000, Reg("R7"), Const(1)),
+            GotoStatement(0x2002, "label_merge"),
+        ], label="label_a")
+        # Pre-built SwitchNode (as JmpTableStructurer would produce)
+        sw = SwitchNode(
+            ea=0x1000,
+            subject=Reg("R7"),
+            cases=[([0], "label_a"), ([1], "label_b"), ([2], "label_c")],
+            default_label=None,
+        )
+        head = FakeBlock(0x1000, hir=[sw])
+
+        connect(head, b_a); connect(head, b_b); connect(head, b_c)
+        connect(b_a, merge); connect(b_b, merge); connect(b_c, merge)
+
+        func = FakeFunction("sw_dedup", [head, b_a, b_b, b_c, merge])
+        SwitchBodyAbsorber().run(func)
+
+        sw_out = head.hir[0]
+        assert isinstance(sw_out, SwitchNode)
+
+        # Should have exactly 2 cases after merging 0 and 1
+        assert len(sw_out.cases) == 2, \
+            f"expected 2 cases after dedup, got {len(sw_out.cases)}: {sw_out.cases}"
+        case_map = {v: body for vals, body in sw_out.cases for v in vals}
+        assert set(case_map.keys()) == {0, 1, 2}
+        # Cases 0 and 1 share the same body list
+        assert case_map[0] is case_map[1], "cases 0 and 1 should share the same body"
+
 
 class TestSwitchNodeTypeSimplify:
     """TypeAwareSimplifier should substitute the SwitchNode subject and simplify case bodies."""

@@ -21,7 +21,8 @@ from collections import defaultdict
 from typing import List, Set, Optional, Tuple
 
 from pseudo8051.ir.hir      import (HIRNode, Assign, CompoundAssign, ExprStmt,
-                                    WhileNode, ForNode, DoWhileNode, Label, IfGoto, GotoStatement, IfNode)
+                                    WhileNode, ForNode, DoWhileNode, Label,
+                                    IfGoto, GotoStatement, IfNode)
 from pseudo8051.ir.expr     import Expr, Reg, Const, BinOp, UnaryOp
 from pseudo8051.passes      import OptimizationPass
 from pseudo8051.constants import dbg
@@ -31,6 +32,14 @@ from pseudo8051.ir.basicblock import BasicBlock
 
 
 _FLIP_OP = {"==": "!=", "!=": "==", "<": ">=", ">=": "<", ">": "<=", "<=": ">"}
+
+# Maps (lo_reg, hi_reg) → pair name for 16-bit DJNZ detection
+_DJNZ_PAIR = {
+    ("R7", "R6"): "R6R7",
+    ("R5", "R4"): "R4R5",
+    ("R3", "R2"): "R2R3",
+    ("R1", "R0"): "R0R1",
+}
 
 
 def _invert_cond(cond):
@@ -192,6 +201,15 @@ class LoopStructurer(OptimizationPass):
         # Identify all back-edges via DFS from the function entry block
         back_edges = _dfs_back_edges(func.entry_block)
 
+        # Also DFS from orphan blocks (no predecessors; e.g. switch case targets
+        # whose CFG predecessors IDA doesn't record for JMP @A+DPTR)
+        entry_ea = func.entry_block.start_ea
+        for block in func.blocks:
+            if (not getattr(block, "_absorbed", False)
+                    and block.start_ea != entry_ea
+                    and not block.predecessors):
+                back_edges.extend(_dfs_back_edges(block))
+
         if not back_edges:
             dbg("loops", "no back-edges found")
             return
@@ -261,25 +279,50 @@ class LoopStructurer(OptimizationPass):
         loop_ea = header.start_ea
 
         if djnz_reg is not None:
-            reg = djnz_reg
-            # Look for an immediate assignment before the loop for ForNode
-            init_val = self._find_init_value(header, body_eas, reg)
-            if init_val is not None:
-                dbg("loops", f"  → ForNode  reg={reg}  init={init_val}")
-                loop_node: HIRNode = ForNode(
-                    loop_ea,
-                    init=f"{reg} = {init_val}",
-                    condition=Reg(reg),
-                    update=UnaryOp("--", Reg(reg), post=False),
-                    body_nodes=body_hir,
-                )
+            reg = djnz_reg  # outer (hi) register
+
+            # Check for multi-byte DJNZ: branch_node is a DJNZ on the lo byte
+            # and the header itself is a secondary tail (lo-byte self-loop).
+            inner_reg = (_is_djnz_node(branch_node)
+                         if isinstance(branch_node, IfGoto) else None)
+            pair = None
+            if inner_reg and any(t is header for t in secondary_tails):
+                pair = _DJNZ_PAIR.get((inner_reg, reg))
+
+            if pair is not None:
+                dbg("loops", f"  → DoWhileNode (multi-byte DJNZ)  lo={inner_reg}  hi={reg}  pair={pair}")
+                cond_mb = BinOp(UnaryOp("--", Reg(pair), post=False), "!=", Const(0))
+                loop_node: HIRNode = DoWhileNode(loop_ea, cond_mb, header_stmts + body_hir)
+                header_stmts = []
             else:
-                dbg("loops", f"  → WhileNode (DJNZ)  reg={reg}")
-                loop_node = WhileNode(
-                    loop_ea,
-                    condition=BinOp(UnaryOp("--", Reg(reg), post=False), "!=", Const(0)),
-                    body_nodes=body_hir,
-                )
+                # Single-byte DJNZ.
+                # Self-loop (tail IS header): body lives in header_stmts; DJNZ is
+                # check-last so use DoWhileNode.
+                if primary_tail is header:
+                    djnz_body = header_stmts + body_hir
+                    header_stmts = []
+                    dbg("loops", f"  → DoWhileNode (DJNZ self-loop)  reg={reg}")
+                    cond_djnz = BinOp(UnaryOp("--", Reg(reg), post=False), "!=", Const(0))
+                    loop_node = DoWhileNode(loop_ea, cond_djnz, djnz_body)
+                else:
+                    # Separate body block — use ForNode when init is known, else WhileNode
+                    init_val = self._find_init_value(header, body_eas, reg)
+                    if init_val is not None:
+                        dbg("loops", f"  → ForNode  reg={reg}  init={init_val}")
+                        loop_node = ForNode(
+                            loop_ea,
+                            init=f"{reg} = {init_val}",
+                            condition=Reg(reg),
+                            update=UnaryOp("--", Reg(reg), post=False),
+                            body_nodes=body_hir,
+                        )
+                    else:
+                        dbg("loops", f"  → WhileNode (DJNZ)  reg={reg}")
+                        loop_node = WhileNode(
+                            loop_ea,
+                            condition=BinOp(UnaryOp("--", Reg(reg), post=False), "!=", Const(0)),
+                            body_nodes=body_hir,
+                        )
         elif branch_node is not None:
             if isinstance(branch_node, IfGoto):
                 cond: object = branch_node.cond  # Expr

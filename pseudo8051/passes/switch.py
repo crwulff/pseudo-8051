@@ -27,6 +27,11 @@ from pseudo8051.passes        import OptimizationPass
 from pseudo8051.constants     import dbg
 
 
+def _body_text(nodes: List[HIRNode]) -> List[str]:
+    """Return flat list of rendered text lines for a case body (for deduplication)."""
+    return [t for n in nodes for _, t in n.render()]
+
+
 def _label_for(block: BasicBlock) -> str:
     return block.label or f"label_{hex(block.start_ea).removeprefix('0x')}"
 
@@ -447,6 +452,22 @@ class SwitchBodyAbsorber(OptimizationPass):
             else:
                 new_cases.append((values, body))
         switch_node.cases = new_cases
+
+        # Merge cases whose assembled bodies are identical (e.g. multiple
+        # JMP-table entries pointing at the same target block)
+        deduped: List[Tuple[List[int], Union[str, List[HIRNode]]]] = []
+        for values, body in new_cases:
+            if isinstance(body, list):
+                for ev, eb in deduped:
+                    if isinstance(eb, list) and (
+                            eb is body or _body_text(eb) == _body_text(body)):
+                        ev.extend(values)
+                        break
+                else:
+                    deduped.append((list(values), body))
+            else:
+                deduped.append((list(values), body))
+        switch_node.cases = deduped
 
         # Handle default body
         if switch_node.default_label and isinstance(switch_node.default_label, str):

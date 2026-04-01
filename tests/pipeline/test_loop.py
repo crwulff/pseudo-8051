@@ -345,3 +345,81 @@ class TestLoopStructurer:
         wn = while_nodes[0]
         # !C inverted to C
         assert isinstance(wn.condition, Reg) and wn.condition.name == "C"
+
+    def test_djnz_in_orphan_block(self):
+        """
+        Loop inside a switch case body (orphan block — no predecessors).
+
+        LoopStructurer must also DFS from blocks that have no CFG predecessors
+        (e.g. JMP @A+DPTR switch case targets that IDA doesn't wire up).
+
+        Topology:
+            entry (0x1000): → b_case (but NO recorded predecessor edge on b_case)
+            b_case(0x2000): body; if (--R7 != 0) goto label_2000  [self-loop]
+                            → [b_case (back-edge), after (0x2010)]
+            after (0x2010): (empty)
+        """
+        after  = FakeBlock(0x2010, hir=[], label="label_after")
+        b_case = FakeBlock(0x2000, hir=[
+            Assign(0x2000, XRAMRef(Name("S")), Reg("A")),
+            IfGoto(0x2002, BinOp(UnaryOp("--", Reg("R7")), "!=", Const(0)), "label_2000"),
+        ], label="label_2000")
+        entry  = FakeBlock(0x1000, hir=[GotoStatement(0x1000, "label_2000")])
+
+        # entry → b_case exists logically, but b_case has no predecessor recorded
+        # (simulating IDA's behaviour for JMP @A+DPTR targets)
+        entry._succs.append(b_case)
+        # b_case self-loop and fall-through to after
+        b_case._succs.append(b_case)
+        b_case._succs.append(after)
+        b_case._preds.append(b_case)   # only self-loop pred; no entry pred
+        after._preds.append(b_case)
+
+        func = FakeFunction("orphan_loop", [entry, b_case, after])
+        LoopStructurer().run(func)
+
+        loop_nodes = [n for n in b_case.hir if isinstance(n, DoWhileNode)]
+        assert len(loop_nodes) == 1
+        dw = loop_nodes[0]
+        assert _cond_str(dw.condition) == "--R7 != 0"
+        assert len(dw.body_nodes) == 1
+        assert dw.body_nodes[0].render()[0][1] == "XRAM[S] = A;"
+
+    def test_multibyte_djnz_produces_dowhile(self):
+        """
+        Multi-byte DJNZ: header self-loops on --R7 and primary tail loops on --R6.
+        Together they decrement R6R7, so the result should be DoWhileNode(--R6R7 != 0).
+
+        Topology:
+            header (0x1000): body_op; if (--R7 != 0) goto label_1000  [back-edge]
+                             → [header (back-edge), tail (0x1010)]
+            tail   (0x1010): if (--R6 != 0) goto label_1000            [back-edge]
+                             → [header (back-edge), after (0x1020)]
+            after  (0x1020): (empty)
+
+        Expected: header.hir = [DoWhileNode(--R6R7 != 0, [body_op])]
+        """
+        after  = FakeBlock(0x1020, hir=[])
+        tail   = FakeBlock(0x1010, hir=[
+            IfGoto(0x1010, BinOp(UnaryOp("--", Reg("R6")), "!=", Const(0)), "label_1000"),
+        ])
+        header = FakeBlock(0x1000, hir=[
+            Assign(0x1000, XRAMRef(Name("S")), Reg("A")),
+            IfGoto(0x1002, BinOp(UnaryOp("--", Reg("R7")), "!=", Const(0)), "label_1000"),
+        ], label="label_1000")
+
+        connect(header, header)   # self-loop (lo-byte back-edge)
+        connect(header, tail)
+        connect(tail,   header)   # hi-byte back-edge
+        connect(tail,   after)
+
+        func = FakeFunction("multibyte_djnz", [header, tail, after])
+        LoopStructurer().run(func)
+
+        dw_nodes = [n for n in header.hir if isinstance(n, DoWhileNode)]
+        assert len(dw_nodes) == 1, f"expected DoWhileNode, got: {header.hir}"
+        dw = dw_nodes[0]
+        assert _cond_str(dw.condition) == "--R6R7 != 0"
+        assert len(dw.body_nodes) == 1
+        assert dw.body_nodes[0].render()[0][1] == "XRAM[S] = A;"
+        assert tail._absorbed
