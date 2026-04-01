@@ -54,6 +54,7 @@ _RELOAD_ORDER = [
     "pseudo8051.passes.patterns.xch_copy",
     "pseudo8051.passes.patterns.reg_inc",
     "pseudo8051.passes.patterns.accum_relay",
+    "pseudo8051.passes.patterns.rol_switch",
     "pseudo8051.passes.patterns.accum_fold",
     "pseudo8051.passes.patterns.mb_assign",
     "pseudo8051.passes.patterns",
