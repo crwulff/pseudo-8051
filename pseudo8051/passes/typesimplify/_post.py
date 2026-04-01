@@ -11,6 +11,7 @@ from pseudo8051.ir.hir    import (HIRNode, Assign, TypedAssign, CompoundAssign,
 from pseudo8051.constants import dbg
 from pseudo8051.passes.patterns._utils  import (
     VarInfo, _type_bytes, _byte_names, _walk_expr,
+    _count_reg_uses_in_node, _subst_reg_in_node,
 )
 from pseudo8051.ir.expr import (Expr, UnaryOp, BinOp, Const, Call, Paren,
                                  Reg as RegExpr, RegGroup as RegGroupExpr, Name as NameExpr,
@@ -687,80 +688,6 @@ def _fold_call_arg_pairs(nodes: List[HIRNode],
 
 
 
-
-
-def _count_reg_uses_in_node(r: str, node: HIRNode) -> int:
-    """Count read-position occurrences of Reg/Name(r) in node."""
-    count = [0]
-
-    def _fn(e: Expr) -> Expr:
-        if isinstance(e, (RegExpr, NameExpr)) and e.name == r:
-            count[0] += 1
-        return e
-
-    if isinstance(node, Assign):
-        _walk_expr(node.rhs, _fn)
-        # Also count in compound LHS (e.g. XRAMRef inner)
-        if not isinstance(node.lhs, (RegExpr, RegGroupExpr)):
-            _walk_expr(node.lhs, _fn)
-    elif isinstance(node, CompoundAssign):
-        _walk_expr(node.rhs, _fn)
-    elif isinstance(node, ExprStmt):
-        _walk_expr(node.expr, _fn)
-    elif isinstance(node, ReturnStmt) and node.value is not None:
-        _walk_expr(node.value, _fn)
-    elif isinstance(node, IfGoto):
-        _walk_expr(node.cond, _fn)
-    return count[0]
-
-
-def _subst_reg_in_node(node: HIRNode, r: str,
-                        replacement: Expr) -> Optional[HIRNode]:
-    """
-    Replace Reg/Name(r) → replacement in read positions of node.
-    Returns updated node, or None if r does not appear.
-    """
-    def _fn(e: Expr) -> Expr:
-        if isinstance(e, (RegExpr, NameExpr)) and e.name == r:
-            return replacement
-        return e
-
-    if isinstance(node, Assign):
-        new_rhs = _walk_expr(node.rhs, _fn)
-        new_lhs = node.lhs
-        if not isinstance(node.lhs, (RegExpr, RegGroupExpr)):
-            new_lhs = _walk_expr(node.lhs, _fn)
-        if new_rhs is node.rhs and new_lhs is node.lhs:
-            return None
-        if isinstance(node, TypedAssign):
-            return TypedAssign(node.ea, node.type_str, new_lhs, new_rhs)
-        return Assign(node.ea, new_lhs, new_rhs)
-
-    if isinstance(node, CompoundAssign):
-        new_rhs = _walk_expr(node.rhs, _fn)
-        if new_rhs is node.rhs:
-            return None
-        return CompoundAssign(node.ea, node.lhs, node.op, new_rhs)
-
-    if isinstance(node, ExprStmt):
-        new_expr = _walk_expr(node.expr, _fn)
-        if new_expr is node.expr:
-            return None
-        return ExprStmt(node.ea, new_expr)
-
-    if isinstance(node, ReturnStmt) and node.value is not None:
-        new_val = _walk_expr(node.value, _fn)
-        if new_val is node.value:
-            return None
-        return ReturnStmt(node.ea, new_val)
-
-    if isinstance(node, IfGoto):
-        new_cond = _walk_expr(node.cond, _fn)
-        if new_cond is node.cond:
-            return None
-        return IfGoto(node.ea, new_cond, node.label)
-
-    return None
 
 
 def _subst_reg_in_scope(nodes: List[HIRNode], reg: str,

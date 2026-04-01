@@ -140,17 +140,23 @@ def _transform_default(node: HIRNode,
 
     if isinstance(node, Assign):
         from pseudo8051.ir.hir import TypedAssign
-        from pseudo8051.ir.expr import Reg as RegExpr, Name as NameExpr
+        from pseudo8051.ir.expr import Reg as RegExpr, Name as NameExpr, RegGroup as RegGroupExpr
         if isinstance(node.lhs, RegExpr) and node.lhs.name == "DPTR":
             sym = node.rhs.render()
             if any(v.xram_sym == sym for v in reg_map.values()
                    if isinstance(v, VarInfo) and v.xram_sym):
                 return None
+        # Substitute inside indirect LHS references (IRAMRef/XRAMRef pointer
+        # registers should be renamed just like any other read position).
+        # Simple Reg/RegGroup LHS are write destinations — do not substitute.
+        new_lhs = node.lhs
+        if not isinstance(node.lhs, (RegExpr, RegGroupExpr)):
+            new_lhs = _subst_expr(node.lhs, reg_map)
         new_rhs = _subst_expr(node.rhs, reg_map)
-        if new_rhs is not node.rhs:
+        if new_lhs is not node.lhs or new_rhs is not node.rhs:
             if isinstance(node, TypedAssign):
-                return TypedAssign(node.ea, node.type_str, node.lhs, new_rhs)
-            return Assign(node.ea, node.lhs, new_rhs)
+                return TypedAssign(node.ea, node.type_str, new_lhs, new_rhs)
+            return Assign(node.ea, new_lhs, new_rhs)
         return node
 
     if isinstance(node, CompoundAssign):

@@ -20,13 +20,18 @@ from pseudo8051.passes.patterns.mb_add           import MultiByteAddPattern
 from pseudo8051.passes.patterns.mb_incdec        import MultiByteIncDecPattern, IfNodeIncDecPattern
 from pseudo8051.passes.patterns.retval           import RetvalPattern
 from pseudo8051.passes.patterns.reg_copy_group   import RegCopyGroupPattern
+from pseudo8051.passes.patterns.reg_inc          import RegPostIncPattern, RegPreIncPattern
 from pseudo8051.passes.patterns.accum_relay      import AccumRelayPattern
 from pseudo8051.passes.patterns.accum_fold       import AccumFoldPattern
+from pseudo8051.passes.patterns.xch_copy         import XchCopyPattern
 
 _PATTERNS: List[Pattern] = [
     SignBitTestPattern(),
     RetvalPattern(),           # rename call return → retvalN; updates reg_map
     RegCopyGroupPattern(),     # propagate retval across reg copies; drops copy stmts
+    XchCopyPattern(),          # before RegPostInc: handles multi-DPTR++ XCH-swap ROM→XRAM copy
+    RegPostIncPattern(),       # any node using Rn once + Rn++/-- → embed post-op
+    RegPreIncPattern(),        # Rn++/-- + any node using Rn once → embed pre-op
     AccumRelayPattern(),       # collapse A=expr; target=A; → target=expr;
     AccumFoldPattern(),        # collapse A-chain + IfGoto/IfNode/Assign terminal
     MultiByteAddPattern(),     # before XRAMLocalWrite: consumes the whole ADD+ADDC sequence
