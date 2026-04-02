@@ -25,15 +25,24 @@ class FakeBlock:
         self._absorbed      = False
         self._preds: List[FakeBlock] = []
         self._succs: List[FakeBlock] = []
+        self._succ_extra: List[FakeBlock] = []
+        self._pred_extra: List[FakeBlock] = []
         self._block_map: dict = {}    # set by FakeFunction.__init__
 
     @property
     def predecessors(self) -> List[FakeBlock]:
-        return self._preds
+        return self._preds + self._pred_extra
 
     @property
     def successors(self) -> List[FakeBlock]:
-        return self._succs
+        return self._succs + self._succ_extra
+
+    def _add_successor(self, other: FakeBlock) -> None:
+        """Add a synthetic CFG edge self → other."""
+        if other not in self._succ_extra:
+            self._succ_extra.append(other)
+        if self not in other._pred_extra:
+            other._pred_extra.append(self)
 
 
 class FakeFunction:

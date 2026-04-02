@@ -96,4 +96,4 @@ class TypeAwareSimplifier(OptimizationPass):
         ret_regs = tuple(proto.return_regs) if proto and proto.return_regs \
                    else tuple(getattr(func, "return_registers", []))
         if ret_regs:
-            func.hir = _fold_return_chains(func.hir, ret_regs)
+            func.hir = _fold_return_chains(func.hir, ret_regs, reg_map)

@@ -180,6 +180,10 @@ def propagate_insn(insn, state: CPState) -> None:
             if op0_name == "A":
                 state.kill("A")
 
+    elif mnem == "MOVC":
+        # MOVC A, @A+DPTR / MOVC A, @A+PC — reading from code ROM kills A
+        state.kill("A")
+
     elif mnem == "MOVX":
         # MOVX A, @DPTR / MOVX A, @Ri — reading from XRAM kills A
         if op0.type == ida_ua.o_reg:

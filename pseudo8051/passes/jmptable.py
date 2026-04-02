@@ -308,6 +308,37 @@ def _try_jmptable(func: Function, block: BasicBlock) -> bool:
     return True
 
 
+def fixup_jmptable_edges(func: Function) -> None:
+    """
+    For every JMP @A+DPTR block whose IDA successors are empty, read the
+    jump table from code memory and inject synthetic CFG edges so that
+    passes running before JmpTableStructurer see a correct graph.
+
+    Requires block.hir to be populated (runs after initial_hir()).
+    """
+    for block in func.blocks:
+        if block.successors:          # IDA already has edges — nothing to do
+            continue
+        jmp_idx = _find_jmp_hir_idx(block)
+        if jmp_idx is None:
+            continue
+        table_ea = _get_table_ea(block, jmp_idx)
+        if table_ea is None:
+            continue
+        page_base = block.start_ea & ~0xFFFF
+        cases, stride = _read_jump_table(table_ea, page_base, func)
+        if not cases:
+            continue
+        dbg("switch", f"fixup_jmptable_edges: block {hex(block.start_ea)} "
+                      f"table @ {hex(table_ea)} → {len(cases)} edges stride={stride}")
+        for i in range(len(cases)):
+            entry_ea = table_ea + i * stride
+            sjmp_blk = func._block_map.get(entry_ea)
+            if sjmp_blk is not None:
+                block._add_successor(sjmp_blk)
+                dbg("switch", f"  {hex(block.start_ea)} → {hex(sjmp_blk.start_ea)}")
+
+
 class JmpTableStructurer(OptimizationPass):
     """
     Detect JMP @A+DPTR indirect-jump switch dispatch and replace with SwitchNode.

@@ -25,7 +25,7 @@ def run_all_passes(func: Function) -> None:
     from pseudo8051.analysis.liveness   import LivenessAnalysis
     from pseudo8051.passes.rmw          import RMWCollapser
     from pseudo8051.passes.loops        import LoopStructurer
-    from pseudo8051.passes.jmptable     import JmpTableStructurer
+    from pseudo8051.passes.jmptable     import JmpTableStructurer, fixup_jmptable_edges
     from pseudo8051.passes.switch       import SwitchStructurer, SwitchBodyAbsorber
     from pseudo8051.passes.ifelse       import IfElseStructurer
 
@@ -38,6 +38,8 @@ def run_all_passes(func: Function) -> None:
 
     from pseudo8051.passes.chunk_inline import ChunkInliner
     ChunkInliner().run(func)
+
+    fixup_jmptable_edges(func)
 
     from pseudo8051.passes.annotate import AnnotationPass
     AnnotationPass().run(func)

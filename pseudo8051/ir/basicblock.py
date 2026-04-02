@@ -52,17 +52,30 @@ class BasicBlock:
         self._upward_use:   Optional[frozenset] = None
         self._defined:      Optional[frozenset] = None
 
+        # ── Synthetic CFG edges (injected by fixup_jmptable_edges) ────────
+        self._succ_extra: List[BasicBlock] = []
+        self._pred_extra: List[BasicBlock] = []
+
     # ── Graph edges ───────────────────────────────────────────────────────
 
     @property
     def predecessors(self) -> List[BasicBlock]:
-        return [self._block_map[p.start_ea] for p in self._ida_block.preds()
+        base = [self._block_map[p.start_ea] for p in self._ida_block.preds()
                 if p.start_ea in self._block_map]
+        return base + self._pred_extra
 
     @property
     def successors(self) -> List[BasicBlock]:
-        return [self._block_map[s.start_ea] for s in self._ida_block.succs()
+        base = [self._block_map[s.start_ea] for s in self._ida_block.succs()
                 if s.start_ea in self._block_map]
+        return base + self._succ_extra
+
+    def _add_successor(self, other: BasicBlock) -> None:
+        """Add a synthetic CFG edge self → other (not present in IDA's graph)."""
+        if other not in self._succ_extra:
+            self._succ_extra.append(other)
+        if self not in other._pred_extra:
+            other._pred_extra.append(self)
 
     # ── Instruction list (cached) ─────────────────────────────────────────
 
