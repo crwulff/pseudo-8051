@@ -130,6 +130,10 @@ class Function:
         from pseudo8051.passes.typesimplify import TypeAwareSimplifier
         TypeAwareSimplifier().run(self)
 
+        # ── Switch case enum annotations ──────────────────────────────────
+        from pseudo8051.passes.switchcomment import SwitchCaseAnnotator
+        SwitchCaseAnnotator().run(self)
+
     # ── Block graph accessors ─────────────────────────────────────────────
 
     @property

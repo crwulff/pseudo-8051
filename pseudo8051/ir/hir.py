@@ -401,12 +401,14 @@ class SwitchNode(HIRNode):
     def __init__(self, ea: int, subject: Expr,
                  cases: List[Tuple[List[int], Union[str, List['HIRNode']]]],
                  default_label: Optional[str] = None,
-                 default_body: Optional[List['HIRNode']] = None):
+                 default_body: Optional[List['HIRNode']] = None,
+                 case_comments: Optional[List[Optional[str]]] = None):
         super().__init__(ea)
         self.subject       = subject
         self.cases         = cases
         self.default_label = default_label
         self.default_body  = default_body
+        self.case_comments: List[Optional[str]] = case_comments or []
 
     def map_bodies(self, fn: Callable[[List[HIRNode]], List[HIRNode]]) -> "SwitchNode":
         new_cases = [
@@ -414,19 +416,32 @@ class SwitchNode(HIRNode):
             for vals, body in self.cases
         ]
         new_default_body = fn(self.default_body) if isinstance(self.default_body, list) else self.default_body
-        return SwitchNode(self.ea, self.subject, new_cases, self.default_label, new_default_body)
+        return SwitchNode(self.ea, self.subject, new_cases, self.default_label, new_default_body,
+                          case_comments=list(self.case_comments))
 
     def render(self, indent: int = 0) -> List[Tuple[int, str]]:
         ind  = self._ind(indent)
         ind1 = self._ind(indent + 1)
         lines: List[Tuple[int, str]] = []
         lines.append((self.ea, f"{ind}switch ({_render_expr(self.subject)}) {{"))
-        for values, body in self.cases:
-            case_prefix = " ".join(f"case {v}:" for v in values)
-            if isinstance(body, str):
-                lines.append((self.ea, f"{ind1}{case_prefix} goto {body};"))
+        # Pre-compute case prefixes and find max width for comment alignment.
+        prefixes = [" ".join(f"case {v}:" for v in values)
+                    for values, _ in self.cases]
+        commented = [i for i in range(len(self.cases))
+                     if i < len(self.case_comments) and self.case_comments[i]]
+        comment_col = (max(len(prefixes[i]) for i in commented) + 2
+                       if commented else 0)
+        for i, (values, body) in enumerate(self.cases):
+            case_prefix = prefixes[i]
+            if i < len(self.case_comments) and self.case_comments[i]:
+                pad = " " * (comment_col - len(case_prefix))
+                comment = f"{pad}// {self.case_comments[i]}"
             else:
-                lines.append((self.ea, f"{ind1}{case_prefix}"))
+                comment = ""
+            if isinstance(body, str):
+                lines.append((self.ea, f"{ind1}{case_prefix} goto {body};{comment}"))
+            else:
+                lines.append((self.ea, f"{ind1}{case_prefix}{comment}"))
                 for node in body:
                     lines.extend(node.render(indent + 2))
         if self.default_body is not None:

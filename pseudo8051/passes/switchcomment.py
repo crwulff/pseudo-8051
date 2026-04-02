@@ -1,0 +1,246 @@
+"""
+passes/switchcomment.py — SwitchCaseAnnotator: add enum comments to case labels.
+
+For switch subjects that are bitfield combinations of parameters with enum types,
+this pass computes per-case comments of the form:
+
+    case 4:  // dest_type == PtrType_RAM_FE && src_type == PtrType_Code
+
+For merged cases with multiple values the comment uses set notation:
+
+    case 0: case 2: case 8: case 10:
+        // dest_type in {PtrType_RAM_FE, PtrType_RAM_00} && src_type in {PtrType_RAM_FE, PtrType_RAM_00}
+
+Runs after TypeAwareSimplifier so variable names are already resolved in the HIR.
+"""
+
+from __future__ import annotations
+
+from typing import Dict, List, Optional, Tuple
+
+from pseudo8051.ir.hir  import (HIRNode, SwitchNode, Assign,
+                                 IfNode, WhileNode, DoWhileNode, ForNode)
+from pseudo8051.ir.expr import Expr, Reg, Const, BinOp, Name
+from pseudo8051.passes  import OptimizationPass
+from pseudo8051.constants import dbg
+
+
+# ── Subject decomposition ─────────────────────────────────────────────────────
+
+def _parse_or_terms(expr: Expr) -> List[Expr]:
+    """Split expr on '|' recursively → flat list of additive terms."""
+    if isinstance(expr, BinOp) and expr.op == "|":
+        return _parse_or_terms(expr.lhs) + _parse_or_terms(expr.rhs)
+    return [expr]
+
+
+def _extract_reg_shift(term: Expr) -> Optional[Tuple[str, int]]:
+    """
+    Reg(x)                       → (x, 0)
+    BinOp(Reg(x), '<<', Const(k)) → (x, k)
+    Anything else                → None
+    """
+    if isinstance(term, Reg):
+        return (term.name, 0)
+    if (isinstance(term, BinOp) and term.op == "<<"
+            and isinstance(term.lhs, Reg)
+            and isinstance(term.rhs, Const)):
+        return (term.lhs.name, term.rhs.value)
+    return None
+
+
+def _decompose_bitfield_subject(expr: Expr) -> Optional[List[Tuple[str, int]]]:
+    """
+    Return [(reg_name, shift), …] if expr is a pure bitfield-OR of registers,
+    sorted by shift descending, or None if the pattern doesn't match.
+
+    E.g. A<<2 | DPL  →  [("A", 2), ("DPL", 0)]
+    """
+    terms = _parse_or_terms(expr)
+    components = []
+    for t in terms:
+        rs = _extract_reg_shift(t)
+        if rs is None:
+            return None
+        components.append(rs)
+    if not components:
+        return None
+    components.sort(key=lambda c: c[1], reverse=True)
+    return components
+
+
+# ── Context scanning ──────────────────────────────────────────────────────────
+
+def _find_last_assign(nodes: List[HIRNode], reg_name: str) -> Optional[Assign]:
+    """
+    Return the last Assign(Reg(reg_name), rhs) in a flat node list, or None.
+    Only looks at top-level Assign nodes (not inside if/loop bodies).
+    """
+    result = None
+    for node in nodes:
+        if (isinstance(node, Assign)
+                and isinstance(node.lhs, Reg)
+                and node.lhs.name == reg_name):
+            result = node
+    return result
+
+
+def _extract_linear(rhs: Expr) -> Tuple[Optional[str], int]:
+    """
+    Try to parse rhs as  Name ± Const  and return (name, addend_to_get_param).
+
+    Name("x") + Const(k)  → ("x", -k)   param = reg_val - k
+    Const(k) + Name("x")  → ("x", -k)
+    Name("x") - Const(k)  → ("x",  k)   param = reg_val + k
+    Name("x")             → ("x",  0)
+    Else                  → (None, 0)
+    """
+    if isinstance(rhs, Name):
+        return (rhs.name, 0)
+    if isinstance(rhs, BinOp):
+        if rhs.op == "+":
+            if isinstance(rhs.lhs, Name) and isinstance(rhs.rhs, Const):
+                return (rhs.lhs.name, -rhs.rhs.value)
+            if isinstance(rhs.rhs, Name) and isinstance(rhs.lhs, Const):
+                return (rhs.rhs.name, -rhs.lhs.value)
+        if rhs.op == "-":
+            if isinstance(rhs.lhs, Name) and isinstance(rhs.rhs, Const):
+                return (rhs.lhs.name, rhs.rhs.value)
+    return (None, 0)
+
+
+# ── Comment generation ────────────────────────────────────────────────────────
+
+def _field_mask(components: List[Tuple[str, int]], idx: int) -> int:
+    """
+    Compute the bit mask for component[idx] given its shift and the next
+    component's shift.  The highest-shift component uses mask 0xFF.
+    """
+    _, shift = components[idx]
+    if idx == 0:                     # highest shift (components sorted desc)
+        return 0xFF
+    _, next_shift = components[idx - 1]
+    return (1 << (next_shift - shift)) - 1
+
+
+def _case_comment(
+    values: List[int],
+    components: List[Tuple[str, int]],   # sorted descending by shift
+    reg_info: Dict[str, Tuple[str, int, str]],  # reg → (param_name, addend, type)
+    get_enum_name,
+) -> Optional[str]:
+    """
+    Build a comment string for a case group.
+
+    For single-value groups:
+        dest_type == PtrType_RAM_FE && src_type == PtrType_Code
+
+    For multi-value groups, collect the set of enum names for each component:
+        dest_type in {PtrType_RAM_FE, PtrType_RAM_00} && src_type in {PtrType_RAM_FE, PtrType_RAM_00}
+    """
+    # per-component: set of enum names seen across all case values
+    component_names: List[Tuple[str, set]] = []   # [(param_name, {enum_name, …}), …]
+    for idx, (reg_name, shift) in enumerate(components):
+        param_name, addend, type_str = reg_info[reg_name]
+        mask  = _field_mask(components, idx)
+        names: set = set()
+        for v in values:
+            field_val = (v >> shift) & mask
+            param_val = (field_val + addend) & 0xFF
+            ename = get_enum_name(type_str, param_val)
+            if ename is None:
+                return None        # unknown enum value — skip entire comment
+            names.add(ename)
+        component_names.append((param_name, names))
+
+    parts = []
+    for param_name, names in component_names:
+        sorted_names = sorted(names)
+        if len(sorted_names) == 1:
+            parts.append(f"{param_name} == {sorted_names[0]}")
+        else:
+            joined = ", ".join(sorted_names)
+            parts.append(f"{param_name} in {{{joined}}}")
+    return " && ".join(parts)
+
+
+# ── Pass ──────────────────────────────────────────────────────────────────────
+
+class SwitchCaseAnnotator(OptimizationPass):
+    """
+    Walk func.hir after TypeAwareSimplifier and fill SwitchNode.case_comments
+    for switches whose subject is a bitfield combination of enum-typed parameters.
+    """
+
+    def run(self, func) -> None:
+        from pseudo8051.prototypes import get_proto, get_enum_name
+        proto = get_proto(func.name)
+        if proto is None:
+            dbg("switch", f"SwitchCaseAnnotator: no proto for {func.name!r}, skipping")
+            return
+        name_type: Dict[str, str] = {p.name: p.type for p in proto.params}
+        dbg("switch", f"SwitchCaseAnnotator: {func.name!r} name_type={name_type}")
+        if not name_type:
+            return
+        self._walk(func.hir, [], name_type, get_enum_name)
+
+    # ── recursive HIR walker ──────────────────────────────────────────────────
+
+    def _walk(self, nodes: List[HIRNode], context: List[HIRNode],
+              name_type: Dict[str, str], get_enum_name) -> None:
+        for i, node in enumerate(nodes):
+            preceding = context + list(nodes[:i])
+            if isinstance(node, SwitchNode):
+                self._annotate(node, preceding, name_type, get_enum_name)
+                for _, body in node.cases:
+                    if isinstance(body, list):
+                        self._walk(body, preceding, name_type, get_enum_name)
+                if isinstance(node.default_body, list):
+                    self._walk(node.default_body, preceding, name_type, get_enum_name)
+            elif isinstance(node, IfNode):
+                self._walk(node.then_nodes, preceding, name_type, get_enum_name)
+                self._walk(node.else_nodes, preceding, name_type, get_enum_name)
+            elif isinstance(node, (WhileNode, DoWhileNode, ForNode)):
+                self._walk(node.body_nodes, preceding, name_type, get_enum_name)
+
+    # ── per-switch annotation ─────────────────────────────────────────────────
+
+    def _annotate(self, sw: SwitchNode, context: List[HIRNode],
+                  name_type: Dict[str, str], get_enum_name) -> None:
+        subj_str = sw.subject.render() if hasattr(sw.subject, "render") else repr(sw.subject)
+        dbg("switch", f"SwitchCaseAnnotator: subject={subj_str!r}")
+
+        components = _decompose_bitfield_subject(sw.subject)
+        if not components:
+            dbg("switch", f"  → subject not a pure bitfield-OR of registers, skipping")
+            return
+        dbg("switch", f"  components={components}")
+
+        # For each (reg, shift) component, find its linear assignment in context
+        reg_info: Dict[str, Tuple[str, int, str]] = {}
+        for reg_name, _ in components:
+            asgn = _find_last_assign(context, reg_name)
+            if asgn is None:
+                dbg("switch", f"  → no assignment found for reg {reg_name!r} in context, skipping")
+                return
+            asgn_str = asgn.rhs.render() if hasattr(asgn.rhs, "render") else repr(asgn.rhs)
+            dbg("switch", f"  {reg_name} = {asgn_str}")
+            param_name, addend = _extract_linear(asgn.rhs)
+            if param_name is None:
+                dbg("switch", f"  → rhs not linear (Name ± Const), skipping")
+                return
+            type_str = name_type.get(param_name)
+            if type_str is None:
+                dbg("switch", f"  → param {param_name!r} not in prototype, skipping")
+                return
+            dbg("switch", f"  {reg_name} → param={param_name!r} addend={addend} type={type_str!r}")
+            reg_info[reg_name] = (param_name, addend, type_str)
+
+        comments: List[Optional[str]] = []
+        for values, _ in sw.cases:
+            c = _case_comment(values, components, reg_info, get_enum_name)
+            dbg("switch", f"  case {values} → comment={c!r}")
+            comments.append(c)
+
+        if any(c is not None for c in comments):
+            sw.case_comments = comments

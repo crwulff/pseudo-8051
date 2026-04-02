@@ -395,6 +395,42 @@ def _proto_from_ida(name: str) -> Optional["FuncProto"]:
 PROTOTYPES: dict = {}
 
 
+# ── Enum registry ─────────────────────────────────────────────────────────────
+# Maps enum type name → {integer_value: "symbolic_name"}.
+# Used by SwitchCaseAnnotator to annotate case labels.
+# IDA's own enum definitions are also consulted automatically as a fallback.
+#
+# Example:
+#   ENUMS["PtrType"] = {0xFE: "PtrType_RAM_FE", 0xFF: "PtrType_Code",
+#                       0x00: "PtrType_RAM_00", 0x01: "PtrType_XRAM"}
+
+ENUMS: dict = {}
+
+
+def get_enum_name(type_str: str, value: int) -> Optional[str]:
+    """
+    Return the symbolic name for *value* in enum *type_str*, or None.
+
+    Checks ENUMS first (manual overrides), then falls back to IDA's enum API.
+    """
+    manual = ENUMS.get(type_str)
+    if manual is not None:
+        return manual.get(value)
+    # IDA 9.0 enum fallback (ida_enum was removed; use idc)
+    try:
+        import idc
+        eid = idc.get_enum(type_str)
+        if eid == idc.BADADDR:
+            return None
+        # BADADDR used as bmask selects non-bitmask (regular) enum members
+        cid = idc.get_enum_member(eid, value, 0, idc.BADADDR)
+        if cid != idc.BADADDR:
+            return idc.get_enum_member_name(cid)
+    except Exception as exc:
+        dbg("proto", f"get_enum_name({type_str!r}, {hex(value)}): {exc}")
+    return None
+
+
 def get_proto(name: str) -> Optional[FuncProto]:
     """
     Look up a function prototype by IDA name.

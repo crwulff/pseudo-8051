@@ -63,6 +63,7 @@ _RELOAD_ORDER = [
     "pseudo8051.passes.typesimplify._post",
     "pseudo8051.passes.typesimplify._pass",
     "pseudo8051.passes.typesimplify",
+    "pseudo8051.passes.switchcomment",
     "pseudo8051.analysis.constprop",
     "pseudo8051.analysis.liveness",
     "pseudo8051.ir.cpstate",
