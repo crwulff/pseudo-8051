@@ -248,7 +248,7 @@ def _arm_blocks_sw(start: BasicBlock, merge_ea: int) -> List[BasicBlock]:
         for succ in blk.successors:
             if succ.start_ea not in visited:
                 queue.append(succ)
-    return sorted(result, key=lambda b: b.start_ea)
+    return result
 
 def _merge_ea_from_labels(labels: List[str], label_to_block: dict,
                           branch_ea: int) -> Optional[int]:
