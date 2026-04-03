@@ -57,13 +57,23 @@ class LcallHandler(MnemonicHandler):
             args = []
             for p, regs in zip(proto.params, p_regs):
                 if regs:
-                    # Use CPState constant for single-register params when available
                     if state is not None and len(regs) == 1:
+                        # Single-byte param: use CP constant when known
                         val = state.get(regs[0])
                         if val is not None:
                             args.append(Const(val))
                             continue
-                    args.append(Name("".join(regs)))
+                    elif state is not None and len(regs) > 1:
+                        # Multi-byte param: use combined constant when ALL bytes known
+                        vals = [state.get(r) for r in regs]
+                        if all(v is not None for v in vals):
+                            combined = 0
+                            for v in vals:
+                                combined = (combined << 8) | (v & 0xFF)
+                            args.append(Const(combined))
+                            continue
+                    # Use RegGroup (not Name) so _subst_pairs_in_expr can rename it
+                    args.append(RegGroup(regs) if len(regs) > 1 else Name("".join(regs)))
                 else:
                     args.append(Name(p.name))
             call_node = Call(callee, args)

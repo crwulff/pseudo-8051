@@ -91,6 +91,10 @@ def _effective_map(node: HIRNode, base_eff: Dict[str, VarInfo]) -> Dict[str, Var
         eff.setdefault(r, vi)
     for r, vi in ann.call_arg_ann.items():
         eff.setdefault(r, vi)
+    # Merge callee_args so the call node's RegGroup/Reg args get renamed to param names
+    if ann.callee_args:
+        for r, vi in ann.callee_args.items():
+            eff.setdefault(r, vi)
     return eff
 
 
