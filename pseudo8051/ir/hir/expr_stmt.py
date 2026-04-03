@@ -4,7 +4,7 @@ ir/hir/expr_stmt.py — ExprStmt node.
 
 from typing import List, Tuple
 
-from pseudo8051.ir.hir._base import HIRNode, _render_expr, _ann_field
+from pseudo8051.ir.hir._base import HIRNode, _render_expr, _ann_field, _refs_from_expr
 from pseudo8051.ir.expr import Expr
 
 
@@ -17,6 +17,9 @@ class ExprStmt(HIRNode):
 
     def render(self, indent: int = 0) -> List[Tuple[int, str]]:
         return [(self.ea, f"{self._ind(indent)}{_render_expr(self.expr)};")]
+
+    def name_refs(self) -> frozenset:
+        return _refs_from_expr(self.expr)
 
     def ann_lines(self) -> List[str]:
         return ["ExprStmt"] + _ann_field("expr", self.expr)

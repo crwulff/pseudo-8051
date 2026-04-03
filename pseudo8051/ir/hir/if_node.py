@@ -38,6 +38,12 @@ class IfNode(HIRNode):
         lines.append((self.ea, f"{ind}}}"))
         return lines
 
+    def name_refs(self) -> frozenset:
+        return frozenset().union(*(n.name_refs() for n in self.then_nodes + self.else_nodes))
+
+    def replace_condition(self, new_cond) -> "IfNode":
+        return IfNode(self.ea, new_cond, self.then_nodes, self.else_nodes)
+
     def ann_lines(self) -> List[str]:
         return (["IfNode"] + _ann_field("cond", self.condition)
                 + [f"  then: {len(self.then_nodes)} nodes",

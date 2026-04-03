@@ -5,7 +5,7 @@ ir/hir/_base.py — NodeAnnotation, HIRNode ABC, and shared helpers.
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Tuple, Union
 
-from pseudo8051.ir.expr import Expr, Reg as _RegExpr, RegGroup as _RegGroupExpr
+from pseudo8051.ir.expr import Expr, Reg as _RegExpr, RegGroup as _RegGroupExpr, Name as _NameExpr
 
 if TYPE_CHECKING:
     from pseudo8051.passes.patterns._utils import VarInfo
@@ -56,9 +56,28 @@ class HIRNode(ABC):
         """Return annotation lines for this node (class name + fields)."""
         return [type(self).__name__]
 
+    def name_refs(self) -> frozenset:
+        """Collect all Reg/Name/RegGroup strings referenced in read positions in this node."""
+        return frozenset()
+
     @staticmethod
     def _ind(indent: int) -> str:
         return "    " * indent
+
+
+# ── Expression reference collection ──────────────────────────────────────────
+
+def _refs_from_expr(expr: Expr) -> frozenset:
+    """Collect all Reg/Name/RegGroup name strings referenced in read positions in expr."""
+    n = type(expr).__name__
+    if n in ("Reg", "Name"):
+        return frozenset({expr.name})
+    if n == "RegGroup":
+        return frozenset(expr.regs) | frozenset({"".join(expr.regs)})
+    children = expr.children()
+    if not children:
+        return frozenset()
+    return frozenset().union(*(_refs_from_expr(c) for c in children))
 
 
 # ── Expression rendering helper ───────────────────────────────────────────────

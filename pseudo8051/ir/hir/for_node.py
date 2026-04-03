@@ -53,6 +53,9 @@ class ForNode(HIRNode):
         lines.append((self.ea, f"{ind}}}"))
         return lines
 
+    def name_refs(self) -> frozenset:
+        return frozenset().union(*(n.name_refs() for n in self.body_nodes))
+
     def ann_lines(self) -> List[str]:
         return (["ForNode"] + _ann_field("init", self.init)
                 + _ann_field("cond", self.condition)

@@ -4,7 +4,7 @@ ir/hir/return_stmt.py — ReturnStmt node.
 
 from typing import List, Optional, Tuple
 
-from pseudo8051.ir.hir._base import HIRNode, _render_expr, _ann_field
+from pseudo8051.ir.hir._base import HIRNode, _render_expr, _ann_field, _refs_from_expr
 from pseudo8051.ir.expr import Expr
 
 
@@ -21,6 +21,9 @@ class ReturnStmt(HIRNode):
         if self.value is None:
             return [(self.ea, f"{self._ind(indent)}return;{suffix}")]
         return [(self.ea, f"{self._ind(indent)}return {_render_expr(self.value)};{suffix}")]
+
+    def name_refs(self) -> frozenset:
+        return _refs_from_expr(self.value) if self.value is not None else frozenset()
 
     def ann_lines(self) -> List[str]:
         return ["ReturnStmt"] + _ann_field("value", self.value)

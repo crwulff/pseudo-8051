@@ -4,8 +4,8 @@ ir/hir/assign.py — Assign and TypedAssign nodes.
 
 from typing import List, Tuple
 
-from pseudo8051.ir.hir._base import HIRNode, _render_expr, _ann_field, _lhs_written_regs
-from pseudo8051.ir.expr import Expr
+from pseudo8051.ir.hir._base import HIRNode, _render_expr, _ann_field, _lhs_written_regs, _refs_from_expr
+from pseudo8051.ir.expr import Expr, Reg as RegExpr, RegGroup as RegGroupExpr
 
 
 class Assign(HIRNode):
@@ -22,6 +22,12 @@ class Assign(HIRNode):
 
     def render(self, indent: int = 0) -> List[Tuple[int, str]]:
         return [(self.ea, f"{self._ind(indent)}{_render_expr(self.lhs)} = {_render_expr(self.rhs)};")]
+
+    def name_refs(self) -> frozenset:
+        refs = _refs_from_expr(self.rhs)
+        if not isinstance(self.lhs, (RegExpr, RegGroupExpr)):
+            refs = refs | _refs_from_expr(self.lhs)
+        return refs
 
     def ann_lines(self) -> List[str]:
         return ["Assign"] + _ann_field("lhs", self.lhs) + _ann_field("rhs", self.rhs)

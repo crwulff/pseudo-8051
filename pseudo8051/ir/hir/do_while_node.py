@@ -31,6 +31,9 @@ class DoWhileNode(HIRNode):
         lines.append((self.ea, f"{ind}}} while ({_render_cond(self.condition)});"))
         return lines
 
+    def name_refs(self) -> frozenset:
+        return frozenset().union(*(n.name_refs() for n in self.body_nodes))
+
     def ann_lines(self) -> List[str]:
         return (["DoWhileNode"] + _ann_field("cond", self.condition)
                 + [f"  body: {len(self.body_nodes)} nodes"])

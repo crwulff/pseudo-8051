@@ -6,7 +6,7 @@ All existing `from pseudo8051.ir.hir import ...` statements continue to work.
 
 from pseudo8051.ir.hir._base import (          # noqa: F401
     NodeAnnotation, HIRNode,
-    _render_expr, _expr_lines, _ann_field,
+    _render_expr, _expr_lines, _ann_field, _refs_from_expr,
     _lhs_written_regs, _Cond, _render_cond,
 )
 from pseudo8051.ir.hir.assign         import Assign, TypedAssign          # noqa: F401
