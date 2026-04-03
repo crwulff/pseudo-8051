@@ -21,6 +21,7 @@ if _scripts_dir not in sys.path:
 _RELOAD_ORDER = [
     "pseudo8051.constants",
     "pseudo8051.locals",
+    "pseudo8051.xram_params",
     "pseudo8051.prototypes",
     "pseudo8051.ir.expr",
     "pseudo8051.ir.hir",

@@ -61,6 +61,27 @@ class _RegAnnManageAction(ida_kernwin.action_handler_t):
         return ida_kernwin.AST_ENABLE_ALWAYS
 
 
+class _XRAMParamManageAction(ida_kernwin.action_handler_t):
+    """Open a table dialog to add/edit/delete XRAM parameters."""
+
+    def activate(self, ctx) -> int:
+        from pseudo8051.xram_params import get_xram_params
+        from pseudo8051.ui_dialogs  import XRAMParamsTableDialog
+        from PyQt5.QtWidgets        import QApplication, QDialog
+        func_ea = _popup_ctx["func_ea"]
+        viewer  = _popup_ctx["viewer"]
+        if not func_ea:
+            return 1
+        dlg = XRAMParamsTableDialog(func_ea, get_xram_params(func_ea),
+                                    parent=QApplication.activeWindow())
+        if dlg.exec_() == QDialog.Accepted and viewer is not None:
+            viewer.Show(func_ea)
+        return 1
+
+    def update(self, ctx) -> int:
+        return ida_kernwin.AST_ENABLE_ALWAYS
+
+
 class _ExprTreeAction(ida_kernwin.action_handler_t):
     """Toggle inline HIR node annotations on all pseudocode lines."""
 
@@ -106,6 +127,9 @@ def setup_popup(form, popup_handle,
                                        "pseudo8051:local_manage",
                                        "XRAM locals/")
     ida_kernwin.attach_action_to_popup(form, popup_handle,
+                                       "pseudo8051:xram_param_manage",
+                                       "XRAM parameters/")
+    ida_kernwin.attach_action_to_popup(form, popup_handle,
                                        "pseudo8051:regann_manage",
                                        "Register annotations/")
 
@@ -127,10 +151,11 @@ def setup_popup(form, popup_handle,
 def _register_local_actions() -> None:
     """Register (or re-register after a reload) the UI actions."""
     _defs = [
-        ("pseudo8051:local_manage",  "Manage\u2026",          _LocalManageAction()),
-        ("pseudo8051:regann_manage", "Manage\u2026",          _RegAnnManageAction()),
-        ("pseudo8051:toggle_hex",    "View constants as decimal", _HexToggleAction()),
-        ("pseudo8051:expr_tree",     "Annotate HIR nodes",    _ExprTreeAction()),
+        ("pseudo8051:local_manage",      "Manage\u2026",          _LocalManageAction()),
+        ("pseudo8051:xram_param_manage", "Manage\u2026",          _XRAMParamManageAction()),
+        ("pseudo8051:regann_manage",     "Manage\u2026",          _RegAnnManageAction()),
+        ("pseudo8051:toggle_hex",        "View constants as decimal", _HexToggleAction()),
+        ("pseudo8051:expr_tree",         "Annotate HIR nodes",    _ExprTreeAction()),
     ]
     for name, label, handler in _defs:
         ida_kernwin.unregister_action(name)

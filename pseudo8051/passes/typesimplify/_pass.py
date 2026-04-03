@@ -11,6 +11,7 @@ from pseudo8051.constants import PARAM_REG_ORDER
 
 from pseudo8051.passes.typesimplify._regmap   import (
     _build_reg_map, _augment_with_local_vars, _augment_with_callee_regs,
+    _augment_with_xram_params, _augment_with_callee_xram_params,
 )
 from pseudo8051.passes.typesimplify._simplify import _simplify, _simplify_once
 from pseudo8051.passes.typesimplify._post     import (
@@ -20,6 +21,7 @@ from pseudo8051.passes.typesimplify._post     import (
     _simplify_orl_zero_check,
     _prune_orphaned_dptr_inc,
     _fold_return_chains,
+    _fold_xram_call_args,
 )
 from pseudo8051.constants import dbg
 
@@ -50,11 +52,15 @@ class TypeAwareSimplifier(OptimizationPass):
                             "scanning callee prototypes for register mappings")
 
         reg_map = _augment_with_local_vars(func.ea, reg_map)
+        reg_map = _augment_with_xram_params(func.ea, reg_map)
 
-        # Fall back to global callee-reg scan when AnnotationPass hasn't run
+        # Fall back to global callee-reg/XRAM scan when AnnotationPass hasn't run
         # (e.g. unit tests that call TypeAwareSimplifier directly).
+        # When AnnotationPass has run, callee XRAM params are handled per-call-site
+        # via _backward_annotate_xram_call → call_arg_ann on the XRAM write node.
         if not getattr(func, "_annotation_pass_ran", False):
             reg_map = _augment_with_callee_regs(func.hir, reg_map)
+            reg_map = _augment_with_callee_xram_params(func.hir, reg_map)
 
         if not reg_map:
             dbg("typesimp", f"{func.name}: no register mappings found, running structural patterns only")
@@ -75,6 +81,7 @@ class TypeAwareSimplifier(OptimizationPass):
         func.hir = _remove_nop_gotos(func.hir)
         func.hir = _propagate_values(func.hir, reg_map)
         func.hir = _prune_orphaned_dptr_inc(func.hir)
+        func.hir = _fold_xram_call_args(func.hir)
         func.hir = _fold_and_prune_setups(func.hir, reg_map)
         func.hir = _simplify_carry_comparison(func.hir)
         func.hir = _fold_and_prune_setups(func.hir, reg_map)  # clean up setups dead after SUBB16 collapse
@@ -90,6 +97,7 @@ class TypeAwareSimplifier(OptimizationPass):
         for vinfo in reg_map.values():
             if (isinstance(vinfo, VarInfo)
                     and vinfo.xram_sym and not vinfo.is_byte_field
+                    and not vinfo.is_param
                     and vinfo.name not in seen):
                 seen.add(vinfo.name)
                 local_decls.append(vinfo)

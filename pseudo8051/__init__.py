@@ -28,6 +28,12 @@ XRAM local variable declarations (stored in IDA netnode, persistent per function
     pseudo8051.list_locals(here())
     pseudo8051.del_local(here(), 0xdc8a)
 
+XRAM parameters (extra parameters passed via fixed XRAM addresses):
+
+    pseudo8051.set_xram_param(here(), 0xdc8a, 'extra', 'uint8_t')
+    pseudo8051.list_xram_params(here())
+    pseudo8051.del_xram_param(here(), 0xdc8a)
+
 Register annotations (per-instruction, stored in IDA netnode):
 
     pseudo8051.set_regann(here(), here(), 'R6,R7', 'count', 'uint16_t')
@@ -63,8 +69,9 @@ _BASE_TITLE = "8051 Pseudocode"
 
 from pseudo8051.ir.expr    import Expr
 from pseudo8051.ir.function import Function
-from pseudo8051.locals    import set_local, del_local, list_locals    # noqa: F401
-from pseudo8051.reganns   import set_regann, del_regann, list_reganns  # noqa: F401
+from pseudo8051.locals      import set_local, del_local, list_locals          # noqa: F401
+from pseudo8051.xram_params import set_xram_param, del_xram_param, list_xram_params  # noqa: F401
+from pseudo8051.reganns     import set_regann, del_regann, list_reganns       # noqa: F401
 from pseudo8051.locals_ui import setup_popup, _register_local_actions
 
 # Viewer registry that survives module reloads: keyed by tab title.

@@ -267,6 +267,15 @@ class Function:
             params   = self.parameters
             params_str = ", ".join(params) if params else "void"
 
+        try:
+            from pseudo8051.xram_params import get_xram_params
+            xram_ps = get_xram_params(self.ea)
+            if xram_ps:
+                xram_str = ", ".join(f"{p.type} {p.name}" for p in xram_ps)
+                params_str = f"{params_str}, {xram_str}" if params_str != "void" else xram_str
+        except Exception:
+            pass
+
         lines: List[tuple] = [
             (self.ea, f"{ret_type} {self.name}({params_str})"),
             (self.ea, "{"),

@@ -149,6 +149,43 @@ def _backward_annotate_call(nodes: List[HIRNode], call_idx: int,
         j -= 1
 
 
+def _backward_annotate_xram_call(nodes: List[HIRNode], call_idx: int,
+                                   xram_sym_map: Dict) -> None:
+    """Back-propagate callee XRAM param names to XRAM writes preceding a call.
+
+    xram_sym_map maps XRAM symbol string (e.g. 'EXT_DC44') → VarInfo.
+    Annotates matching Assign(XRAMRef(...), rhs) nodes with call_arg_ann[sym]=vi.
+
+    The MOVX handler already resolves a known DPTR constant to a Name symbol at
+    lift time, so XRAMRef inner is usually Name(sym).  The Reg("DPTR") fallback
+    handles the rare case where DPTR was unknown at lift time, resolving it via
+    the const_state snapshot stored in node.ann.reg_consts.
+    """
+    from pseudo8051.ir.expr import Name as NameExpr2
+    if not xram_sym_map:
+        return
+    j = call_idx - 1
+    while j >= 0:
+        node = nodes[j]
+        if isinstance(node, Assign) and isinstance(node.lhs, XRAMRef):
+            inner = node.lhs.inner
+            sym = None
+            if isinstance(inner, NameExpr2):
+                sym = inner.name          # already "EXT_DC44" etc.
+            elif isinstance(inner, RegExpr) and inner.name == "DPTR":
+                ann = node.ann
+                if ann is not None:
+                    dptr_val = ann.reg_consts.get("DPTR")
+                    if dptr_val is not None:
+                        from pseudo8051.constants import resolve_ext_addr
+                        sym = resolve_ext_addr(dptr_val)
+            if sym is not None and sym in xram_sym_map:
+                vi = xram_sym_map[sym]
+                if node.ann is not None:
+                    node.ann.call_arg_ann.setdefault(sym, vi)
+        j -= 1
+
+
 # ── Debug dump ────────────────────────────────────────────────────────────────
 
 def _fmt_varinfo(vi) -> str:
@@ -248,6 +285,7 @@ class AnnotationPass(OptimizationPass):
         # ── Forward walk ───────────────────────────────────────────────────
         block_exit_names: Dict[int, Dict] = {}  # start_ea → exit name_state
         call_sites: List[Tuple[List[HIRNode], int, Dict]] = []
+        xram_call_sites: List[Tuple[List[HIRNode], int, Dict]] = []
 
         for block in _rpo(func):
             # Compute entry name_state from predecessor exits
@@ -292,6 +330,25 @@ class AnnotationPass(OptimizationPass):
                         for r, vi in callee_rm.items():
                             name_state.setdefault(r, vi)
                         call_sites.append((nodes, idx, callee_rm))
+
+                    # Collect callee XRAM params for backward annotation
+                    try:
+                        callee_ea = _resolve_name_addr(call_expr.func_name)
+                        if callee_ea is not None:
+                            from pseudo8051.xram_params import get_xram_params
+                            from pseudo8051.constants   import resolve_ext_addr
+                            callee_xps = get_xram_params(callee_ea)
+                            if callee_xps:
+                                xp_map: Dict[str, object] = {}
+                                for _p in callee_xps:
+                                    _sym = resolve_ext_addr(_p.addr)
+                                    _vi  = VarInfo(_p.name, _p.type, (),
+                                                   xram_sym=_sym, xram_addr=_p.addr)
+                                    xp_map[_sym] = _vi
+                                xram_call_sites.append((nodes, idx, xp_map))
+                    except Exception:
+                        pass
+
                     # Calls clobber all tracked regs
                     name_state.clear()
                     const_state.clear()
@@ -335,6 +392,8 @@ class AnnotationPass(OptimizationPass):
         # ── Backward pass: annotate pre-call assignments with callee param names ──
         for nodes, call_idx, callee_rm in call_sites:
             _backward_annotate_call(nodes, call_idx, callee_rm)
+        for nodes, call_idx, xp_map in xram_call_sites:
+            _backward_annotate_xram_call(nodes, call_idx, xp_map)
 
         func._annotation_pass_ran = True
         dbg("annotate", f"{func.name}: annotation complete")

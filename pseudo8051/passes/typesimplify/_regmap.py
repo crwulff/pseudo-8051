@@ -183,6 +183,77 @@ def _augment_with_local_vars(func_ea: int,
     return result
 
 
+def _augment_with_xram_params(func_ea: int,
+                              reg_map: Dict[str, VarInfo]) -> Dict[str, VarInfo]:
+    """Add VarInfo entries for XRAM parameters declared for this function.
+
+    Like _augment_with_local_vars but marks entries as is_param=True so that
+    VarDecl nodes are not emitted for them (they appear in the signature instead).
+    """
+    from pseudo8051.xram_params import get_xram_params
+    from pseudo8051.constants   import resolve_ext_addr
+    params = get_xram_params(func_ea)
+    if not params:
+        return reg_map
+    result = dict(reg_map)
+    for p in params:
+        base_sym = resolve_ext_addr(p.addr)
+        if base_sym not in result:
+            result[base_sym] = VarInfo(p.name, p.type, (), xram_sym=base_sym,
+                                       xram_addr=p.addr, is_param=True)
+            dbg("typesimp", f"  xram_param: {p.name} ({p.type}) @ {base_sym}")
+        n = _type_bytes(p.type)
+        if n > 1:
+            bnames = _byte_names(p.name, n)
+            for k, byte_name in enumerate(bnames):
+                byte_sym = resolve_ext_addr(p.addr + k)
+                bkey = f"_byte_{byte_sym}"
+                if bkey not in result:
+                    result[bkey] = VarInfo(byte_name, "uint8_t", (),
+                                           xram_sym=byte_sym, is_byte_field=True,
+                                           is_param=True)
+                    dbg("typesimp", f"  xram_param byte: {byte_name} @ {byte_sym}")
+    return result
+
+
+def _augment_with_callee_xram_params(hir: List[HIRNode],
+                                      reg_map: Dict[str, VarInfo]) -> Dict[str, VarInfo]:
+    """Scan the HIR for function calls and add callee XRAM parameter mappings.
+
+    When a callee has XRAM parameters declared, XRAM writes to those addresses
+    in the caller are renamed with the callee's parameter name, mirroring the
+    way register parameters are propagated via _augment_with_callee_regs.
+    """
+    from pseudo8051.xram_params import get_xram_params
+    from pseudo8051.constants   import resolve_ext_addr
+    result = dict(reg_map)
+    for name in _collect_call_names(hir):
+        try:
+            import ida_name
+            import idc
+            ea = ida_name.get_name_ea(idc.BADADDR, name)
+            if ea == idc.BADADDR:
+                continue
+        except Exception:
+            continue
+        for p in get_xram_params(ea):
+            sym = resolve_ext_addr(p.addr)
+            if sym not in result:
+                result[sym] = VarInfo(p.name, p.type, (), xram_sym=sym,
+                                      xram_addr=p.addr)
+                dbg("typesimp", f"  callee xram_param: {name}.{p.name} @ {sym}")
+            n = _type_bytes(p.type)
+            if n > 1:
+                bnames = _byte_names(p.name, n)
+                for k, byte_name in enumerate(bnames):
+                    byte_sym = resolve_ext_addr(p.addr + k)
+                    bkey = f"_byte_{byte_sym}"
+                    if bkey not in result:
+                        result[bkey] = VarInfo(byte_name, "uint8_t", (),
+                                               xram_sym=byte_sym, is_byte_field=True)
+    return result
+
+
 def _augment_with_callee_regs(hir: List[HIRNode],
                                reg_map: Dict[str, VarInfo]) -> Dict[str, VarInfo]:
     """Scan the HIR for function calls and add callee parameter register mappings.

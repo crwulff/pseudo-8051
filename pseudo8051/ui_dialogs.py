@@ -215,6 +215,82 @@ class LocalsTableDialog(_TableDialog):
         return None
 
 
+# ── XRAM Parameters dialog ────────────────────────────────────────────────────
+
+class XRAMParamsTableDialog(_TableDialog):
+    """
+    Editable table of XRAM parameters for one function.
+
+    Columns: Address | Type | Name
+    """
+
+    def __init__(self, func_ea: int, params_list, parent=None):
+        try:
+            import ida_funcs
+            fn = ida_funcs.get_func(func_ea)
+            fname = ida_funcs.get_func_name(fn.start_ea) if fn else hex(func_ea)
+        except Exception:
+            fname = hex(func_ea)
+
+        self._func_ea = func_ea
+        super().__init__(f"XRAM Parameters — {fname}", parent)
+        self._original = list(params_list)   # snapshot for diffing
+        self._populate(params_list)
+
+    def _get_column_headers(self) -> List[str]:
+        return ["Address", "Type", "Name"]
+
+    def _populate(self, data) -> None:
+        self._table.setRowCount(0)
+        for p in data:
+            row = self._table.rowCount()
+            self._table.insertRow(row)
+            self._table.setItem(row, 0, QTableWidgetItem(f"{p.addr:#06x}"))
+            self._table.setItem(row, 1, QTableWidgetItem(p.type))
+            self._table.setItem(row, 2, QTableWidgetItem(p.name))
+        self._table.resizeColumnsToContents()
+
+    def _validate_row(self, row_data: List[str]) -> Optional[str]:
+        addr_s, type_s, name_s = row_data
+        if not addr_s:
+            return "Address is required."
+        try:
+            int(addr_s, 0)
+        except ValueError:
+            return f"Invalid address: {addr_s!r} (use hex like 0xdc8a or decimal)."
+        if not type_s:
+            return "Type is required."
+        if not name_s:
+            return "Name is required."
+        return None
+
+    def _sync_changes(self, original, current_rows) -> Optional[str]:
+        from pseudo8051.xram_params import set_xram_param, del_xram_param
+
+        orig_by_addr: Dict[int, object] = {p.addr: p for p in original}
+
+        new_by_addr: Dict[int, Tuple[str, str]] = {}
+        for addr_s, type_s, name_s in current_rows:
+            try:
+                addr = int(addr_s, 0)
+            except ValueError:
+                return f"Invalid address: {addr_s!r}"
+            if addr in new_by_addr:
+                return f"Duplicate address: {addr_s}"
+            new_by_addr[addr] = (name_s, type_s)
+
+        for old_addr in orig_by_addr:
+            if old_addr not in new_by_addr:
+                del_xram_param(self._func_ea, old_addr)
+
+        for addr, (name, type_str) in new_by_addr.items():
+            old = orig_by_addr.get(addr)
+            if old is None or old.name != name or old.type != type_str:
+                set_xram_param(self._func_ea, addr, name, type_str)
+
+        return None
+
+
 # ── Register Annotations dialog ────────────────────────────────────────────────
 
 class RegAnnsTableDialog(_TableDialog):
