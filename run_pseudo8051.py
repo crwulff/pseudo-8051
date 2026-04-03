@@ -24,6 +24,23 @@ _RELOAD_ORDER = [
     "pseudo8051.xram_params",
     "pseudo8051.prototypes",
     "pseudo8051.ir.expr",
+    "pseudo8051.ir.hir._base",
+    "pseudo8051.ir.hir.assign",
+    "pseudo8051.ir.hir.compound_assign",
+    "pseudo8051.ir.hir.expr_stmt",
+    "pseudo8051.ir.hir.return_stmt",
+    "pseudo8051.ir.hir.if_goto",
+    "pseudo8051.ir.hir.statement",
+    "pseudo8051.ir.hir.goto_statement",
+    "pseudo8051.ir.hir.break_stmt",
+    "pseudo8051.ir.hir.var_decl",
+    "pseudo8051.ir.hir.computed_jump",
+    "pseudo8051.ir.hir.label",
+    "pseudo8051.ir.hir.if_node",
+    "pseudo8051.ir.hir.while_node",
+    "pseudo8051.ir.hir.for_node",
+    "pseudo8051.ir.hir.do_while_node",
+    "pseudo8051.ir.hir.switch_node",
     "pseudo8051.ir.hir",
     "pseudo8051.ir.operand",
     "pseudo8051.ir.instruction",
@@ -73,6 +90,16 @@ _RELOAD_ORDER = [
     "pseudo8051.locals_ui",
     "pseudo8051",
 ]
+
+# If a previous session loaded pseudo8051.ir.hir as a flat module (before the
+# package refactor), it will be cached in sys.modules without a __path__ and
+# Python will refuse to import submodules from it.  Purge all stale entries.
+_hir = sys.modules.get("pseudo8051.ir.hir")
+if _hir is not None and not hasattr(_hir, "__path__"):
+    for _k in [k for k in list(sys.modules) if k == "pseudo8051.ir.hir"
+               or k.startswith("pseudo8051.ir.hir.")]:
+        del sys.modules[_k]
+del _hir
 
 # First import (no-op if already loaded); then reload to pick up edits.
 for _mod in _RELOAD_ORDER:
