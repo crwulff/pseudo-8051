@@ -7,7 +7,7 @@ from typing import Callable, Dict, List, Optional
 
 from pseudo8051.ir.hir    import (HIRNode, Assign, TypedAssign, CompoundAssign,
                                    ExprStmt, ReturnStmt, IfGoto, IfNode, WhileNode, ForNode,
-                                   DoWhileNode, SwitchNode)
+                                   DoWhileNode, SwitchNode, Label)
 from pseudo8051.constants import dbg
 from pseudo8051.passes.patterns._utils  import (
     VarInfo, _type_bytes, _byte_names, _walk_expr,
@@ -894,10 +894,49 @@ def _propagate_values(nodes: List[HIRNode],
     # Recurse into structured nodes first.
     work = recurse_bodies(nodes, lambda ns: _propagate_values(ns, reg_map))
 
+    # Debug: log flat-list shape when "propagate" category enabled.
+    def _dbg_node(n) -> str:
+        try:
+            return f"{type(n).__name__}:{n.render(0)[0][1][:50]!r}"
+        except Exception:
+            return type(n).__name__
+    dbg("propagate", f"_propagate_values flat({len(work)}): "
+        + ", ".join(_dbg_node(n) for n in work))
+
     # Iterate until stable (multiple passes may be needed).
     changed = True
     while changed:
         changed = False
+
+        # Sub-pass A0: fold  Assign(Reg(r), expr) + CompoundAssign(Reg(r), op=, rhs)
+        # into a single Assign(Reg(r), expr op rhs).  This is needed because
+        # _count_reg_uses_in_node only counts RHS uses in a CompoundAssign, so the
+        # Assign-preceding-it would appear to have 0 downstream uses and wouldn't be
+        # propagated without first expanding the compound form.
+        live = list(work)
+        i = 0
+        _COMPOUND_OPS = {"+=": "+", "-=": "-", "&=": "&", "|=": "|", "^=": "^"}
+        while i < len(live):
+            node = live[i]
+            if (isinstance(node, Assign)
+                    and isinstance(node.lhs, RegExpr)
+                    and i + 1 < len(live)):
+                nxt = live[i + 1]
+                if (isinstance(nxt, CompoundAssign)
+                        and isinstance(nxt.lhs, RegExpr)
+                        and nxt.lhs.name == node.lhs.name
+                        and nxt.op in _COMPOUND_OPS):
+                    op_str = _COMPOUND_OPS[nxt.op]
+                    live[i + 1] = Assign(nxt.ea, nxt.lhs, BinOp(node.rhs, op_str, nxt.rhs))
+                    live[i] = None
+                    dbg("typesimp",
+                        f"  [{hex(node.ea)}] fold-compound: "
+                        f"{node.lhs.render()} = {node.rhs.render()} "
+                        f"{nxt.op} {nxt.rhs.render()}")
+                    changed = True
+            i += 1
+        live = [n for n in live if n is not None]
+        work = live
 
         # Sub-pass A: register copy propagation.
         live = list(work)
@@ -908,6 +947,9 @@ def _propagate_values(nodes: List[HIRNode],
                     and isinstance(node.lhs, RegExpr)
                     and (isinstance(node.rhs, (NameExpr, Const))
                          or _is_reg_free(node.rhs))):
+                if isinstance(node, Assign) and isinstance(node.lhs, RegExpr):
+                    dbg("propagate", f"  sub-A-skip: {node.lhs.name}={node.rhs.render()!r} "
+                        f"(not reg-free)")
                 i += 1
                 continue
             r = node.lhs.name
@@ -916,6 +958,7 @@ def _propagate_values(nodes: List[HIRNode],
             # Scan forward counting uses, stopping when r is written.
             total_uses = 0
             use_idx = None
+            kill_idx = None
             for j in range(i + 1, len(live)):
                 written = live[j].written_regs
                 uses_here = _count_reg_uses_in_node(r, live[j])
@@ -923,14 +966,48 @@ def _propagate_values(nodes: List[HIRNode],
                 if uses_here > 0 and use_idx is None:
                     use_idx = j
                 if r in written:
+                    kill_idx = j
                     break
 
+            dbg("propagate", f"  sub-A: {r}={replacement.render()!r} "
+                f"total_uses={total_uses} kill_idx={kill_idx} "
+                f"reg_free={_is_reg_free(replacement)}")
+            # Per-node breakdown for diagnosis (only log short scan windows)
+            if total_uses > 0 or kill_idx is not None:
+                _scan_end = (kill_idx + 1) if kill_idx is not None else min(len(live), i + 10)
+                for _j in range(i + 1, _scan_end):
+                    _u = _count_reg_uses_in_node(r, live[_j])
+                    _wr = r in live[_j].written_regs
+                    dbg("propagate", f"    scan[{_j}]={_dbg_node(live[_j])} uses={_u} kill={_wr}")
             if total_uses == 1 and use_idx is not None:
                 new_node = _subst_reg_in_node(live[use_idx], r, replacement)
                 if new_node is not None:
                     live[use_idx] = new_node
                     live[i] = None
                     dbg("typesimp", f"  [{hex(node.ea)}] prop-values: folded {r} into node {use_idx}")
+                    changed = True
+            elif total_uses > 1 and _is_reg_free(replacement) and use_idx is not None:
+                # Multi-use propagation for reg-free replacements (Name/Const/BinOp without
+                # Reg leaves): substitute into every flat-level use before the next write.
+                # This handles cases like  A = dest+2; <test A>; DPL = A  where A appears
+                # as a transient holding a named-variable expression.
+                end = kill_idx if kill_idx is not None else len(live)
+                any_subst = False
+                for j in range(i + 1, end):
+                    if _count_reg_uses_in_node(r, live[j]) > 0:
+                        new_node = _subst_reg_in_node(live[j], r, replacement)
+                        if new_node is not None:
+                            live[j] = new_node
+                            any_subst = True
+                if any_subst:
+                    # Remove the source assign only when no remaining uses exist
+                    # (including inside structured bodies like IfNode) in the range.
+                    remaining = _collect_hir_name_refs(live[i + 1:end])
+                    if r not in remaining:
+                        live[i] = None
+                    dbg("typesimp",
+                        f"  [{hex(node.ea)}] prop-values-multi: {r} = {replacement.render()!r}"
+                        f" into {total_uses} use(s)")
                     changed = True
 
             i += 1
@@ -1073,6 +1150,87 @@ def _try_collapse_subb16(cond, body: List[HIRNode]):
             f" (via {Rhi_min},{Rlo_sub} - {Rhi_sub},{Rlo_sub})")
         return (new_cond, new_body)
     return None
+
+
+# ── CJNE + JNC/JC carry-comparison simplification ────────────────────────────
+
+def _simplify_cjne_jnc(nodes: List[HIRNode]) -> List[HIRNode]:
+    """
+    Collapse the CJNE (nop-goto) + JNC/JC pattern that appears after
+    cross-block nop-goto removal and value propagation:
+
+      ExprStmt(expr != const)   ← CJNE: sets C = (expr < const unsigned); nop-goto removed
+      [optional Label nodes]
+      IfNode(!C, body)          ← JNC: jumps when C==0, i.e. expr >= const
+    →
+      IfNode(expr >= const, body)
+
+    Also handles IfGoto variants and JC (Reg("C")):
+      ExprStmt(expr != const) + IfGoto(!C, label) → IfGoto(expr >= const, label)
+      ExprStmt(expr != const) + IfNode(C, body)   → IfNode(expr < const, body)
+      ExprStmt(expr != const) + IfGoto(C, label)  → IfGoto(expr < const, label)
+
+    Recurses into structured node bodies first.
+    """
+    def _is_not_c(c) -> bool:
+        return (isinstance(c, UnaryOp) and c.op == "!"
+                and isinstance(c.operand, RegExpr) and c.operand.name == "C")
+
+    def _is_c(c) -> bool:
+        return isinstance(c, RegExpr) and c.name == "C"
+
+    work = [n.map_bodies(_simplify_cjne_jnc) for n in nodes]
+    result: List[HIRNode] = []
+    i = 0
+    while i < len(work):
+        node = work[i]
+        # Detect ExprStmt with != condition (produced by CJNE nop-goto removal)
+        if (isinstance(node, ExprStmt)
+                and isinstance(node.expr, BinOp)
+                and node.expr.op == "!="
+                and isinstance(node.expr.rhs, Const)):
+            # Find next non-Label node
+            j = i + 1
+            while j < len(work) and isinstance(work[j], Label):
+                j += 1
+            if j < len(work):
+                next_node = work[j]
+                cond_expr = node.expr
+                new_cond = None
+                repl: Optional[HIRNode] = None
+
+                if isinstance(next_node, IfNode):
+                    if _is_not_c(next_node.condition):
+                        # JNC: !C = (lhs >= rhs)
+                        new_cond = BinOp(cond_expr.lhs, ">=", cond_expr.rhs)
+                        repl = IfNode(next_node.ea, new_cond,
+                                      next_node.then_nodes, next_node.else_nodes)
+                    elif _is_c(next_node.condition):
+                        # JC: C = (lhs < rhs)
+                        new_cond = BinOp(cond_expr.lhs, "<", cond_expr.rhs)
+                        repl = IfNode(next_node.ea, new_cond,
+                                      next_node.then_nodes, next_node.else_nodes)
+                elif isinstance(next_node, IfGoto):
+                    if _is_not_c(next_node.cond):
+                        new_cond = BinOp(cond_expr.lhs, ">=", cond_expr.rhs)
+                        repl = IfGoto(next_node.ea, new_cond, next_node.label)
+                    elif _is_c(next_node.cond):
+                        new_cond = BinOp(cond_expr.lhs, "<", cond_expr.rhs)
+                        repl = IfGoto(next_node.ea, new_cond, next_node.label)
+
+                if new_cond is not None and repl is not None:
+                    # Keep any Label nodes between ExprStmt and the branch
+                    result.extend(work[i + 1:j])
+                    result.append(repl)
+                    dbg("typesimp",
+                        f"  [{hex(node.ea)}] cjne-jnc: "
+                        f"{cond_expr.render()!r} + carry-branch → {new_cond.render()!r}")
+                    i = j + 1
+                    continue
+
+        result.append(node)
+        i += 1
+    return result
 
 
 # ── ORL + JZ zero-check simplification ───────────────────────────────────────

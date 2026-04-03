@@ -399,7 +399,11 @@ class AccumFoldPattern(Pattern):
         if isinstance(terminal, IfGoto) and _contains_a(terminal.cond):
             new_cond = _subst_a(terminal.cond, a_expr_subst)
             dbg("typesimp", f"  [{hex(a_start_node.ea)}] accum_fold (IfGoto): folded {a_expr_subst.render()} into cond")
-            return (skipped + [IfGoto(a_start_node.ea, new_cond, terminal.label)], j + 1)
+            result = [IfGoto(a_start_node.ea, new_cond, terminal.label)]
+            if any(_count_reg_uses_in_node("A", nodes[k]) > 0
+                   for k in range(j + 1, len(nodes))):
+                result = [Assign(a_start_node.ea, Reg("A"), a_expr_subst)] + result
+            return (skipped + result, j + 1)
 
         # IfNode: substitute A in condition (Expr or str)
         if isinstance(terminal, IfNode):

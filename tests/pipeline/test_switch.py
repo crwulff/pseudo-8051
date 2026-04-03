@@ -257,9 +257,11 @@ class TestSwitchBodyAbsorber:
         IfElseStructurer().run(func)
         SwitchBodyAbsorber().run(func)
 
-        assert len(b0.hir) == 1
+        # merge block is absorbed inline after the switch when not externally referenced
+        assert len(b0.hir) == 2
         sw = b0.hir[0]
         assert isinstance(sw, SwitchNode)
+        assert isinstance(b0.hir[1], ReturnStmt)
 
         for values, body in sw.cases:
             assert isinstance(body, list), \
@@ -272,7 +274,7 @@ class TestSwitchBodyAbsorber:
         assert b_c2._absorbed
         assert b_fall._absorbed
         assert b_def._absorbed
-        assert not merge._absorbed
+        assert merge._absorbed
 
     def test_render_inline_bodies(self):
         """SwitchNode with inlined bodies renders correctly."""
@@ -500,7 +502,7 @@ class TestSwitchBodyAbsorber:
         assert b_c2._absorbed
         assert b_fall._absorbed
         assert b_def._absorbed
-        assert not merge._absorbed
+        assert merge._absorbed  # merge block absorbed inline after switch when not externally referenced
 
     def test_identical_bodies_merged(self):
         """Cases that map to different labels but identical body HIR are merged.

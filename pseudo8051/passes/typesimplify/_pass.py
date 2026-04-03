@@ -16,7 +16,7 @@ from pseudo8051.passes.typesimplify._simplify import _simplify, _simplify_once
 from pseudo8051.passes.typesimplify._post     import (
     _consolidate_xram_local_loads, _collapse_dpl_dph,
     _fold_and_prune_setups, _fold_call_arg_pairs, _propagate_values,
-    _simplify_carry_comparison,
+    _simplify_carry_comparison, _simplify_cjne_jnc,
     _simplify_orl_zero_check,
     _prune_orphaned_dptr_inc,
     _fold_return_chains,
@@ -67,11 +67,19 @@ class TypeAwareSimplifier(OptimizationPass):
         func.hir = _fold_call_arg_pairs(func.hir, reg_map)
         func.hir = _collapse_dpl_dph(func.hir, reg_map)
         func.hir = _fold_and_prune_setups(func.hir, reg_map)
+        # Remove cross-block nop-gotos in the assembled HIR (IfGoto whose target label
+        # is the immediately following node in the flat list).  Must run before
+        # _propagate_values so the resulting ExprStmt(cond) counts as a single use of
+        # any register in the condition, enabling multi-use forward propagation below.
+        from pseudo8051.passes.ifelse import _remove_nop_gotos
+        func.hir = _remove_nop_gotos(func.hir)
         func.hir = _propagate_values(func.hir, reg_map)
         func.hir = _prune_orphaned_dptr_inc(func.hir)
         func.hir = _fold_and_prune_setups(func.hir, reg_map)
         func.hir = _simplify_carry_comparison(func.hir)
         func.hir = _fold_and_prune_setups(func.hir, reg_map)  # clean up setups dead after SUBB16 collapse
+        # Collapse CJNE(nop-goto) + JNC/JC → typed comparison (e.g. expr >= const).
+        func.hir = _simplify_cjne_jnc(func.hir)
         func.hir = _simplify_orl_zero_check(func.hir)
 
         func.hir = collapse_mb_assigns(func.hir)
@@ -97,3 +105,9 @@ class TypeAwareSimplifier(OptimizationPass):
                    else tuple(getattr(func, "return_registers", []))
         if ret_regs:
             func.hir = _fold_return_chains(func.hir, ret_regs, reg_map)
+
+        # Remove Label nodes in the assembled HIR that are no longer referenced
+        # by any goto (can be orphaned by nop-goto removal + CJNE/JNC collapsing).
+        from pseudo8051.passes.ifelse import _collect_goto_targets, _drop_dead_labels
+        _live_labels = _collect_goto_targets(func.hir)
+        func.hir = _drop_dead_labels(func.hir, _live_labels)

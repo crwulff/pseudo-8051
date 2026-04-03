@@ -16,7 +16,7 @@ the pass removes Label nodes that are no longer targeted by any goto.
 import copy
 from typing import List, Optional, Tuple, Union
 
-from pseudo8051.ir.hir      import HIRNode, IfNode, WhileNode, ForNode, DoWhileNode, Label, IfGoto, GotoStatement, SwitchNode
+from pseudo8051.ir.hir      import HIRNode, IfNode, WhileNode, ForNode, DoWhileNode, Label, IfGoto, GotoStatement, SwitchNode, ExprStmt
 from pseudo8051.ir.expr     import Expr, UnaryOp
 from pseudo8051.passes    import OptimizationPass
 from pseudo8051.constants import dbg
@@ -243,6 +243,39 @@ def _replace_goto_in_hir(nodes: List[HIRNode], label: str,
     return result
 
 
+def _remove_nop_gotos(nodes: List[HIRNode]) -> List[HIRNode]:
+    """
+    Remove IfGoto(cond, label_X) when Label(label_X) is the immediately following
+    node in the same HIR list.  Both arms of such a branch reach the same point
+    so the condition is irrelevant and the branch is a no-op.
+    Recurses into nested IfNode, loop, and SwitchNode bodies.
+    """
+    result: List[HIRNode] = []
+    for i, node in enumerate(nodes):
+        if isinstance(node, IfNode):
+            node.then_nodes = _remove_nop_gotos(node.then_nodes)
+            node.else_nodes = _remove_nop_gotos(node.else_nodes)
+        elif isinstance(node, (WhileNode, ForNode, DoWhileNode)):
+            node.body_nodes = _remove_nop_gotos(node.body_nodes)
+        elif isinstance(node, SwitchNode):
+            node.cases = [(vals, _remove_nop_gotos(body) if isinstance(body, list) else body)
+                          for vals, body in node.cases]
+            if isinstance(node.default_body, list):
+                node.default_body = _remove_nop_gotos(node.default_body)
+        if (isinstance(node, IfGoto)
+                and i + 1 < len(nodes)
+                and isinstance(nodes[i + 1], Label)
+                and nodes[i + 1].name == node.label):
+            # The branch is a nop (jumps to the immediately-following label) but the
+            # condition expression may set flags (e.g. C) as a side effect, so keep
+            # it as a plain expression statement rather than dropping it entirely.
+            dbg("ifelse", f"  nop-goto → expr: if ({node.cond}) goto {node.label}")
+            result.append(ExprStmt(node.ea, node.cond))
+            continue
+        result.append(node)
+    return result
+
+
 # ── Pass ──────────────────────────────────────────────────────────────────────
 
 class IfElseStructurer(OptimizationPass):
@@ -270,6 +303,11 @@ class IfElseStructurer(OptimizationPass):
                     break   # restart — absorbed-set has changed
 
         dbg("ifelse", f"{passes} iteration(s) to reach fixed point")
+
+        # ── Nop-goto removal ─────────────────────────────────────────────
+        for block in func.blocks:
+            if not getattr(block, "_absorbed", False) and block.hir:
+                block.hir = _remove_nop_gotos(block.hir)
 
         # ── Dead-label cleanup ────────────────────────────────────────────
         live_labels: set = set()

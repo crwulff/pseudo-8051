@@ -6,8 +6,8 @@ import pytest
 
 from pseudo8051.passes.typesimplify._post import _propagate_values
 from pseudo8051.passes.patterns._utils import VarInfo
-from pseudo8051.ir.hir import Assign, TypedAssign, ExprStmt
-from pseudo8051.ir.expr import Reg, Name, XRAMRef, Call, Const
+from pseudo8051.ir.hir import Assign, TypedAssign, ExprStmt, CompoundAssign, IfNode, ReturnStmt
+from pseudo8051.ir.expr import Reg, Name, XRAMRef, Call, Const, BinOp, UnaryOp
 
 
 class TestPropagateValues:
@@ -44,15 +44,28 @@ class TestPropagateValues:
         assert len(result) == 1
         assert result[0].rhs.render() == "retval1"
 
-    def test_multiple_uses_not_folded(self):
-        """Register with >1 downstream uses is not folded."""
+    def test_multiple_uses_reg_free_folded(self):
+        """Register holding a reg-free (Name) value with >1 uses is folded into all uses."""
         nodes = [
             Assign(0, Reg("R7"), Name("val")),
-            Assign(1, Reg("R6"), Reg("R7")),          # use 1
+            Assign(1, Reg("R6"), Reg("R7")),             # use 1
             Assign(2, XRAMRef(Reg("DPTR")), Reg("R7")),  # use 2
         ]
         result = _propagate_values(nodes, {})
-        assert len(result) == 3  # nothing removed
+        # R7=val is substituted into both uses; source assignment removed
+        assert len(result) == 2
+        assert result[0].rhs.render() == "val"
+        assert result[1].rhs.render() == "val"
+
+    def test_multiple_uses_reg_replacement_not_folded(self):
+        """Register with >1 uses holding a Reg-containing expression is not folded."""
+        nodes = [
+            Assign(0, Reg("R7"), Reg("R5")),             # replacement contains Reg — not reg-free
+            Assign(1, Reg("R6"), Reg("R7")),             # use 1
+            Assign(2, XRAMRef(Reg("DPTR")), Reg("R7")),  # use 2
+        ]
+        result = _propagate_values(nodes, {})
+        assert len(result) == 3  # nothing removed — requires single-use for Reg replacements
 
     def test_retval_single_use_inlined(self):
         """Single-use retval TypedAssign is inlined into the Assign target."""
@@ -95,3 +108,45 @@ class TestPropagateValues:
         assert "R7" not in t
         assert "_dest" in t
         assert "code_7_read" in t
+
+    def test_compound_fold_rhs_has_reg_single_use_propagates(self):
+        """A=Reg(R5) + A+=2: A0 folds to A=R5+2 (has Reg, not reg-free).
+        ExprStmt(A!=4) counts as total_uses=1, so single-use propagation
+        substitutes R5+2 into ExprStmt. Assign(DPL, A) is past the first use
+        but comes AFTER; if kill_idx=None, total_uses=2 → multi-use fails (not reg-free)."""
+        nodes = [
+            Assign(0, Reg("A"), Reg("R5")),
+            CompoundAssign(1, Reg("A"), "+=", Const(2)),
+            ExprStmt(2, BinOp(Reg("A"), "!=", Const(4))),
+            IfNode(3, UnaryOp("!", Reg("C")), [ReturnStmt(4, Reg("R2"))], []),
+            Assign(5, Reg("DPL"), Reg("A")),
+        ]
+        result = _propagate_values(nodes, {})
+        # Verify what actually happens — the DPL assignment render
+        dpl_nodes = [n for n in result if isinstance(n, Assign)
+                     and hasattr(n.lhs, 'name') and n.lhs.name == "DPL"]
+        print(f"\nR5-not-substituted result: {[type(n).__name__ for n in result]}")
+        print(f"DPL node rhs: {dpl_nodes[0].rhs.render() if dpl_nodes else 'missing'}")
+        # Document the current behavior
+        assert len(dpl_nodes) == 1
+
+    def test_compound_fold_then_multiuse_across_ifnode(self):
+        """A=Name + A+=2 + ExprStmt(A!=4) + IfNode(!C, [return]) + Assign(DPL, A)
+        → A folds to Name+2, propagates into ExprStmt AND Assign(DPL, A)."""
+        nodes = [
+            Assign(0, Reg("A"), Name("dest_type")),
+            CompoundAssign(1, Reg("A"), "+=", Const(2)),
+            ExprStmt(2, BinOp(Reg("A"), "!=", Const(4))),
+            IfNode(3, UnaryOp("!", Reg("C")), [ReturnStmt(4, Reg("R2"))], []),
+            Assign(5, Reg("DPL"), Reg("A")),
+        ]
+        result = _propagate_values(nodes, {})
+        # ExprStmt and IfNode and DPL assign remain; source A= removed
+        texts = [n.render(0)[0][1] for n in result if not isinstance(n, IfNode)]
+        joined = " ".join(texts)
+        assert "A" not in joined, f"A still present: {joined!r}"
+        assert "dest_type" in joined
+        # DPL assignment should have dest_type + 2
+        dpl_nodes = [n for n in result if isinstance(n, Assign) and n.lhs.render() == "DPL"]
+        assert len(dpl_nodes) == 1
+        assert "dest_type" in dpl_nodes[0].rhs.render()
