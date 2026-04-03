@@ -55,6 +55,10 @@ class HIRNode(ABC):
         """
         return self
 
+    def ann_lines(self) -> List[str]:
+        """Return annotation lines for this node (class name + fields)."""
+        return [type(self).__name__]
+
     @staticmethod
     def _ind(indent: int) -> str:
         return "    " * indent
@@ -67,6 +71,51 @@ def _render_expr(val: Union[str, Expr]) -> str:
     if isinstance(val, Expr):
         return val.render()
     return str(val)
+
+
+# ── HIR annotation helpers ────────────────────────────────────────────────────
+
+def _expr_lines(expr: Expr, indent: str = "") -> List[str]:
+    """Return annotation lines for one Expr node, recursing into children."""
+    name = type(expr).__name__
+    if name == "BinOp":
+        out = [f"{indent}BinOp {expr.op!r}"]
+        out += _expr_lines(expr.lhs, indent + "  ")
+        out += _expr_lines(expr.rhs, indent + "  ")
+    elif name == "UnaryOp":
+        suffix = " (post)" if getattr(expr, "post", False) else ""
+        out = [f"{indent}UnaryOp {expr.op!r}{suffix}"]
+        out += _expr_lines(expr.operand, indent + "  ")
+    elif name in ("XRAMRef", "IRAMRef", "CROMRef"):
+        out = [f"{indent}{name}"]
+        out += _expr_lines(expr.inner, indent + "  ")
+    elif name == "Cast":
+        out = [f"{indent}Cast {expr.type_str!r}"]
+        out += _expr_lines(expr.inner, indent + "  ")
+    elif name == "Call":
+        out = [f"{indent}Call {expr.func_name!r}"]
+        for arg in expr.args:
+            out += _expr_lines(arg, indent + "  ")
+    else:  # Reg, Const, Name, RegGroup — useful reprs
+        out = [f"{indent}{repr(expr)}"]
+    return out
+
+
+def _ann_field(label: str, val) -> List[str]:
+    """Format one HIR annotation field as indented lines."""
+    if val is None:
+        return []
+    if isinstance(val, Expr):
+        return [f"  {label}:"] + [f"    {ln}" for ln in _expr_lines(val)]
+    # HIRNode (e.g. ForNode's Assign init): render to text
+    render = getattr(val, "render", None)
+    if render is not None:
+        try:
+            text = render(0)[0][1].strip()
+            return [f"  {label}: {text!r}"]
+        except (IndexError, TypeError):
+            pass
+    return [f"  {label}: {val!r}"]
 
 
 def _lhs_written_regs(lhs: Expr) -> frozenset:
@@ -93,6 +142,9 @@ class Assign(HIRNode):
     def render(self, indent: int = 0) -> List[Tuple[int, str]]:
         return [(self.ea, f"{self._ind(indent)}{_render_expr(self.lhs)} = {_render_expr(self.rhs)};")]
 
+    def ann_lines(self) -> List[str]:
+        return ["Assign"] + _ann_field("lhs", self.lhs) + _ann_field("rhs", self.rhs)
+
 
 class TypedAssign(Assign):
     """type lhs = rhs;  — typed variable declaration (e.g. retval nodes)."""
@@ -103,6 +155,9 @@ class TypedAssign(Assign):
 
     def render(self, indent: int = 0) -> List[Tuple[int, str]]:
         return [(self.ea, f"{self._ind(indent)}{self.type_str} {_render_expr(self.lhs)} = {_render_expr(self.rhs)};")]
+
+    def ann_lines(self) -> List[str]:
+        return ["TypedAssign", f"  type: {self.type_str!r}"] + _ann_field("lhs", self.lhs) + _ann_field("rhs", self.rhs)
 
 
 class CompoundAssign(HIRNode):
@@ -121,6 +176,10 @@ class CompoundAssign(HIRNode):
     def render(self, indent: int = 0) -> List[Tuple[int, str]]:
         return [(self.ea, f"{self._ind(indent)}{_render_expr(self.lhs)} {self.op} {_render_expr(self.rhs)};")]
 
+    def ann_lines(self) -> List[str]:
+        return (["CompoundAssign"] + _ann_field("lhs", self.lhs)
+                + [f"  op: {self.op!r}"] + _ann_field("rhs", self.rhs))
+
 
 class ExprStmt(HIRNode):
     """A standalone expression statement: push(R7);  R7++;"""
@@ -131,6 +190,9 @@ class ExprStmt(HIRNode):
 
     def render(self, indent: int = 0) -> List[Tuple[int, str]]:
         return [(self.ea, f"{self._ind(indent)}{_render_expr(self.expr)};")]
+
+    def ann_lines(self) -> List[str]:
+        return ["ExprStmt"] + _ann_field("expr", self.expr)
 
 
 class ReturnStmt(HIRNode):
@@ -147,6 +209,9 @@ class ReturnStmt(HIRNode):
             return [(self.ea, f"{self._ind(indent)}return;{suffix}")]
         return [(self.ea, f"{self._ind(indent)}return {_render_expr(self.value)};{suffix}")]
 
+    def ann_lines(self) -> List[str]:
+        return ["ReturnStmt"] + _ann_field("value", self.value)
+
 
 class IfGoto(HIRNode):
     """if (cond) goto label;"""
@@ -158,6 +223,9 @@ class IfGoto(HIRNode):
 
     def render(self, indent: int = 0) -> List[Tuple[int, str]]:
         return [(self.ea, f"{self._ind(indent)}if ({_render_expr(self.cond)}) goto {self.label};")]
+
+    def ann_lines(self) -> List[str]:
+        return ["IfGoto"] + _ann_field("cond", self.cond) + [f"  label: {self.label!r}"]
 
 
 # ── Legacy string-based statement (kept for test compat; see Phase 8 note) ───
@@ -180,6 +248,9 @@ class Statement(HIRNode):
     def render(self, indent: int = 0) -> List[Tuple[int, str]]:
         return [(self.ea, f"{self._ind(indent)}{self.text}")]
 
+    def ann_lines(self) -> List[str]:
+        return ["Statement", f"  text: {self.text!r}"]
+
 
 # ── Flow control ──────────────────────────────────────────────────────────────
 
@@ -192,6 +263,9 @@ class GotoStatement(HIRNode):
 
     def render(self, indent: int = 0) -> List[Tuple[int, str]]:
         return [(self.ea, f"{self._ind(indent)}goto {self.label};")]
+
+    def ann_lines(self) -> List[str]:
+        return ["GotoStatement", f"  label: {self.label!r}"]
 
 
 class BreakStmt(HIRNode):
@@ -217,6 +291,12 @@ class VarDecl(HIRNode):
                    if self.xram_addr else "")
         return [(self.ea, f"{self._ind(indent)}{self.type_str} {self.name};{comment}")]
 
+    def ann_lines(self) -> List[str]:
+        out = ["VarDecl", f"  type: {self.type_str!r}", f"  name: {self.name!r}"]
+        if self.xram_sym:
+            out.append(f"  xram: {self.xram_sym!r}")
+        return out
+
 
 class ComputedJump(HIRNode):
     """JMP @A+DPTR — computed table-jump placeholder; replaced by SwitchNode."""
@@ -237,6 +317,9 @@ class Label(HIRNode):
             (self.ea, ""),
             (self.ea, f"{self.name}:"),
         ]
+
+    def ann_lines(self) -> List[str]:
+        return ["Label", f"  name: {self.name!r}"]
 
 
 # ── Condition type alias ──────────────────────────────────────────────────────
@@ -285,6 +368,11 @@ class IfNode(HIRNode):
         lines.append((self.ea, f"{ind}}}"))
         return lines
 
+    def ann_lines(self) -> List[str]:
+        return (["IfNode"] + _ann_field("cond", self.condition)
+                + [f"  then: {len(self.then_nodes)} nodes",
+                   f"  else: {len(self.else_nodes)} nodes"])
+
 
 class WhileNode(HIRNode):
     """
@@ -310,6 +398,10 @@ class WhileNode(HIRNode):
             lines.extend(node.render(indent + 1))
         lines.append((self.ea, f"{ind}}}"))
         return lines
+
+    def ann_lines(self) -> List[str]:
+        return (["WhileNode"] + _ann_field("cond", self.condition)
+                + [f"  body: {len(self.body_nodes)} nodes"])
 
 
 class ForNode(HIRNode):
@@ -356,6 +448,12 @@ class ForNode(HIRNode):
         lines.append((self.ea, f"{ind}}}"))
         return lines
 
+    def ann_lines(self) -> List[str]:
+        return (["ForNode"] + _ann_field("init", self.init)
+                + _ann_field("cond", self.condition)
+                + _ann_field("update", self.update)
+                + [f"  body: {len(self.body_nodes)} nodes"])
+
 
 class DoWhileNode(HIRNode):
     """
@@ -380,6 +478,10 @@ class DoWhileNode(HIRNode):
             lines.extend(node.render(indent + 1))
         lines.append((self.ea, f"{ind}}} while ({_render_cond(self.condition)});"))
         return lines
+
+    def ann_lines(self) -> List[str]:
+        return (["DoWhileNode"] + _ann_field("cond", self.condition)
+                + [f"  body: {len(self.body_nodes)} nodes"])
 
 
 class SwitchNode(HIRNode):
@@ -452,3 +554,10 @@ class SwitchNode(HIRNode):
             lines.append((self.ea, f"{ind1}default: goto {self.default_label};"))
         lines.append((self.ea, f"{ind}}}"))
         return lines
+
+    def ann_lines(self) -> List[str]:
+        out = (["SwitchNode"] + _ann_field("subject", self.subject)
+               + [f"  cases: {len(self.cases)}"])
+        if self.default_label is not None:
+            out.append(f"  default: {self.default_label!r}")
+        return out
