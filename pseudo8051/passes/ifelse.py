@@ -13,6 +13,7 @@ After all inner ifs are structured (reverse-EA order + repeat-until-stable),
 the pass removes Label nodes that are no longer targeted by any goto.
 """
 
+import copy
 from typing import List, Optional, Tuple, Union
 
 from pseudo8051.ir.hir      import HIRNode, IfNode, WhileNode, ForNode, DoWhileNode, Label, IfGoto, GotoStatement, SwitchNode
@@ -207,6 +208,41 @@ def _drop_dead_labels(nodes: List[HIRNode], live: set) -> List[HIRNode]:
     return result
 
 
+def _replace_goto_in_hir(nodes: List[HIRNode], label: str,
+                          replacement: List[HIRNode]) -> List[HIRNode]:
+    """
+    Recursively replace GotoStatement(label) with an inline copy of replacement,
+    and IfGoto(cond, label) with IfNode(cond, copy_of_replacement).
+    Recurses into nested IfNode, loop, and SwitchNode bodies.
+    """
+    result: List[HIRNode] = []
+    for node in nodes:
+        if isinstance(node, GotoStatement) and node.label == label:
+            result.extend(copy.deepcopy(replacement))
+        elif isinstance(node, IfGoto) and node.label == label:
+            result.append(IfNode(node.ea, node.cond, copy.deepcopy(replacement)))
+        elif isinstance(node, IfNode):
+            node.then_nodes = _replace_goto_in_hir(node.then_nodes, label, replacement)
+            node.else_nodes = _replace_goto_in_hir(node.else_nodes, label, replacement)
+            result.append(node)
+        elif isinstance(node, (WhileNode, ForNode, DoWhileNode)):
+            node.body_nodes = _replace_goto_in_hir(node.body_nodes, label, replacement)
+            result.append(node)
+        elif isinstance(node, SwitchNode):
+            new_cases = []
+            for vals, body in node.cases:
+                if isinstance(body, list):
+                    body = _replace_goto_in_hir(body, label, replacement)
+                new_cases.append((vals, body))
+            node.cases = new_cases
+            if isinstance(node.default_body, list):
+                node.default_body = _replace_goto_in_hir(node.default_body, label, replacement)
+            result.append(node)
+        else:
+            result.append(node)
+    return result
+
+
 # ── Pass ──────────────────────────────────────────────────────────────────────
 
 class IfElseStructurer(OptimizationPass):
@@ -308,23 +344,56 @@ class IfElseStructurer(OptimizationPass):
         dbg("ifelse", f"  true-arm  blocks: {[hex(b.start_ea) for b in true_arm]}")
         dbg("ifelse", f"  false-arm blocks: {[hex(b.start_ea) for b in false_arm]}")
 
-        # Do not absorb arm blocks whose labels are still referenced by gotos
-        # in blocks outside the arms — those labels must remain in the output.
-        arm_labels = {b.label for b in true_arm + false_arm if b.label}
-        if arm_labels:
-            arm_eas = {b.start_ea for b in true_arm + false_arm}
-            external_targets: set = set()
-            for blk in func.blocks:
-                if (getattr(blk, "_absorbed", False)
-                        or blk is block
-                        or blk.start_ea in arm_eas):
+        # If arm block labels are referenced by external gotos, copy the arm HIR
+        # inline at each reference site so no dangling gotos remain after absorption.
+        # Use _label_for() so synthetic labels (label_XXXX) are included, not just
+        # explicit IDA labels stored in b.label.
+        arm_labels = {_label_for(b) for b in true_arm + false_arm}
+        dbg("ifelse", f"  arm_labels={arm_labels}")
+        arm_eas = {b.start_ea for b in true_arm + false_arm}
+        external_targets: set = set()
+        for blk in func.blocks:
+            if (getattr(blk, "_absorbed", False)
+                    or blk is block
+                    or blk.start_ea in arm_eas):
+                continue
+            blk_targets = _collect_goto_targets(blk.hir)
+            if blk_targets:
+                dbg("ifelse", f"  external block {hex(blk.start_ea)} "
+                              f"goto targets: {blk_targets}")
+            external_targets |= blk_targets
+        dbg("ifelse", f"  external_targets={external_targets}")
+        externally_ref = arm_labels & external_targets
+        dbg("ifelse", f"  externally_ref={externally_ref}")
+        if externally_ref:
+            dbg("ifelse", f"  → arm labels {externally_ref} externally "
+                          f"referenced — copying to reference sites")
+            # Build sub-arm HIR for each externally-referenced label.
+            # Strip intra-arm gotos; those blocks' code is included in the sub-arm.
+            arm_label_to_inline: dict = {}
+            for arm_list in (true_arm, false_arm):
+                for i, blk in enumerate(arm_list):
+                    lbl = _label_for(blk)
+                    if lbl in externally_ref:
+                        sub_hir = _build_arm_hir(arm_list[i:], merge_label)
+                        sub_hir = [n for n in sub_hir
+                                   if not (isinstance(n, GotoStatement)
+                                           and n.label in arm_labels)]
+                        dbg("ifelse", f"  built inline HIR for {lbl!r}: "
+                                      f"{[type(n).__name__ for n in sub_hir]}")
+                        arm_label_to_inline[lbl] = sub_hir
+            for ref_blk in func.blocks:
+                if (getattr(ref_blk, "_absorbed", False)
+                        or ref_blk is block
+                        or ref_blk.start_ea in arm_eas):
                     continue
-                external_targets |= _collect_goto_targets(blk.hir)
-            if arm_labels & external_targets:
-                dbg("ifelse", f"  → skipping: arm labels "
-                              f"{arm_labels & external_targets} still referenced "
-                              f"externally")
-                return False
+                for lbl, inline_hir in arm_label_to_inline.items():
+                    if lbl in _collect_goto_targets(ref_blk.hir):
+                        dbg("ifelse", f"  inlining {lbl!r} into block "
+                                      f"{hex(ref_blk.start_ea)}")
+                        ref_blk.hir = _replace_goto_in_hir(ref_blk.hir, lbl, inline_hir)
+                        dbg("ifelse", f"  → done, new HIR: "
+                                      f"{[type(n).__name__ for n in ref_blk.hir]}")
 
         then_nodes = _build_arm_hir(true_arm,  merge_label)
         else_nodes = _build_arm_hir(false_arm, merge_label)

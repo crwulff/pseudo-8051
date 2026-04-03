@@ -477,10 +477,17 @@ class SwitchBodyAbsorber(OptimizationPass):
                     or blk is block
                     or blk.start_ea in all_arm_eas):
                 continue
-            external_targets |= _collect_goto_targets(blk.hir)
+            blk_targets = _collect_goto_targets(blk.hir)
+            if blk_targets:
+                dbg("switch", f"  SwitchBodyAbsorber: external block "
+                              f"{hex(blk.start_ea)} goto targets: {blk_targets}")
+            external_targets |= blk_targets
+        dbg("switch", f"  SwitchBodyAbsorber: external_targets={external_targets}")
 
         all_body_blocks: List[BasicBlock] = []
-        label_body_cache: dict = {}  # label → List[HIRNode]
+        label_body_cache: dict = {}   # label → List[HIRNode]
+        ext_copy_cache: dict = {}     # label → no-break HIR for external replacement
+        arm_blocks_cache: dict = {}   # label → (sorted body_blocks, arm_ml) for sub-arm lookup
 
         def _get_body(label: str) -> Union[str, List[HIRNode]]:
             """Return inlined body HIR for label, or the label string if blocked."""
@@ -497,8 +504,7 @@ class SwitchBodyAbsorber(OptimizationPass):
                             and b.start_ea not in all_arm_eas
                             and label in _collect_goto_targets(b.hir)]
                 dbg("switch", f"  _get_body({label!r}): in external_targets "
-                              f"(referenced by: {ext_blks}) — keeping goto")
-                return label  # keep as goto label
+                              f"(referenced by: {ext_blks}) — will copy to reference sites")
             arm_me, arm_ml = _arm_merge(label)
             body_blocks = _arm_blocks_sw(label_to_block[label], arm_me)
             dbg("switch", f"  _get_body({label!r}): arm_me={hex(arm_me)} arm_ml={arm_ml!r} "
@@ -510,6 +516,21 @@ class SwitchBodyAbsorber(OptimizationPass):
             body_hir = [n for n in body_hir
                         if not (isinstance(n, GotoStatement)
                                 and n.label in inlined_block_labels)]
+            # Stash a no-break copy for external goto replacement before adding breaks.
+            # If the body falls through to the merge, append the merge block's code so
+            # the external copy includes the full execution path.
+            if label in external_targets:
+                import copy as _copy
+                ext_body = _copy.deepcopy(body_hir)
+                if arm_ml and _needs_break(ext_body):
+                    merge_blk = label_to_block.get(arm_ml)
+                    if merge_blk and not getattr(merge_blk, "_absorbed", False):
+                        merge_hir = [n for n in merge_blk.hir
+                                     if not isinstance(n, Label)]
+                        ext_body = ext_body + merge_hir
+                        dbg("switch", f"  _get_body: appended merge {arm_ml!r} "
+                                      f"to ext copy of {label!r}")
+                ext_copy_cache[label] = ext_body
             body_hir = _replace_goto_with_break(body_hir, arm_ml)
             needs_brk = _needs_break(body_hir)
             dbg("switch", f"    after replace_goto_with_break: "
@@ -517,6 +538,8 @@ class SwitchBodyAbsorber(OptimizationPass):
             if needs_brk:
                 body_hir.append(BreakStmt(switch_node.ea))
             label_body_cache[label] = body_hir
+            sorted_body = sorted(body_blocks, key=lambda b: b.start_ea)
+            arm_blocks_cache[label] = (sorted_body, arm_ml)
             all_body_blocks.extend(body_blocks)
             return body_hir
 
@@ -554,8 +577,54 @@ class SwitchBodyAbsorber(OptimizationPass):
                 switch_node.default_body = dbody
                 switch_node.default_label = None
 
+        # Also handle external references to *intermediate* arm blocks (shared tail code
+        # that sits inside a case arm but is not the case entry point).
+        for case_label, (sorted_blocks, arm_ml) in arm_blocks_cache.items():
+            for i, blk in enumerate(sorted_blocks):
+                blk_label = _label_for(blk)
+                if blk_label in external_targets and blk_label not in ext_copy_cache:
+                    sub_hir = _build_arm_hir(sorted_blocks[i:], arm_ml)
+                    sub_hir = [n for n in sub_hir
+                               if not (isinstance(n, GotoStatement)
+                                       and n.label in inlined_block_labels)]
+                    # If the sub-arm falls through to the merge point, append merge
+                    # block's code so the external copy has the full execution path.
+                    if arm_ml and _needs_break(sub_hir):
+                        merge_blk = label_to_block.get(arm_ml)
+                        if merge_blk and not getattr(merge_blk, "_absorbed", False):
+                            merge_hir = [n for n in merge_blk.hir
+                                         if not isinstance(n, Label)]
+                            sub_hir = sub_hir + merge_hir
+                            dbg("switch", f"  SwitchBodyAbsorber: appended merge "
+                                          f"{arm_ml!r} to ext copy of {blk_label!r}")
+                    ext_copy_cache[blk_label] = sub_hir
+                    dbg("switch", f"  SwitchBodyAbsorber: intermediate ext ref "
+                                  f"{blk_label!r} @ {hex(blk.start_ea)} in arm "
+                                  f"'{case_label}' → "
+                                  f"{[type(n).__name__ for n in sub_hir]}")
+
         for blk in all_body_blocks:
             blk._absorbed = True
+
+        # Replace external gotos to absorbed case labels with no-break inline copies.
+        dbg("switch", f"  SwitchBodyAbsorber: ext_copy_cache keys={list(ext_copy_cache)}")
+        if ext_copy_cache:
+            from pseudo8051.passes.ifelse import _replace_goto_in_hir
+            for ref_blk in func.blocks:
+                if (getattr(ref_blk, "_absorbed", False)
+                        or ref_blk is block
+                        or ref_blk.start_ea in all_arm_eas):
+                    continue
+                for lbl, ext_hir in ext_copy_cache.items():
+                    blk_targets = _collect_goto_targets(ref_blk.hir)
+                    dbg("switch", f"  SwitchBodyAbsorber: ref_blk {hex(ref_blk.start_ea)} "
+                                  f"targets={blk_targets} (looking for {lbl!r})")
+                    if lbl in blk_targets:
+                        dbg("switch", f"  SwitchBodyAbsorber: inlining {lbl!r} "
+                                      f"into block {hex(ref_blk.start_ea)}")
+                        ref_blk.hir = _replace_goto_in_hir(ref_blk.hir, lbl, ext_hir)
+                        dbg("switch", f"  SwitchBodyAbsorber: → done, new HIR: "
+                                      f"{[type(n).__name__ for n in ref_blk.hir]}")
 
         # Absorb the merge block if it isn't referenced by any external goto.
         # Necessary for jump-table switches where merge_ea < block.start_ea:
