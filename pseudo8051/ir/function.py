@@ -221,12 +221,12 @@ class Function:
         - single register  → Reg("R2")
         - multiple registers → RegGroup(("R2", "R1"))
         """
-        from pseudo8051.prototypes import get_proto
+        from pseudo8051.prototypes import get_proto, expand_regs
         from pseudo8051.ir.expr import Reg, RegGroup
         proto = get_proto(self.name)
         if proto is None or not proto.return_regs:
             return
-        regs = proto.return_regs
+        regs = expand_regs(tuple(proto.return_regs), proto.return_type)
         ret_expr = Reg(regs[0]) if len(regs) == 1 else RegGroup(tuple(regs))
         self._walk_fix_returns(self.hir, ret_expr)
 

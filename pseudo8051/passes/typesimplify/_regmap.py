@@ -13,11 +13,12 @@ from pseudo8051.passes.patterns._utils import (
 )
 from pseudo8051.ir.expr import UnaryOp, BinOp, Call
 from pseudo8051.ir.function import Function
-from pseudo8051.prototypes  import FuncProto
+from pseudo8051.prototypes  import FuncProto, expand_regs
 
 # ── Standard 8051 calling-convention register assignment ─────────────────────
 
 _REG_POOL = ["R0", "R1", "R2", "R3", "R4", "R5", "R6", "R7"]
+
 
 
 def _assign_regs(params) -> List[Tuple[str, ...]]:
@@ -67,7 +68,9 @@ def _build_reg_map(proto: FuncProto,
                    live_in: frozenset = frozenset()) -> Dict[str, VarInfo]:
     """Map register names → VarInfo for prototype params and return registers."""
     params   = proto.params
-    assigned: List[Tuple[str, ...]] = [p.regs if p.regs else () for p in params]
+    assigned: List[Tuple[str, ...]] = [
+        expand_regs(p.regs, p.type) if p.regs else () for p in params
+    ]
 
     needs = [i for i, r in enumerate(assigned) if not r]
     if needs:
@@ -101,13 +104,14 @@ def _build_reg_map(proto: FuncProto,
             reg_map[info.pair_name] = info
 
     if proto.return_regs:
-        ret_info = next((reg_map[r] for r in proto.return_regs if r in reg_map), None)
+        ret_regs = expand_regs(tuple(proto.return_regs), proto.return_type)
+        ret_info = next((reg_map[r] for r in ret_regs if r in reg_map), None)
         if ret_info is None:
-            ret_info = VarInfo("retval", proto.return_type, proto.return_regs)
-        pair = "".join(proto.return_regs)
+            ret_info = VarInfo("retval", proto.return_type, ret_regs)
+        pair = "".join(ret_regs)
         if pair not in reg_map:
             reg_map[pair] = ret_info
-        for r in proto.return_regs:
+        for r in ret_regs:
             if r not in reg_map:
                 reg_map[r] = ret_info
 

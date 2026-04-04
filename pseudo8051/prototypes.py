@@ -68,6 +68,23 @@ _PROTO_TYPE_BYTES: dict = {
 }
 
 
+def expand_regs(regs: Tuple[str, ...], type_str: str) -> Tuple[str, ...]:
+    """
+    For 32-bit types where IDA only allows specifying two endpoint registers,
+    expand to the full contiguous range (e.g. ('R4','R7') → ('R4','R5','R6','R7')).
+    All other cases are returned unchanged.
+    """
+    nbytes = _PROTO_TYPE_BYTES.get(type_str, 0)
+    dbg("proto", f"  expand_regs({regs!r}, {type_str!r}): nbytes={nbytes} len={len(regs)}")
+    if nbytes == 4 and len(regs) == 2:
+        lo = min(_PROTO_REG_POOL.index(r) for r in regs)
+        hi = max(_PROTO_REG_POOL.index(r) for r in regs)
+        result = tuple(_PROTO_REG_POOL[lo:hi + 1])
+        dbg("proto", f"  expand_regs → {result!r}")
+        return result
+    return regs
+
+
 def param_regs(proto: "FuncProto") -> List[Tuple[str, ...]]:
     """
     Return the physical register tuple for each parameter using the standard
@@ -77,8 +94,9 @@ def param_regs(proto: "FuncProto") -> List[Tuple[str, ...]]:
     result: List[Tuple[str, ...]] = []
     for p in proto.params:
         if p.regs:
-            result.append(p.regs)
-            pool = [r for r in pool if r not in p.regs]
+            regs = expand_regs(p.regs, p.type)
+            result.append(regs)
+            pool = [r for r in pool if r not in regs]
         else:
             size = _PROTO_TYPE_BYTES.get(p.type, 0)
             if size == 0 or size > len(pool):
@@ -332,7 +350,9 @@ def _proto_from_ida(name: str) -> Optional["FuncProto"]:
                 for i in range(fi.size()):
                     arg   = fi[i]
                     pname = arg.name if arg.name else f"arg{i}"
-                    ptype = _norm(str(arg.type))
+                    raw_ptype = str(arg.type)
+                    ptype = _norm(raw_ptype)
+                    dbg("proto", f"{name}: arg{i} raw_type={raw_ptype!r} → {ptype!r}")
                     # Extract register from argloc if __usercall
                     arg_size = _PROTO_TYPE_BYTES.get(ptype, 0)
                     try:

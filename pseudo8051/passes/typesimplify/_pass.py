@@ -110,8 +110,10 @@ class TypeAwareSimplifier(OptimizationPass):
             ] + func.hir
 
         # Fold Assign(ret_reg, expr); ReturnStmt(ret_reg) → ReturnStmt(expr) (issue 1)
-        ret_regs = tuple(proto.return_regs) if proto and proto.return_regs \
-                   else tuple(getattr(func, "return_registers", []))
+        from pseudo8051.prototypes import expand_regs as _expand_regs
+        ret_regs = (_expand_regs(tuple(proto.return_regs), proto.return_type)
+                    if proto and proto.return_regs
+                    else tuple(getattr(func, "return_registers", [])))
         if ret_regs:
             func.hir = _fold_return_chains(func.hir, ret_regs, reg_map)
 
