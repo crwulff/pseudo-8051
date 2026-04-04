@@ -189,8 +189,13 @@ def _walk_expr(expr: Expr, fn: Callable[[Expr], Expr]) -> Expr:
 
 
 def _subst_pairs_in_expr(expr: Expr, reg_map: Dict[str, "VarInfo"]) -> Expr:
-    """Replace RegGroup(regs) → Name(vinfo.name) for multi-reg VarInfo entries."""
-    # Build lookup: pair_name → VarInfo  (skip XRAM locals)
+    """Attach alias to RegGroup/Reg nodes for multi-reg VarInfo entries.
+
+    Previously replaced these nodes with Name(vinfo.name); now sets alias so
+    register identity (regs/name) is preserved for conflict detection while
+    render() still returns the human-readable variable name.
+    """
+    # Build lookup: canonical register key → display name  (skip XRAM locals)
     pair_map: Dict[str, str] = {}
     for key, vinfo in reg_map.items():
         if not isinstance(vinfo, VarInfo) or vinfo.xram_sym:
@@ -209,20 +214,27 @@ def _subst_pairs_in_expr(expr: Expr, reg_map: Dict[str, "VarInfo"]) -> Expr:
 
     def _fn(e: Expr) -> Expr:
         if isinstance(e, RegGroup):
-            pair = e.render()  # e.g. "R6R7"
-            if pair in pair_map:
-                return Name(pair_map[pair])
-        if isinstance(e, (Reg, Name)):
-            n = e.render()
-            if n in pair_map:
-                return Name(pair_map[n])
+            # Only alias on the first pass — once an alias is set it must not be
+            # overwritten by a later _subst_pairs_in_expr call that sees updated
+            # reg_map entries (e.g. retval VarInfo added after the arg alias).
+            if not e.alias:
+                pair = "".join(e.regs)  # canonical key
+                if pair in pair_map:
+                    return RegGroup(e.regs, e.brace, alias=pair_map[pair])
+        elif isinstance(e, Reg):
+            if not e.alias and e.name in pair_map:
+                return Reg(e.name, alias=pair_map[e.name])
+        elif isinstance(e, Name):
+            # Name("R7") / Name("R4R5R6R7") are register placeholders in call args
+            if e.name in pair_map:
+                return Reg(e.name, alias=pair_map[e.name])
         return e
 
     return _walk_expr(expr, _fn)
 
 
 def _subst_single_regs_in_expr(expr: Expr, reg_map: Dict[str, "VarInfo"]) -> Expr:
-    """Replace Reg(rx) → Name(param.name[.suffix]) for is_param entries.
+    """Attach alias to Reg(rx) nodes for is_param single-register entries.
     For multi-byte parameters, appends .hi/.lo/.bN to identify the byte accessed."""
     singles = {k: _param_byte_name(k, v) for k, v in reg_map.items()
                if _RE_SINGLE_REG.match(k)
@@ -233,10 +245,10 @@ def _subst_single_regs_in_expr(expr: Expr, reg_map: Dict[str, "VarInfo"]) -> Exp
         return expr
 
     def _fn(e: Expr) -> Expr:
-        if isinstance(e, Reg) and e.name in singles:
-            return Name(singles[e.name])
+        if isinstance(e, Reg) and not e.alias and e.name in singles:
+            return Reg(e.name, alias=singles[e.name])
         if isinstance(e, Name) and e.name in singles:   # covers Name("R3") call args
-            return Name(singles[e.name])
+            return Reg(e.name, alias=singles[e.name])
         return e
 
     return _walk_expr(expr, _fn)
@@ -404,7 +416,7 @@ def _fold_into_node(node: HIRNode, name_expr: Expr,
     def _subst_fn(e: Expr) -> Expr:
         if e == name_expr:
             return replacement
-        if isinstance(e, (Name, Reg)) and e.render() == name_str:
+        if isinstance(e, (Name, Reg, RegGroup)) and e.render() == name_str:
             return replacement
         return e
 

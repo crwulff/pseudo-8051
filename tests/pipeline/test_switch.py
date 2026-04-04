@@ -594,11 +594,11 @@ class TestSwitchNodeTypeSimplify:
         assert len(func.hir) == 1
         sw_out = func.hir[0]
         assert isinstance(sw_out, SwitchNode)
-        assert sw_out.subject == Name("arg1"), \
-            f"Expected Name('arg1'), got {sw_out.subject!r}"
+        assert sw_out.subject.render() == "arg1", \
+            f"Expected subject rendering 'arg1', got {sw_out.subject!r}"
 
     def test_subject_substituted_from_liveness(self):
-        """Without proto, SwitchNode(R7, ...) with R7 live-in → subject becomes Name('arg1')."""
+        """Without proto, SwitchNode(R7, ...) with R7 live-in → subject becomes arg1."""
         sw = SwitchNode(
             ea=0x1000,
             subject=Reg("R7"),
@@ -613,8 +613,8 @@ class TestSwitchNodeTypeSimplify:
         assert len(func.hir) == 1
         sw_out = func.hir[0]
         assert isinstance(sw_out, SwitchNode)
-        assert sw_out.subject == Name("arg1"), \
-            f"Expected Name('arg1'), got {sw_out.subject!r}"
+        assert sw_out.subject.render() == "arg1", \
+            f"Expected subject rendering 'arg1', got {sw_out.subject!r}"
 
     def test_case_body_simplified(self):
         """Case body containing A = R7 relay gets simplified when R7 live-in."""

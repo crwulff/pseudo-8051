@@ -141,9 +141,7 @@ class TestPostIncLoadPipeline:
         """
         movx A, @DPTR; inc DPTR  — DPTR is now included in RegPostIncPattern.
         The standalone DPTR++ is eliminated; it is embedded as XRAM[DPTR++].
-        Note: full 3-node fusion into IRAM[dest.lo] = XRAM[DPTR++] requires
-        _propagate_values to inline, which it cannot do for DPTR (Reg stays Reg,
-        not substituted to a Name). Two nodes remain instead of three.
+        Full 3-to-1 fusion: A = XRAM[DPTR++]; IRAM[dest] = A → IRAM[dest] = XRAM[DPTR++].
         """
         PROTOTYPES["pil_dptr_load"] = FuncProto(
             return_type="void",
@@ -165,9 +163,9 @@ class TestPostIncLoadPipeline:
             f"Expected DPTR++ embedded in XRAM access, got: {rendered}"
         assert all("DPTR++;" not in t for t in rendered), \
             f"Standalone DPTR++ should be eliminated, got: {rendered}"
-        # Three nodes collapsed to two
-        assert len([t for t in rendered if t.strip()]) == 2, \
-            f"Expected 2 output lines (3-to-2 fold), got: {rendered}"
+        # Three nodes collapsed to one
+        assert len([t for t in rendered if t.strip()]) == 1, \
+            f"Expected 1 output line (3-to-1 fold), got: {rendered}"
 
     def test_pre_inc_iram_load(self):
         """

@@ -83,15 +83,20 @@ class Expr(ABC):
 # ── Atomic nodes ──────────────────────────────────────────────────────────────
 
 class Reg(Expr):
-    """A named register: Reg("A"), Reg("R7"), Reg("C"), Reg("DPTR")."""
+    """A named register: Reg("A"), Reg("R7"), Reg("C"), Reg("DPTR").
 
-    __slots__ = ("name",)
+    alias: optional display name (e.g. "count") used only for rendering.
+    Register identity (eq/hash/conflict detection) always uses self.name.
+    """
 
-    def __init__(self, name: str):
-        self.name = name
+    __slots__ = ("name", "alias")
+
+    def __init__(self, name: str, alias: Optional[str] = None):
+        self.name  = name
+        self.alias = alias
 
     def render(self, outer_prec: int = 0) -> str:
-        return self.name
+        return self.alias if self.alias else self.name
 
     def __eq__(self, other: object) -> bool:
         return isinstance(other, Reg) and self.name == other.name
@@ -100,19 +105,27 @@ class Reg(Expr):
         return hash(("Reg", self.name))
 
     def __repr__(self) -> str:
+        if self.alias:
+            return f"Reg({self.name!r}, alias={self.alias!r})"
         return f"Reg({self.name!r})"
 
 
 class Const(Expr):
-    """An integer constant: Const(0x5d), Const(0)."""
+    """An integer constant: Const(0x5d), Const(0).
 
-    __slots__ = ("value",)
+    alias: optional display name (e.g. an enum member or type-padded hex string)
+    used only for rendering.  Integer identity (eq/hash/comparisons) always uses
+    self.value.
+    """
 
-    def __init__(self, value: int):
+    __slots__ = ("value", "alias")
+
+    def __init__(self, value: int, alias: Optional[str] = None):
         self.value = value
+        self.alias = alias
 
     def render(self, outer_prec: int = 0) -> str:
-        return _const_str(self.value)
+        return self.alias if self.alias else _const_str(self.value)
 
     def __eq__(self, other: object) -> bool:
         return isinstance(other, Const) and self.value == other.value
@@ -121,6 +134,8 @@ class Const(Expr):
         return hash(("Const", self.value))
 
     def __repr__(self) -> str:
+        if self.alias:
+            return f"Const({self.value!r}, alias={self.alias!r})"
         return f"Const({self.value!r})"
 
 
@@ -232,17 +247,25 @@ class RegGroup(Expr):
     """
     A multi-register group.
 
-    RegGroup(("R6", "R7"))              → "R6R7"
-    RegGroup(("B", "A"), brace=True)    → "{B, A}"
+    RegGroup(("R6", "R7"))                        → "R6R7"
+    RegGroup(("B", "A"), brace=True)              → "{B, A}"
+    RegGroup(("R6", "R7"), alias="count")         → "count"
+
+    alias: optional display name used only for rendering.
+    Register identity (eq/hash/conflict detection) always uses self.regs.
     """
 
-    __slots__ = ("regs", "brace")
+    __slots__ = ("regs", "brace", "alias")
 
-    def __init__(self, regs: Tuple[str, ...], brace: bool = False):
+    def __init__(self, regs: Tuple[str, ...], brace: bool = False,
+                 alias: Optional[str] = None):
         self.regs  = tuple(regs)
         self.brace = brace
+        self.alias = alias
 
     def render(self, outer_prec: int = 0) -> str:
+        if self.alias:
+            return self.alias
         if self.brace:
             return "{" + ", ".join(self.regs) + "}"
         return "".join(self.regs)
@@ -256,6 +279,8 @@ class RegGroup(Expr):
         return hash(("RegGroup", self.regs, self.brace))
 
     def __repr__(self) -> str:
+        if self.alias:
+            return f"RegGroup({self.regs!r}, alias={self.alias!r})"
         if self.brace:
             return f"RegGroup({self.regs!r}, brace=True)"
         return f"RegGroup({self.regs!r})"

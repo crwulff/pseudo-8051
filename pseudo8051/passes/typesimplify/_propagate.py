@@ -16,7 +16,8 @@ from pseudo8051.ir.hir import (HIRNode, Assign, TypedAssign, CompoundAssign,
                                 ExprStmt, ReturnStmt, IfGoto, IfNode,
                                 WhileNode, ForNode, DoWhileNode)
 from pseudo8051.ir.expr import (Expr, BinOp, Call,
-                                 Reg as RegExpr, Name as NameExpr)
+                                 Reg as RegExpr, Name as NameExpr,
+                                 RegGroup as RegGroupExpr)
 from pseudo8051.passes.patterns._utils import (
     VarInfo, _count_reg_uses_in_node, _subst_reg_in_node, _walk_expr,
 )
@@ -24,6 +25,54 @@ from pseudo8051.constants import dbg
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _expr_name_refs(expr: Expr) -> frozenset:
+    """Collect register/name identities referenced in an expression tree.
+
+    For RegGroup nodes, emits the canonical joined key (e.g. "R4R5R6R7") so
+    that conflict detection operates in register-name space regardless of
+    whether the node carries an alias.
+    """
+    refs: set = set()
+
+    def _collect(e: Expr) -> Expr:
+        if isinstance(e, RegGroupExpr):
+            refs.add("".join(e.regs))
+        elif isinstance(e, (NameExpr, RegExpr)):
+            refs.add(e.name)
+        return e
+
+    _walk_expr(expr, _collect)
+    return frozenset(refs)
+
+
+def _collect_mid_writes(nodes: List[HIRNode], reg_map: Dict) -> frozenset:
+    """
+    Collect all names/regs written by a sequence of nodes, with two expansions:
+
+    1. Register-to-variable: for each register key in written_regs, look up the
+       corresponding variable name in reg_map and add it.  This catches
+       Assign(RegGroup(R4R5R6R7), ...) clobbering a variable named 'divisor'.
+
+    2. Name-lhs: TypedAssign / Assign with a Name lhs don't appear in written_regs,
+       so we add lhs.name directly.  This catches TypedAssign(Name('divisor'), ...).
+    """
+    result: set = set()
+    for node in nodes:
+        result.update(node.written_regs)
+        # Expand register writes → variable names
+        if reg_map:
+            for reg in node.written_regs:
+                info = reg_map.get(reg)
+                if isinstance(info, VarInfo) and info.name:
+                    result.add(info.name)
+        # Name-lhs writes (TypedAssign / Assign with Name LHS)
+        if isinstance(node, (Assign, TypedAssign)):
+            lhs = getattr(node, 'lhs', None)
+            if isinstance(lhs, NameExpr):
+                result.add(lhs.name)
+    return frozenset(result)
+
 
 def _as_retval_stmt(node: HIRNode) -> Optional[Tuple[str, Call]]:
     """Return (retval_name, call_expr) if node is a TypedAssign retval node; else None."""
@@ -105,27 +154,23 @@ def _fold_compound_assigns(live: List[HIRNode]) -> Tuple[List[HIRNode], bool]:
 
 # ── Sub-pass A: register copy propagation ─────────────────────────────────────
 
-def _propagate_register_copies(live: List[HIRNode]) -> Tuple[List[HIRNode], bool]:
+def _propagate_register_copies(live: List[HIRNode],
+                                reg_map: Dict = {}) -> Tuple[List[HIRNode], bool]:
     """
-    A: For each Assign(Reg(r), Name/Const(n)) at index i with exactly one
-    downstream use before r is written again, substitute the replacement into
-    that use and remove the assignment.
+    A: For each Assign(Reg(r), expr) at index i with exactly one downstream use
+    before r is written again, substitute the replacement into that use and remove
+    the assignment.
 
-    Also handles multi-use propagation for reg-free replacements (Name/Const/
-    BinOp without Reg leaves).
+    Multi-use propagation is limited to reg-free replacements (no Reg leaves) to
+    avoid duplicating side-effecting expressions.  Single-use propagation allows
+    any expression; the intermediate guard checks for register clobbers.
     """
     changed = False
     live = list(live)
     i = 0
     while i < len(live):
         node = live[i]
-        if not (isinstance(node, Assign)
-                and isinstance(node.lhs, RegExpr)
-                and (isinstance(node.rhs, (NameExpr,))
-                     or _is_reg_free(node.rhs))):
-            if isinstance(node, Assign) and isinstance(node.lhs, RegExpr):
-                dbg("propagate", f"  sub-A-skip: {node.lhs.name}={node.rhs.render()!r} "
-                    f"(not reg-free)")
+        if not (isinstance(node, Assign) and isinstance(node.lhs, RegExpr)):
             i += 1
             continue
         r = node.lhs.name
@@ -155,6 +200,17 @@ def _propagate_register_copies(live: List[HIRNode]) -> Tuple[List[HIRNode], bool
                 dbg("propagate", f"    scan[{_j}]={_dbg_node(live[_j])} uses={_u} kill={_wr}")
 
         if total_uses == 1 and use_idx is not None:
+            # Guard: don't propagate past nodes that write to names (or their backing
+            # registers) used in replacement.
+            repl_refs = _expr_name_refs(replacement)
+            if repl_refs and use_idx > i + 1:
+                mid_writes = _collect_mid_writes(live[i + 1:use_idx], reg_map)
+                if repl_refs & mid_writes:
+                    dbg("typesimp",
+                        f"  [{hex(node.ea)}] prop-values: blocked {r} — "
+                        f"intermediate writes {repl_refs & mid_writes}")
+                    i += 1
+                    continue
             new_node = _subst_reg_in_node(live[use_idx], r, replacement)
             if new_node is not None:
                 live[use_idx] = new_node
@@ -186,7 +242,8 @@ def _propagate_register_copies(live: List[HIRNode]) -> Tuple[List[HIRNode], bool
 
 # ── Sub-pass B: retval inlining ───────────────────────────────────────────────
 
-def _inline_retvals(live: List[HIRNode]) -> Tuple[List[HIRNode], bool]:
+def _inline_retvals(live: List[HIRNode],
+                    reg_map: Dict = {}) -> Tuple[List[HIRNode], bool]:
     """
     B: For each retval TypedAssign with exactly one downstream use of the
     retval name, inline the call expression into the target and remove the
@@ -208,6 +265,24 @@ def _inline_retvals(live: List[HIRNode]) -> Tuple[List[HIRNode], bool]:
             for j, tgt in enumerate(remaining):
                 if _count_reg_uses_in_node(retval_name, tgt) == 1:
                     abs_j = i + 1 + j
+                    # Guard: don't inline past nodes that write to any name/reg
+                    # (or their backing registers) referenced in the call expression.
+                    dbg("propagate",
+                        f"  inline-retval [{hex(live[i].ea)}]: {retval_name} "
+                        f"j={j} abs_j={abs_j} "
+                        f"intermediates={[_dbg_node(live[k]) for k in range(i+1, abs_j)]}")
+                    if j > 0:
+                        call_reads = _expr_name_refs(call_expr)
+                        mid_writes = _collect_mid_writes(live[i + 1:abs_j], reg_map)
+                        dbg("propagate",
+                            f"    call_reads={sorted(call_reads)} "
+                            f"mid_writes={sorted(mid_writes)} "
+                            f"conflict={sorted(call_reads & mid_writes)}")
+                        if call_reads & mid_writes:
+                            dbg("typesimp",
+                                f"  [{hex(live[i].ea)}] inline-retval: blocked — "
+                                f"intermediate writes {call_reads & mid_writes}")
+                            break
                     if (isinstance(tgt, Assign)
                             and isinstance(tgt.rhs, (NameExpr, RegExpr))
                             and tgt.rhs.name == retval_name):
@@ -251,8 +326,8 @@ def _propagate_values(nodes: List[HIRNode],
     while changed:
         changed = False
         work, c0 = _fold_compound_assigns(work)
-        work, cA = _propagate_register_copies(work)
-        work, cB = _inline_retvals(work)
+        work, cA = _propagate_register_copies(work, reg_map)
+        work, cB = _inline_retvals(work, reg_map)
         changed = c0 or cA or cB
 
     return work

@@ -105,9 +105,7 @@ class ConstGroupPattern(Pattern):
                 continue
             value, end_i = result
             const_s = _const_str(value, vinfo.type)
-            # Use Name(const_s) so type-padded format is preserved in both
-            # structural and text fold paths.
-            const_expr = Name(const_s)
+            const_expr = Const(value, alias=const_s)
             dbg("typesimp", f"  const-load: {vinfo.name} = {const_s}")
 
             # Try to fold the constant into the immediately following statement

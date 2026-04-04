@@ -25,18 +25,18 @@ from pseudo8051.constants import dbg
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _try_resolve(type_str: str, value: int, context: str = "") -> Optional[NameExpr]:
-    """Return Name(member_name) if value resolves in the enum, else None."""
+def _try_resolve(type_str: str, value: int, context: str = "") -> Optional[Const]:
+    """Return Const(value, alias=member_name) if value resolves in the enum, else None."""
     name = resolve_enum_const(type_str, value)
     if name is None:
         return None
     dbg("enum", f"  enum-resolve: {type_str}({value:#x}) → {name}  [{context}]")
-    return NameExpr(name)
+    return Const(value, alias=name)
 
 
 def _resolve_in_expr(expr: Expr, type_str: str) -> Expr:
-    """If expr is a Const whose value resolves in type_str, return Name(member). Else expr."""
-    if isinstance(expr, Const):
+    """If expr is an unaliased Const whose value resolves in type_str, return Const(alias). Else expr."""
+    if isinstance(expr, Const) and not expr.alias:
         replacement = _try_resolve(type_str, expr.value, f"expr={expr.render()}")
         if replacement is not None:
             return replacement
@@ -104,7 +104,7 @@ def _resolve_call_args(call_expr: Call) -> Call:
     for i, (p, arg) in enumerate(zip(proto.params, call_expr.args)):
         dbg("enum", f"    arg[{i}] {p.name!r}: type={p.type!r}, "
             f"arg={arg.render()!r} (Const={isinstance(arg, Const)})")
-        if not isinstance(arg, Const):
+        if not isinstance(arg, Const) or arg.alias:
             continue
         if not is_enum_type(p.type):
             dbg("enum", f"    → {p.type!r} is not an IDA enum, skipping")
