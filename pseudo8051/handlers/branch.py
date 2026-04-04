@@ -65,14 +65,20 @@ class SjmpHandler(MnemonicHandler):
     def lift(self, insn, state=None) -> List[HIRNode]:
         tail = _tail_call_target(insn)
         if tail:
-            from pseudo8051.prototypes import get_proto, param_regs
+            from pseudo8051.prototypes import get_proto, param_regs, expand_regs
+            from pseudo8051.ir.expr import RegGroup, Reg as RegExpr
             proto = get_proto(tail)
             if proto:
                 regs_list = param_regs(proto)
                 args = [Name("".join(r)) if r else Name("?") for r in regs_list]
                 call_node = Call(tail, args)
-                if proto.return_type != "void":
-                    return [ReturnStmt(insn.ea, call_node)]
+                if proto.return_type != "void" and proto.return_regs:
+                    # Emit Assign(ret_reg(s), Call(...)) + bare ReturnStmt so that
+                    # ChunkInliner keeps the call when inlining (it only drops ReturnStmt)
+                    # and _fold_return_chains collapses it when not inlined.
+                    ret_regs = expand_regs(tuple(proto.return_regs), proto.return_type)
+                    lhs = RegExpr(ret_regs[0]) if len(ret_regs) == 1 else RegGroup(ret_regs)
+                    return [Assign(insn.ea, lhs, call_node), ReturnStmt(insn.ea, None)]
                 return [ExprStmt(insn.ea, call_node), ReturnStmt(insn.ea, None)]
             return [ExprStmt(insn.ea, Call(tail, [])), ReturnStmt(insn.ea, None)]
         label = _label_str(insn, 0, state)
