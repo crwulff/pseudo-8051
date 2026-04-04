@@ -23,6 +23,7 @@ from pseudo8051.passes.typesimplify._post     import (
     _fold_return_chains,
     _fold_xram_call_args,
 )
+from pseudo8051.passes.typesimplify._enum_resolve import _resolve_enum_consts
 from pseudo8051.constants import dbg
 
 
@@ -113,6 +114,9 @@ class TypeAwareSimplifier(OptimizationPass):
                    else tuple(getattr(func, "return_registers", []))
         if ret_regs:
             func.hir = _fold_return_chains(func.hir, ret_regs, reg_map)
+
+        # Replace Const values with enum member names where the type context is an IDA enum.
+        func.hir = _resolve_enum_consts(func.hir, reg_map)
 
         # Remove Label nodes in the assembled HIR that are no longer referenced
         # by any goto (can be orphaned by nop-goto removal + CJNE/JNC collapsing).

@@ -86,6 +86,8 @@ _RELOAD_ORDER = [
     "pseudo8051.passes.typesimplify._carry",
     "pseudo8051.passes.typesimplify._xram_call_args",
     "pseudo8051.passes.typesimplify._post",
+    "pseudo8051.enum_resolve",
+    "pseudo8051.passes.typesimplify._enum_resolve",
     "pseudo8051.passes.typesimplify._pass",
     "pseudo8051.passes.typesimplify",
     "pseudo8051.passes.switchcomment",

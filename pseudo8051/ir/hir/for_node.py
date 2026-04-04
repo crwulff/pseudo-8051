@@ -41,6 +41,9 @@ class ForNode(HIRNode):
     def map_bodies(self, fn: Callable[[List[HIRNode]], List[HIRNode]]) -> "ForNode":
         return ForNode(self.ea, self.init, self.condition, self.update, fn(self.body_nodes))
 
+    def replace_condition(self, new_cond) -> "ForNode":
+        return ForNode(self.ea, self.init, new_cond, self.update, self.body_nodes)
+
     def render(self, indent: int = 0) -> List[Tuple[int, str]]:
         ind = self._ind(indent)
         lines: List[Tuple[int, str]] = []
