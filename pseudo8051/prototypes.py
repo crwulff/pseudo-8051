@@ -48,6 +48,19 @@ class FuncProto:
     params:      List[Param]    = field(default_factory=list)
 
 
+@dataclass
+class StructField:
+    """One field in a struct type."""
+    name: str   # field name, e.g. 'quotient'
+    type: str   # C type, e.g. 'int32_t'
+
+
+@dataclass
+class StructDef:
+    """A struct type definition (fields in declaration order = register order)."""
+    fields: List[StructField]
+
+
 def return_expr(proto: "FuncProto") -> str:
     """
     C expression for the return value — concatenation of return_regs names:
@@ -68,20 +81,67 @@ _PROTO_TYPE_BYTES: dict = {
 }
 
 
+def struct_size(type_name: str) -> int:
+    """
+    Total size in bytes of a struct type registered in STRUCTS, or read from
+    IDA's type system.  Returns 0 for unknown / non-struct types.
+    """
+    sd = get_struct(type_name)
+    if sd is None:
+        return 0
+    return sum(_PROTO_TYPE_BYTES.get(f.type, 0) for f in sd.fields)
+
+
+def get_struct(type_name: str) -> Optional["StructDef"]:
+    """
+    Return the StructDef for *type_name*, checking STRUCTS first then IDA.
+    Returns None if the type is not a known struct.
+    """
+    manual = STRUCTS.get(type_name)
+    if manual is not None:
+        return manual
+    return _struct_from_ida(type_name)
+
+
+def _struct_from_ida(type_name: str) -> Optional["StructDef"]:
+    """Try to read struct field names/types from IDA's type system."""
+    try:
+        import ida_typeinf as _idt
+        tif = _idt.tinfo_t()
+        if not tif.get_named_type(None, type_name):
+            return None
+        if not tif.is_struct():
+            return None
+        udt = _idt.udt_type_data_t()
+        if not tif.get_udt_details(udt):
+            return None
+        fields = [
+            StructField(name=udt[i].name, type=_norm(str(udt[i].type)))
+            for i in range(udt.size())
+        ]
+        return StructDef(fields=fields)
+    except Exception:
+        return None
+
+
 def expand_regs(regs: Tuple[str, ...], type_str: str) -> Tuple[str, ...]:
     """
-    For 32-bit types where IDA only allows specifying two endpoint registers,
-    expand to the full contiguous range (e.g. ('R4','R7') → ('R4','R5','R6','R7')).
-    All other cases are returned unchanged.
+    When IDA supplies only two endpoint registers for a multi-byte type
+    (e.g. ALOC_REG2 gives ('R4','R7') for int32_t), expand to the full
+    contiguous range.  Works for any primitive or struct type.
     """
-    nbytes = _PROTO_TYPE_BYTES.get(type_str, 0)
+    nbytes = _PROTO_TYPE_BYTES.get(type_str) or struct_size(type_str)
     dbg("proto", f"  expand_regs({regs!r}, {type_str!r}): nbytes={nbytes} len={len(regs)}")
-    if nbytes == 4 and len(regs) == 2:
-        lo = min(_PROTO_REG_POOL.index(r) for r in regs)
-        hi = max(_PROTO_REG_POOL.index(r) for r in regs)
+    if len(regs) == 2 and nbytes > 2:
+        try:
+            lo = min(_PROTO_REG_POOL.index(r) for r in regs)
+            hi = max(_PROTO_REG_POOL.index(r) for r in regs)
+        except ValueError:
+            return regs
         result = tuple(_PROTO_REG_POOL[lo:hi + 1])
-        dbg("proto", f"  expand_regs → {result!r}")
-        return result
+        if len(result) == nbytes:
+            dbg("proto", f"  expand_regs → {result!r}")
+            return result
     return regs
 
 
@@ -336,7 +396,7 @@ def _proto_from_ida(name: str) -> Optional["FuncProto"]:
                 raw_ret  = str(fi.rettype)
                 ret_type = _norm(raw_ret)
                 # Check for explicit return register location (usercall convention)
-                ret_size = _PROTO_TYPE_BYTES.get(ret_type, 0)
+                ret_size = _PROTO_TYPE_BYTES.get(ret_type) or struct_size(ret_type)
                 try:
                     ret_regs_uc = _regs_from_argloc(fi.retloc, ret_size)
                     if ret_regs_uc:
@@ -409,10 +469,21 @@ def _proto_from_ida(name: str) -> Optional["FuncProto"]:
     return proto
 
 
-# ── Manual override table ─────────────────────────────────────────────────────
+# ── Manual override tables ────────────────────────────────────────────────────
 # Entries here take priority over IDA type info.
 
 PROTOTYPES: dict = {}
+
+# Struct field definitions for types used as register-based return values.
+# Each entry maps a C type name to a StructDef listing fields in the same
+# order as the registers (low register first).
+# Example:
+#   STRUCTS["div32_result"] = StructDef([
+#       StructField("quotient",  "int32_t"),   # R4:R5:R6:R7
+#       StructField("remainder", "int32_t"),   # R0:R1:R2:R3  (if ordered R0..R7)
+#   ])
+
+STRUCTS: dict = {}
 
 
 # ── Enum registry ─────────────────────────────────────────────────────────────

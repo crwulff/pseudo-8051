@@ -13,7 +13,37 @@ from pseudo8051.passes.patterns._utils import (
 )
 from pseudo8051.ir.expr import UnaryOp, BinOp, Call
 from pseudo8051.ir.function import Function
-from pseudo8051.prototypes  import FuncProto, expand_regs
+from pseudo8051.prototypes  import FuncProto, expand_regs, get_struct
+
+# ── Struct return splitting ───────────────────────────────────────────────────
+
+def _split_struct_regs(retval_name: str, struct_type: str,
+                        return_regs: Tuple[str, ...],
+                        reg_map: Dict[str, VarInfo]) -> None:
+    """Split a struct return type into per-field VarInfo entries in reg_map.
+
+    For each field of the struct, creates a VarInfo with name
+    'retval_name.field_name' backed by the appropriate subset of return_regs.
+    The reg_map is mutated in place.
+    """
+    struct_def = get_struct(struct_type)
+    if struct_def is None:
+        return
+    reg_idx = 0
+    for field in struct_def.fields:
+        field_bytes = _type_bytes(field.type)
+        if field_bytes <= 0 or reg_idx + field_bytes > len(return_regs):
+            break
+        field_regs = return_regs[reg_idx:reg_idx + field_bytes]
+        field_name = f"{retval_name}.{field.name}"
+        pair = "".join(field_regs)
+        vinfo = VarInfo(field_name, field.type, field_regs)
+        reg_map[pair] = vinfo
+        for r in field_regs:
+            reg_map[r] = vinfo
+        dbg("typesimp", f"  struct-split: {field_name} ({field.type}) = {field_regs}")
+        reg_idx += field_bytes
+
 
 # ── Standard 8051 calling-convention register assignment ─────────────────────
 

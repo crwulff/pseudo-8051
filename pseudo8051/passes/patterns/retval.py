@@ -65,6 +65,9 @@ class RetvalPattern(Pattern):
         if lhs_name in reg_map and lhs_name != pair:
             reg_map[lhs_name] = new_info
 
+        from pseudo8051.passes.typesimplify._regmap import _split_struct_regs
+        _split_struct_regs(retval_name, proto.return_type, proto.return_regs, reg_map)
+
         regs = proto.return_regs
         lhs = Reg(regs[0], alias=retval_name) if len(regs) == 1 else RegGroup(regs, alias=retval_name)
         out_node: HIRNode = TypedAssign(node.ea, proto.return_type, lhs, subst_call)

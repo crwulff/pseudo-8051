@@ -25,6 +25,13 @@ def _type_bytes(t: str) -> int:
     if t in ("bool", "uint8_t",  "int8_t",  "char"):  return 1
     if t in ("uint16_t", "int16_t"):                   return 2
     if t in ("uint32_t", "int32_t"):                   return 4
+    try:
+        from pseudo8051.prototypes import struct_size as _ss
+        n = _ss(t)
+        if n > 0:
+            return n
+    except ImportError:
+        pass
     return 0
 
 
