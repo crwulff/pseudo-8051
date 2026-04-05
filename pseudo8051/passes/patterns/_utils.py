@@ -46,7 +46,8 @@ class VarInfo:
 
     def __init__(self, name: str, type_str: str, regs: Tuple[str, ...],
                  xram_sym: str = "", is_byte_field: bool = False,
-                 xram_addr: int = 0, is_param: bool = False):
+                 xram_addr: int = 0, is_param: bool = False,
+                 is_retval_field: bool = False):
         self.name         = name
         self.type         = type_str
         self.regs         = regs           # high → low order, e.g. ('R6', 'R7'); () for XRAM locals
@@ -55,6 +56,7 @@ class VarInfo:
         self.is_byte_field = is_byte_field # True for per-byte entries of multi-byte XRAM locals
         self.xram_addr    = xram_addr      # raw integer XRAM address (0 for register vars)
         self.is_param     = is_param       # True only for params from the current function's proto
+        self.is_retval_field = is_retval_field  # True for struct-member sub-entries of a call retval
 
     @property
     def hi(self) -> Optional[str]:
@@ -138,13 +140,13 @@ def _param_byte_name(reg: str, vinfo: "VarInfo") -> str:
 
 
 def _replace_single_regs(text: str, reg_map: Dict[str, VarInfo]) -> str:
-    """Substitute single-register parameter names in read (RHS) positions.
+    """Substitute single-register parameter/retval-field names in read (RHS) positions.
     For multi-byte parameters, appends .hi/.lo/.bN to identify the byte accessed."""
     singles = [(k, _param_byte_name(k, v)) for k, v in reg_map.items()
                if _RE_SINGLE_REG.match(k)
                and isinstance(v, VarInfo)
                and not v.xram_sym
-               and v.is_param]
+               and (v.is_param or v.is_retval_field)]
     if not singles:
         return text
 
@@ -241,13 +243,13 @@ def _subst_pairs_in_expr(expr: Expr, reg_map: Dict[str, "VarInfo"]) -> Expr:
 
 
 def _subst_single_regs_in_expr(expr: Expr, reg_map: Dict[str, "VarInfo"]) -> Expr:
-    """Attach alias to Reg(rx) nodes for is_param single-register entries.
+    """Attach alias to Reg(rx) nodes for is_param/is_retval_field single-register entries.
     For multi-byte parameters, appends .hi/.lo/.bN to identify the byte accessed."""
     singles = {k: _param_byte_name(k, v) for k, v in reg_map.items()
                if _RE_SINGLE_REG.match(k)
                and isinstance(v, VarInfo)
                and not v.xram_sym
-               and v.is_param}
+               and (v.is_param or v.is_retval_field)}
     if not singles:
         return expr
 

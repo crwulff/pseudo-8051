@@ -96,7 +96,9 @@ class ConstGroupPattern(Pattern):
               reg_map:  Dict[str, VarInfo],
               simplify: Simplify) -> Optional[Match]:
         candidates = sorted(
-            {v for v in reg_map.values() if isinstance(v, VarInfo) and len(v.regs) >= 2},
+            {v for v in reg_map.values()
+             if isinstance(v, VarInfo) and len(v.regs) >= 2
+             and not v.is_retval_field},
             key=lambda v: len(v.regs), reverse=True,
         )
         for vinfo in candidates:

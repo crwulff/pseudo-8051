@@ -37,7 +37,7 @@ def _split_struct_regs(retval_name: str, struct_type: str,
         field_regs = return_regs[reg_idx:reg_idx + field_bytes]
         field_name = f"{retval_name}.{field.name}"
         pair = "".join(field_regs)
-        vinfo = VarInfo(field_name, field.type, field_regs)
+        vinfo = VarInfo(field_name, field.type, field_regs, is_retval_field=True)
         reg_map[pair] = vinfo
         for r in field_regs:
             reg_map[r] = vinfo

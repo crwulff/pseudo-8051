@@ -99,12 +99,12 @@ def _effective_map(node: HIRNode, base_eff: Dict[str, VarInfo]) -> Dict[str, Var
 
 
 def _kill_params(reg_map: Dict[str, VarInfo], killed: set) -> Dict[str, VarInfo]:
-    """Return reg_map with entries whose param registers overlap *killed* removed."""
+    """Return reg_map with entries whose param or retval-field registers overlap *killed* removed."""
     if not killed:
         return reg_map
     result = {}
     for k, v in reg_map.items():
-        if isinstance(v, VarInfo) and v.is_param and v.regs:
+        if isinstance(v, VarInfo) and (v.is_param or v.is_retval_field) and v.regs:
             if any(r in killed for r in v.regs):
                 continue
         result[k] = v
@@ -152,9 +152,11 @@ def _transform_default(node: HIRNode,
                 return None
         # Substitute inside indirect LHS references (IRAMRef/XRAMRef pointer
         # registers should be renamed just like any other read position).
-        # Simple Reg/RegGroup LHS are write destinations — do not substitute.
+        # Simple Reg LHS are write destinations — do not fully substitute.
+        # RegGroup LHS: apply pair alias only (adds the variable name as alias;
+        # the kill mechanism ensures stale struct-member aliases are absent from eff).
         new_lhs = node.lhs
-        if not isinstance(node.lhs, (RegExpr, RegGroupExpr)):
+        if not isinstance(node.lhs, RegExpr):
             new_lhs = _subst_expr(node.lhs, reg_map)
         new_rhs = _subst_expr(node.rhs, reg_map)
         if new_lhs is not node.lhs or new_rhs is not node.rhs:
@@ -342,7 +344,7 @@ def _simplify(nodes: List[HIRNode], reg_map: Dict[str, VarInfo],
     def _update_killed(node: HIRNode) -> None:
         for r in node.written_regs:
             v = reg_map.get(r)
-            if isinstance(v, VarInfo) and v.is_param:
+            if isinstance(v, VarInfo) and (v.is_param or v.is_retval_field):
                 killed.add(r)
 
     while i < len(nodes):
@@ -353,6 +355,11 @@ def _simplify(nodes: List[HIRNode], reg_map: Dict[str, VarInfo],
             result = pat.match(nodes, i, eff, _sub_simplify)
             if result is not None:
                 replacement, new_i = result
+                # Snapshot the reg_map state before propagating pattern mutations.
+                # This snapshot is used for kill-tracking below so that entries
+                # added by the pattern (e.g. struct member retval fields) are not
+                # immediately killed by the same node that produced them.
+                pre_snap = dict(reg_map)
                 # Propagate new/changed keys from eff back to the original reg_map
                 # (patterns mutate their reg_map arg, which may be a _kill_params copy).
                 # Skip keys that _kill_params intentionally removed (killed params).
@@ -360,13 +367,35 @@ def _simplify(nodes: List[HIRNode], reg_map: Dict[str, VarInfo],
                     for k, v in eff.items():
                         if reg_map.get(k) is not v:
                             orig_v = reg_map.get(k)
+                            # Block propagation only when a killed param entry would be
+                            # overwritten by another param entry.  Non-param entries
+                            # (retval, retval-field) must always be allowed through so
+                            # that struct member entries populate the individual register
+                            # slots even when those registers were previously killed as
+                            # function parameters.
+                            new_is_param = isinstance(v, VarInfo) and v.is_param
                             if not (isinstance(orig_v, VarInfo) and orig_v.is_param
                                     and orig_v.regs
-                                    and any(r in killed for r in orig_v.regs)):
+                                    and any(r in killed for r in orig_v.regs)
+                                    and new_is_param):
                                 reg_map[k] = v
-                # Gather kills from the consumed range, then recompute eff
+                # Gather kills from the consumed range using the pre-pattern snapshot
+                # so newly-added struct-member entries survive their creating node.
                 for j in range(i, new_i):
-                    _update_killed(nodes[j])
+                    for r in nodes[j].written_regs:
+                        sv = pre_snap.get(r)
+                        if isinstance(sv, VarInfo) and (sv.is_param or sv.is_retval_field):
+                            killed.add(r)
+                # Un-kill only registers belonging to retval-field entries that were
+                # freshly added by this pattern match.  Comparing reg_map against
+                # pre_snap lets us distinguish new entries from pre-existing ones so
+                # we don't accidentally un-kill registers from an earlier retval whose
+                # fields were legitimately overwritten by subsequent argument loads.
+                for k, _v in reg_map.items():
+                    if isinstance(_v, VarInfo) and _v.is_retval_field:
+                        if pre_snap.get(k) is not _v:
+                            for _r in _v.regs:
+                                killed.discard(_r)
                 base_eff = _kill_params(reg_map, killed)
                 eff = _effective_map(nodes[i], base_eff)
                 i = new_i
