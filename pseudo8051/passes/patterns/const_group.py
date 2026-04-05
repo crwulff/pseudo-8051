@@ -107,6 +107,12 @@ class ConstGroupPattern(Pattern):
             const_s = _const_str(value, vinfo.type)
             const_expr = Const(value, alias=const_s)
             dbg("typesimp", f"  const-load: {vinfo.name} = {const_s}")
+            # Re-assert vinfo in reg_map so subsequent aliasing uses vinfo.name,
+            # not a stale retval name left behind by an earlier RetvalPattern run.
+            pair = "".join(vinfo.regs)
+            reg_map[pair] = vinfo
+            for r in vinfo.regs:
+                reg_map[r] = vinfo
 
             # Try to fold the constant into the immediately following statement
             next_node = nodes[end_i] if end_i < len(nodes) else None
@@ -125,5 +131,6 @@ class ConstGroupPattern(Pattern):
                     return ([folded_node], end_i + 1)
 
             # Declare with type
-            return ([TypedAssign(nodes[i].ea, vinfo.type, Name(vinfo.name), const_expr)], end_i)
+            return ([TypedAssign(nodes[i].ea, vinfo.type,
+                                RegGroup(vinfo.regs, alias=vinfo.name), const_expr)], end_i)
         return None

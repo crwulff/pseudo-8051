@@ -7,7 +7,7 @@ Renames the return value of a function call to a fresh ``retvalN`` variable.
 from typing import Dict, List, Optional
 
 from pseudo8051.ir.hir import HIRNode, Assign, TypedAssign
-from pseudo8051.ir.expr import Reg, Name, RegGroup, Call
+from pseudo8051.ir.expr import Reg, RegGroup, Call
 from pseudo8051.constants import dbg
 from pseudo8051.passes.patterns.base   import Pattern, Match, Simplify
 from pseudo8051.passes.patterns._utils import VarInfo, _subst_all_expr
@@ -65,6 +65,8 @@ class RetvalPattern(Pattern):
         if lhs_name in reg_map and lhs_name != pair:
             reg_map[lhs_name] = new_info
 
-        out_node: HIRNode = TypedAssign(node.ea, proto.return_type, Name(retval_name), subst_call)
+        regs = proto.return_regs
+        lhs = Reg(regs[0], alias=retval_name) if len(regs) == 1 else RegGroup(regs, alias=retval_name)
+        out_node: HIRNode = TypedAssign(node.ea, proto.return_type, lhs, subst_call)
         dbg("typesimp", f"  retval: {out_node.render(0)[0][1]}")
         return ([out_node], i + 1)

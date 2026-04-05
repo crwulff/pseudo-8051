@@ -7,7 +7,7 @@ Collapses a sequential XRAM byte-by-byte read into a typed pointer dereference.
 from typing import Dict, List, Optional, Tuple
 
 from pseudo8051.ir.hir import HIRNode, Assign, TypedAssign, ExprStmt
-from pseudo8051.ir.expr import Reg, Name, XRAMRef, UnaryOp
+from pseudo8051.ir.expr import Reg, RegGroup, Name, XRAMRef, UnaryOp
 from pseudo8051.constants import dbg
 from pseudo8051.passes.patterns.base   import Pattern, Match, Simplify
 from pseudo8051.passes.patterns._utils import (
@@ -106,6 +106,11 @@ class XRAMGroupReadPattern(Pattern):
             base_addr, end_i = result
             ptr_expr = f"*({vinfo.type}*){base_addr}"
             dbg("typesimp", f"  xram-group-read: {vinfo.name} = {ptr_expr}")
+            # Re-assert vinfo in reg_map so subsequent aliasing uses vinfo.name.
+            pair = "".join(vinfo.regs)
+            reg_map[pair] = vinfo
+            for r in vinfo.regs:
+                reg_map[r] = vinfo
 
             next_node = nodes[end_i] if end_i < len(nodes) else None
             if next_node is not None:
@@ -120,6 +125,7 @@ class XRAMGroupReadPattern(Pattern):
                 if folded_node is not None:
                     return ([folded_node], end_i + 1)
 
-            return ([TypedAssign(nodes[i].ea, vinfo.type, Name(vinfo.name), Name(ptr_expr))], end_i)
+            return ([TypedAssign(nodes[i].ea, vinfo.type,
+                                RegGroup(vinfo.regs, alias=vinfo.name), Name(ptr_expr))], end_i)
 
         return None

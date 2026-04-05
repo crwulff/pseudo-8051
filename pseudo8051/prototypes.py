@@ -273,7 +273,7 @@ def _parse_type_string(type_str: str, func_name: str) -> Optional["FuncProto"]:
     ret_type = _norm(ret_type_str)
 
     if ret_loc_str:
-        ret_regs = _regs_from_loc_str(ret_loc_str)
+        ret_regs = expand_regs(_regs_from_loc_str(ret_loc_str), ret_type)
         dbg("proto", f"{func_name}: usercall return loc {ret_loc_str!r} → {ret_regs}")
     else:
         ret_regs = _RETURN_REGS.get(ret_type, ())
@@ -340,7 +340,7 @@ def _proto_from_ida(name: str) -> Optional["FuncProto"]:
                 try:
                     ret_regs_uc = _regs_from_argloc(fi.retloc, ret_size)
                     if ret_regs_uc:
-                        ret_regs = ret_regs_uc
+                        ret_regs = expand_regs(ret_regs_uc, ret_type)
                         dbg("proto", f"{name}: usercall retloc → {ret_regs}")
                     else:
                         ret_regs = _RETURN_REGS.get(ret_type, ())

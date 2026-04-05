@@ -48,7 +48,7 @@ def _expr_name_refs(expr: Expr) -> frozenset:
 
 def _collect_mid_writes(nodes: List[HIRNode], reg_map: Dict) -> frozenset:
     """
-    Collect all names/regs written by a sequence of nodes, with two expansions:
+    Collect all names/regs written by a sequence of nodes, with three expansions:
 
     1. Register-to-variable: for each register key in written_regs, look up the
        corresponding variable name in reg_map and add it.  This catches
@@ -56,6 +56,10 @@ def _collect_mid_writes(nodes: List[HIRNode], reg_map: Dict) -> frozenset:
 
     2. Name-lhs: TypedAssign / Assign with a Name lhs don't appear in written_regs,
        so we add lhs.name directly.  This catches TypedAssign(Name('divisor'), ...).
+
+    3. Variable-to-register (reverse): for each Name lhs, scan reg_map for VarInfo
+       entries with that name and add their backing register keys.  This catches
+       TypedAssign(Name('divisor'), ...) clobbering the R0R1R2R3 that backs divisor.
     """
     result: set = set()
     for node in nodes:
@@ -71,13 +75,18 @@ def _collect_mid_writes(nodes: List[HIRNode], reg_map: Dict) -> frozenset:
             lhs = getattr(node, 'lhs', None)
             if isinstance(lhs, NameExpr):
                 result.add(lhs.name)
+                # Reverse lookup: find backing register keys for this variable name
+                if reg_map:
+                    for reg_key, info in reg_map.items():
+                        if isinstance(info, VarInfo) and info.name == lhs.name:
+                            result.add(reg_key)
     return frozenset(result)
 
 
 def _as_retval_stmt(node: HIRNode) -> Optional[Tuple[str, Call]]:
     """Return (retval_name, call_expr) if node is a TypedAssign retval node; else None."""
     if isinstance(node, TypedAssign) and isinstance(node.rhs, Call):
-        return (node.lhs.name, node.rhs)
+        return (node.lhs.render(), node.rhs)
     return None
 
 
