@@ -107,9 +107,7 @@ class HIRNode(ABC):
 def _refs_from_expr(expr: Expr) -> frozenset:
     """Collect all Reg/Name/RegGroup name strings referenced in read positions in expr."""
     if isinstance(expr, _RegsExpr):
-        if expr.is_single:
-            return frozenset({expr.names[0]})
-        return frozenset(expr.names) | frozenset({"".join(expr.names)})
+        return expr.reg_set() | {"".join(expr.names)}
     if isinstance(expr, _NameExpr):
         return frozenset({expr.name})
     children = expr.children()
@@ -177,9 +175,7 @@ def _ann_field(label: str, val) -> List[str]:
 def _lhs_written_regs(lhs: Expr) -> frozenset:
     """Extract written register names from an assignment LHS expression."""
     if isinstance(lhs, _RegsExpr):
-        if lhs.is_single:
-            return frozenset({lhs.names[0]})
-        return frozenset(lhs.names) | {"".join(lhs.names)}
+        return lhs.reg_set() | {"".join(lhs.names)}
     return frozenset()
 
 

@@ -219,17 +219,14 @@ def _subst_pairs_in_expr(expr: Expr, reg_map: Dict[str, "VarInfo"]) -> Expr:
         return expr
 
     def _fn(e: Expr) -> Expr:
-        if isinstance(e, Regs) and not e.is_single:
+        if isinstance(e, Regs):
             # Only alias on the first pass — once an alias is set it must not be
             # overwritten by a later _subst_pairs_in_expr call that sees updated
             # reg_map entries (e.g. retval VarInfo added after the arg alias).
             if not e.alias:
-                pair = "".join(e.regs)  # canonical key
-                if pair in pair_map:
-                    return RegGroup(e.regs, e.brace, alias=pair_map[pair])
-        elif isinstance(e, Regs) and e.is_single:
-            if not e.alias and e.name in pair_map:
-                return Reg(e.name, alias=pair_map[e.name])
+                key = "".join(e.names)
+                if key in pair_map:
+                    return RegGroup(e.names, e.brace, alias=pair_map[key])
         elif isinstance(e, Name):
             # Name("R7") / Name("R4R5R6R7") are register placeholders in call args
             if e.name in pair_map:

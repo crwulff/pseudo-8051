@@ -35,9 +35,9 @@ def _expr_name_refs(expr: Expr) -> frozenset:
     refs: set = set()
 
     def _collect(e: Expr) -> Expr:
-        if isinstance(e, RegExpr) and not e.is_single:
+        if isinstance(e, RegExpr):
             refs.add("".join(e.regs))
-        elif isinstance(e, (NameExpr, RegExpr)):
+        elif isinstance(e, NameExpr):
             refs.add(e.name)
         return e
 

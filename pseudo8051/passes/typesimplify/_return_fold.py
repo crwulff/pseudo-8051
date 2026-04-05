@@ -75,7 +75,7 @@ def _fold_return_chains(hir: List[HIRNode], ret_regs: tuple,
             if (pair_name is not None
                     and isinstance(node, Assign)
                     and isinstance(node.lhs, RegExpr) and not node.lhs.is_single
-                    and frozenset(node.lhs.regs) == frozenset(ret_regs)
+                    and node.lhs.reg_set() == frozenset(ret_regs)
                     and i + 1 < len(nodes)
                     and isinstance(nodes[i + 1], ReturnStmt)
                     and nodes[i + 1].value is None):
@@ -130,8 +130,7 @@ def _fold_return_chains(hir: List[HIRNode], ret_regs: tuple,
                            and isinstance(out[-1], Assign)
                            and isinstance(out[-1].lhs, RegExpr) and out[-1].lhs.is_single
                            and out[-1].lhs.name in ret_reg_set
-                           and isinstance(out[-1].rhs, RegExpr) and out[-1].rhs.is_single
-                           and out[-1].rhs.name == out[-1].lhs.name):
+                           and out[-1].rhs == out[-1].lhs):
                         out.pop()
                     combined = _canon_return_expr()
                     if combined is not None:
