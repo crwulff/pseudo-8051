@@ -13,7 +13,7 @@ from typing import Dict, List, Optional, Tuple
 
 from pseudo8051.ir.hir     import (HIRNode, NodeAnnotation, Assign, CompoundAssign,
                                     ExprStmt)
-from pseudo8051.ir.expr    import Reg as RegExpr, XRAMRef, Name as NameExpr
+from pseudo8051.ir.expr    import Reg, Regs as RegExpr, XRAMRef, Name as NameExpr
 from pseudo8051.passes     import OptimizationPass
 from pseudo8051.constants  import PARAM_REG_ORDER, DEBUG, dbg
 
@@ -73,11 +73,11 @@ def _propagate_const(node: HIRNode, const_state: Dict[str, int]) -> None:
     Called AFTER the kill step so stale values have already been removed.
     Mirrors propagate_insn() semantics but operates on HIR nodes.
     """
-    from pseudo8051.ir.expr import Const as ConstExpr, Reg as RegExpr2, UnaryOp as UnaryOpExpr
+    from pseudo8051.ir.expr import Const as ConstExpr, Regs as RegExpr2, UnaryOp as UnaryOpExpr
 
     if isinstance(node, Assign):
         lhs, rhs = node.lhs, node.rhs
-        if not isinstance(lhs, RegExpr):
+        if not (isinstance(lhs, RegExpr) and lhs.is_single):
             return
         reg = lhs.name
 
@@ -110,7 +110,7 @@ def _propagate_const(node: HIRNode, const_state: Dict[str, int]) -> None:
             else:
                 const_state[reg] = val & 0xFF
 
-        elif isinstance(rhs, RegExpr2):
+        elif isinstance(rhs, RegExpr2) and rhs.is_single:
             # Register copy: propagate known source value
             src = const_state.get(rhs.name)
             if src is not None:
@@ -119,7 +119,7 @@ def _propagate_const(node: HIRNode, const_state: Dict[str, int]) -> None:
     elif isinstance(node, ExprStmt):
         expr = node.expr
         if isinstance(expr, UnaryOpExpr) and expr.op in ("++", "--"):
-            if isinstance(expr.operand, RegExpr):
+            if isinstance(expr.operand, RegExpr) and expr.operand.is_single:
                 reg = expr.operand.name
                 v = const_state.get(reg)
                 if v is None:
@@ -172,7 +172,7 @@ def _backward_annotate_xram_call(nodes: List[HIRNode], call_idx: int,
             sym = None
             if isinstance(inner, NameExpr2):
                 sym = inner.name          # already "EXT_DC44" etc.
-            elif isinstance(inner, RegExpr) and inner.name == "DPTR":
+            elif inner == Reg("DPTR"):
                 ann = node.ann
                 if ann is not None:
                     dptr_val = ann.reg_consts.get("DPTR")
@@ -361,7 +361,7 @@ class AnnotationPass(OptimizationPass):
                     sym = None
                     if isinstance(inner, NameExpr):
                         sym = inner.name
-                    elif isinstance(inner, RegExpr) and inner.name == "DPTR":
+                    elif inner == Reg("DPTR"):
                         dptr_val = const_state.get("DPTR")
                         if dptr_val is not None:
                             from pseudo8051.constants import resolve_ext_addr

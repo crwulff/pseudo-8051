@@ -5,7 +5,7 @@ ir/hir/_base.py — NodeAnnotation, HIRNode ABC, and shared helpers.
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Tuple, Union
 
-from pseudo8051.ir.expr import Expr, Reg as _RegExpr, RegGroup as _RegGroupExpr, Name as _NameExpr
+from pseudo8051.ir.expr import Expr, Regs as _RegsExpr, Name as _NameExpr
 
 if TYPE_CHECKING:
     from pseudo8051.passes.patterns._utils import VarInfo
@@ -44,6 +44,43 @@ class HIRNode(ABC):
         """
         return frozenset()
 
+    @property
+    def def_regs(self) -> frozenset:
+        """Registers definitely written directly by this node (non-recursive).
+
+        Alias for written_regs provided for the new propagation interface.
+        Structured nodes return frozenset() — their bodies' writes are
+        reported via definitely_killed() / possibly_killed().
+        """
+        return self.written_regs
+
+    @property
+    def use_regs(self) -> frozenset:
+        """Register names read by this node (non-recursive).
+
+        Returns frozenset() by default; overridden by statement nodes that
+        read registers in their expressions.
+        """
+        return frozenset()
+
+    def definitely_killed(self) -> frozenset:
+        """Registers killed on ALL execution paths through this node's bodies.
+
+        For leaf nodes this equals def_regs (the single write is always
+        definite).  Structured nodes override to compute the intersection
+        of their branch kills; loop nodes return frozenset() because the
+        body may execute zero times.
+        """
+        return self.def_regs
+
+    def possibly_killed(self) -> frozenset:
+        """Registers killed on ANY execution path through this node's bodies.
+
+        For leaf nodes this equals def_regs.  Structured nodes override to
+        compute the union of their branch kills.
+        """
+        return self.def_regs
+
     def map_bodies(self, fn: "Callable[[List[HIRNode]], List[HIRNode]]") -> "HIRNode":
         """Return a copy of this node with fn applied to every child body list.
 
@@ -69,11 +106,12 @@ class HIRNode(ABC):
 
 def _refs_from_expr(expr: Expr) -> frozenset:
     """Collect all Reg/Name/RegGroup name strings referenced in read positions in expr."""
-    n = type(expr).__name__
-    if n in ("Reg", "Name"):
+    if isinstance(expr, _RegsExpr):
+        if expr.is_single:
+            return frozenset({expr.names[0]})
+        return frozenset(expr.names) | frozenset({"".join(expr.names)})
+    if isinstance(expr, _NameExpr):
         return frozenset({expr.name})
-    if n == "RegGroup":
-        return frozenset(expr.regs) | frozenset({"".join(expr.regs)})
     children = expr.children()
     if not children:
         return frozenset()
@@ -138,11 +176,26 @@ def _ann_field(label: str, val) -> List[str]:
 
 def _lhs_written_regs(lhs: Expr) -> frozenset:
     """Extract written register names from an assignment LHS expression."""
-    if isinstance(lhs, _RegExpr):
-        return frozenset({lhs.name})
-    if isinstance(lhs, _RegGroupExpr):
-        return frozenset(lhs.regs) | {"".join(lhs.regs)}
+    if isinstance(lhs, _RegsExpr):
+        if lhs.is_single:
+            return frozenset({lhs.names[0]})
+        return frozenset(lhs.names) | {"".join(lhs.names)}
     return frozenset()
+
+
+# ── Propagation helpers ───────────────────────────────────────────────────────
+
+def _killed_by_seq(nodes: "List[HIRNode]") -> frozenset:
+    """Union of registers definitely killed by a sequential list of nodes.
+
+    In a sequential execution, every write is guaranteed to execute, so the
+    set of killed registers is the union of each node's definitely_killed().
+    Used by structured-node overrides to compute branch kill sets.
+    """
+    result: frozenset = frozenset()
+    for n in nodes:
+        result |= n.def_regs | n.definitely_killed()
+    return result
 
 
 # ── Condition type alias ──────────────────────────────────────────────────────

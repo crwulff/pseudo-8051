@@ -1,5 +1,5 @@
 from pseudo8051.ir.hir import Assign, ExprStmt, ReturnStmt, ForNode, WhileNode, DoWhileNode, IfNode, IfGoto, GotoStatement, CompoundAssign
-from pseudo8051.ir.expr import BinOp, Const, Reg, UnaryOp, Name, XRAMRef
+from pseudo8051.ir.expr import BinOp, Const, Reg, Regs, UnaryOp, Name, XRAMRef
 from pseudo8051.passes.loops import LoopStructurer, _dfs_back_edges
 
 from ..helpers import FakeBlock, FakeFunction, connect
@@ -344,7 +344,7 @@ class TestLoopStructurer:
         assert len(while_nodes) == 1
         wn = while_nodes[0]
         # !C inverted to C
-        assert isinstance(wn.condition, Reg) and wn.condition.name == "C"
+        assert isinstance(wn.condition, Regs) and wn.condition.is_single and wn.condition.name == "C"
 
     def test_djnz_in_orphan_block(self):
         """

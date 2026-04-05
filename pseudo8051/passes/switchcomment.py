@@ -20,7 +20,7 @@ from typing import Dict, List, Optional, Tuple
 
 from pseudo8051.ir.hir  import (HIRNode, SwitchNode, Assign,
                                  IfNode, WhileNode, DoWhileNode, ForNode)
-from pseudo8051.ir.expr import Expr, Reg, Const, BinOp, Name
+from pseudo8051.ir.expr import Expr, Reg, Regs, Const, BinOp, Name
 from pseudo8051.passes  import OptimizationPass
 from pseudo8051.constants import dbg
 
@@ -40,10 +40,10 @@ def _extract_reg_shift(term: Expr) -> Optional[Tuple[str, int]]:
     BinOp(Reg(x), '<<', Const(k)) → (x, k)
     Anything else                → None
     """
-    if isinstance(term, Reg):
+    if isinstance(term, Regs) and term.is_single:
         return (term.name, 0)
     if (isinstance(term, BinOp) and term.op == "<<"
-            and isinstance(term.lhs, Reg)
+            and isinstance(term.lhs, Regs) and term.lhs.is_single
             and isinstance(term.rhs, Const)):
         return (term.lhs.name, term.rhs.value)
     return None
@@ -79,33 +79,52 @@ def _find_last_assign(nodes: List[HIRNode], reg_name: str) -> Optional[Assign]:
     result = None
     for node in nodes:
         if (isinstance(node, Assign)
-                and isinstance(node.lhs, Reg)
-                and node.lhs.name == reg_name):
+                and node.lhs == Reg(reg_name)):
             result = node
     return result
 
 
+def _var_name(e: Expr) -> Optional[str]:
+    """Return the human-readable variable name from a Name or aliased Regs node.
+
+    After TypeAwareSimplifier, parameter reads appear as Reg nodes with an alias
+    (e.g. Reg("R7", alias="src_type")) rather than plain Name nodes.  Both forms
+    carry the same semantic name; this helper extracts it from either.
+    """
+    if isinstance(e, Name):
+        return e.name
+    if isinstance(e, Regs) and e.alias:
+        return e.alias
+    return None
+
+
 def _extract_linear(rhs: Expr) -> Tuple[Optional[str], int]:
     """
-    Try to parse rhs as  Name ± Const  and return (name, addend_to_get_param).
+    Try to parse rhs as  <var> ± Const  and return (name, addend_to_get_param).
 
-    Name("x") + Const(k)  → ("x", -k)   param = reg_val - k
-    Const(k) + Name("x")  → ("x", -k)
-    Name("x") - Const(k)  → ("x",  k)   param = reg_val + k
-    Name("x")             → ("x",  0)
-    Else                  → (None, 0)
+    <var> may be Name("x") or Reg("rx", alias="x") (aliased after TypeAwareSimplifier).
+
+    <var> + Const(k)  → ("x", -k)   param = reg_val - k
+    Const(k) + <var>  → ("x", -k)
+    <var> - Const(k)  → ("x",  k)   param = reg_val + k
+    <var>             → ("x",  0)
+    Else              → (None, 0)
     """
-    if isinstance(rhs, Name):
-        return (rhs.name, 0)
+    n = _var_name(rhs)
+    if n is not None:
+        return (n, 0)
     if isinstance(rhs, BinOp):
         if rhs.op == "+":
-            if isinstance(rhs.lhs, Name) and isinstance(rhs.rhs, Const):
-                return (rhs.lhs.name, -rhs.rhs.value)
-            if isinstance(rhs.rhs, Name) and isinstance(rhs.lhs, Const):
-                return (rhs.rhs.name, -rhs.lhs.value)
+            lname = _var_name(rhs.lhs)
+            if lname is not None and isinstance(rhs.rhs, Const):
+                return (lname, -rhs.rhs.value)
+            rname = _var_name(rhs.rhs)
+            if rname is not None and isinstance(rhs.lhs, Const):
+                return (rname, -rhs.lhs.value)
         if rhs.op == "-":
-            if isinstance(rhs.lhs, Name) and isinstance(rhs.rhs, Const):
-                return (rhs.lhs.name, rhs.rhs.value)
+            lname = _var_name(rhs.lhs)
+            if lname is not None and isinstance(rhs.rhs, Const):
+                return (lname, rhs.rhs.value)
     return (None, 0)
 
 

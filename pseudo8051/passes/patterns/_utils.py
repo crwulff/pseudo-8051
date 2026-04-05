@@ -15,7 +15,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 from pseudo8051.ir.hir import (HIRNode, Assign, TypedAssign, CompoundAssign,  # noqa: F401
                                ExprStmt, ReturnStmt, IfGoto)
 from pseudo8051.ir.expr import (  # noqa: F401
-    Expr, Reg, Name, XRAMRef, RegGroup,
+    Expr, Reg, Regs, Name, XRAMRef, RegGroup,
 )
 
 
@@ -46,8 +46,7 @@ class VarInfo:
 
     def __init__(self, name: str, type_str: str, regs: Tuple[str, ...],
                  xram_sym: str = "", is_byte_field: bool = False,
-                 xram_addr: int = 0, is_param: bool = False,
-                 is_retval_field: bool = False):
+                 xram_addr: int = 0, is_param: bool = False):
         self.name         = name
         self.type         = type_str
         self.regs         = regs           # high → low order, e.g. ('R6', 'R7'); () for XRAM locals
@@ -56,7 +55,6 @@ class VarInfo:
         self.is_byte_field = is_byte_field # True for per-byte entries of multi-byte XRAM locals
         self.xram_addr    = xram_addr      # raw integer XRAM address (0 for register vars)
         self.is_param     = is_param       # True only for params from the current function's proto
-        self.is_retval_field = is_retval_field  # True for struct-member sub-entries of a call retval
 
     @property
     def hi(self) -> Optional[str]:
@@ -140,13 +138,12 @@ def _param_byte_name(reg: str, vinfo: "VarInfo") -> str:
 
 
 def _replace_single_regs(text: str, reg_map: Dict[str, VarInfo]) -> str:
-    """Substitute single-register parameter/retval-field names in read (RHS) positions.
-    For multi-byte parameters, appends .hi/.lo/.bN to identify the byte accessed."""
+    """Substitute single-register variable names in read (RHS) positions.
+    For multi-byte variables, appends .hi/.lo/.bN to identify the byte accessed."""
     singles = [(k, _param_byte_name(k, v)) for k, v in reg_map.items()
                if _RE_SINGLE_REG.match(k)
                and isinstance(v, VarInfo)
-               and not v.xram_sym
-               and (v.is_param or v.is_retval_field)]
+               and not v.xram_sym]
     if not singles:
         return text
 
@@ -222,7 +219,7 @@ def _subst_pairs_in_expr(expr: Expr, reg_map: Dict[str, "VarInfo"]) -> Expr:
         return expr
 
     def _fn(e: Expr) -> Expr:
-        if isinstance(e, RegGroup):
+        if isinstance(e, Regs) and not e.is_single:
             # Only alias on the first pass — once an alias is set it must not be
             # overwritten by a later _subst_pairs_in_expr call that sees updated
             # reg_map entries (e.g. retval VarInfo added after the arg alias).
@@ -230,7 +227,7 @@ def _subst_pairs_in_expr(expr: Expr, reg_map: Dict[str, "VarInfo"]) -> Expr:
                 pair = "".join(e.regs)  # canonical key
                 if pair in pair_map:
                     return RegGroup(e.regs, e.brace, alias=pair_map[pair])
-        elif isinstance(e, Reg):
+        elif isinstance(e, Regs) and e.is_single:
             if not e.alias and e.name in pair_map:
                 return Reg(e.name, alias=pair_map[e.name])
         elif isinstance(e, Name):
@@ -243,18 +240,22 @@ def _subst_pairs_in_expr(expr: Expr, reg_map: Dict[str, "VarInfo"]) -> Expr:
 
 
 def _subst_single_regs_in_expr(expr: Expr, reg_map: Dict[str, "VarInfo"]) -> Expr:
-    """Attach alias to Reg(rx) nodes for is_param/is_retval_field single-register entries.
-    For multi-byte parameters, appends .hi/.lo/.bN to identify the byte accessed."""
+    """Attach alias to Reg(rx) nodes for register-backed single-register entries.
+
+    Covers is_param entries and any other register-backed VarInfo (e.g. struct
+    return fields) that is_param doesn't mark.  For multi-byte variables, appends
+    .hi/.lo/.bN to identify which byte of the wider variable is being accessed.
+    The alias is only set when not already aliased (by _subst_pairs_in_expr).
+    """
     singles = {k: _param_byte_name(k, v) for k, v in reg_map.items()
                if _RE_SINGLE_REG.match(k)
                and isinstance(v, VarInfo)
-               and not v.xram_sym
-               and (v.is_param or v.is_retval_field)}
+               and not v.xram_sym}
     if not singles:
         return expr
 
     def _fn(e: Expr) -> Expr:
-        if isinstance(e, Reg) and not e.alias and e.name in singles:
+        if isinstance(e, Regs) and e.is_single and not e.alias and e.name in singles:
             return Reg(e.name, alias=singles[e.name])
         if isinstance(e, Name) and e.name in singles:   # covers Name("R3") call args
             return Reg(e.name, alias=singles[e.name])
@@ -340,14 +341,16 @@ def _count_reg_uses_in_node(r: str, node: HIRNode) -> int:
     count = [0]
 
     def _fn(e: Expr) -> Expr:
-        if isinstance(e, (Reg, Name)) and e.name == r:
+        if e == Reg(r):
+            count[0] += 1
+        elif isinstance(e, Name) and e.name == r:
             count[0] += 1
         return e
 
     if isinstance(node, Assign):
         _walk_expr(node.rhs, _fn)
         # Also count in compound LHS (e.g. XRAMRef inner)
-        if not isinstance(node.lhs, (Reg, RegGroup)):
+        if not isinstance(node.lhs, Regs):
             _walk_expr(node.lhs, _fn)
     elif isinstance(node, CompoundAssign):
         _walk_expr(node.rhs, _fn)
@@ -367,14 +370,16 @@ def _subst_reg_in_node(node: HIRNode, r: str,
     Returns updated node, or None if r does not appear.
     """
     def _fn(e: Expr) -> Expr:
-        if isinstance(e, (Reg, Name)) and e.name == r:
+        if e == Reg(r):
+            return replacement
+        if isinstance(e, Name) and e.name == r:
             return replacement
         return e
 
     if isinstance(node, Assign):
         new_rhs = _walk_expr(node.rhs, _fn)
         new_lhs = node.lhs
-        if not isinstance(node.lhs, (Reg, RegGroup)):
+        if not isinstance(node.lhs, Regs):
             new_lhs = _walk_expr(node.lhs, _fn)
         if new_rhs is node.rhs and new_lhs is node.lhs:
             return None
@@ -425,7 +430,7 @@ def _fold_into_node(node: HIRNode, name_expr: Expr,
     def _subst_fn(e: Expr) -> Expr:
         if e == name_expr:
             return replacement
-        if isinstance(e, (Name, Reg, RegGroup)) and e.render() == name_str:
+        if isinstance(e, (Name, Regs)) and e.render() == name_str:
             return replacement
         return e
 

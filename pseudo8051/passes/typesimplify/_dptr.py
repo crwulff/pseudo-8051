@@ -12,8 +12,8 @@ from typing import Dict, List, Optional
 
 from pseudo8051.ir.hir import (HIRNode, Assign, ExprStmt, IfNode, WhileNode,
                                 ForNode, DoWhileNode, SwitchNode)
-from pseudo8051.ir.expr import (UnaryOp, Reg as RegExpr, RegGroup as RegGroupExpr,
-                                 Name as NameExpr)
+from pseudo8051.ir.expr import (UnaryOp, Reg as RegExpr, Regs as RegsExpr,
+                                 RegGroup as RegGroupExpr, Name as NameExpr)
 from pseudo8051.passes.patterns._utils import VarInfo
 from pseudo8051.constants import dbg
 
@@ -33,8 +33,8 @@ def _is_dptr_inc_node(node: HIRNode) -> bool:
 def _as_dph_assign(n) -> Optional[str]:
     """Return Rhi name if n is Assign(Reg('DPH'), Reg(Rhi)); else None."""
     if (isinstance(n, Assign)
-            and isinstance(n.lhs, RegExpr) and n.lhs.name == "DPH"
-            and isinstance(n.rhs, RegExpr)):
+            and n.lhs == RegExpr("DPH")
+            and isinstance(n.rhs, RegsExpr) and n.rhs.is_single):
         return n.rhs.name
     return None
 
@@ -42,8 +42,8 @@ def _as_dph_assign(n) -> Optional[str]:
 def _as_dpl_assign(n) -> Optional[str]:
     """Return Rlo name if n is Assign(Reg('DPL'), Reg(Rlo)); else None."""
     if (isinstance(n, Assign)
-            and isinstance(n.lhs, RegExpr) and n.lhs.name == "DPL"
-            and isinstance(n.rhs, RegExpr)):
+            and n.lhs == RegExpr("DPL")
+            and isinstance(n.rhs, RegsExpr) and n.rhs.is_single):
         return n.rhs.name
     return None
 
@@ -52,7 +52,7 @@ def _is_call_setup_assign(node: HIRNode) -> bool:
     """True for Assign(Reg/RegGroup, Name/Const) — a consolidated register-setup node."""
     from pseudo8051.ir.expr import Const
     return (isinstance(node, Assign)
-            and isinstance(node.lhs, (RegExpr, RegGroupExpr))
+            and isinstance(node.lhs, RegsExpr)
             and isinstance(node.rhs, (NameExpr, Const)))
 
 
@@ -135,7 +135,7 @@ def _dptr_live_after(nodes: List[HIRNode]) -> bool:
     """
     for node in nodes:
         if (isinstance(node, Assign)
-                and isinstance(node.lhs, RegExpr) and node.lhs.name == "DPTR"):
+                and node.lhs == RegExpr("DPTR")):
             return False  # DPTR overwritten; old value dead
         if _is_dptr_inc_node(node):
             return False  # Another DPTR++ also overwrites the old value

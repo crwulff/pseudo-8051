@@ -24,7 +24,7 @@ chain collapses to a single "var++;" or "var--;" statement.
 from typing import Dict, List, Optional, Tuple
 
 from pseudo8051.ir.hir import HIRNode, Assign, ExprStmt, IfGoto, Label
-from pseudo8051.ir.expr import Expr, Reg, Const, Name, XRAMRef, BinOp, UnaryOp
+from pseudo8051.ir.expr import Expr, Reg, Regs, Const, Name, XRAMRef, BinOp, UnaryOp
 from pseudo8051.constants import dbg
 from pseudo8051.passes.patterns.base   import Pattern, Match, Simplify
 from pseudo8051.passes.patterns._utils import VarInfo
@@ -102,7 +102,7 @@ def _try_unit(nodes: List[HIRNode], j: int,
                 and isinstance(n0.expr, UnaryOp)
                 and n0.expr.post
                 and n0.expr.op in ("++", "--")
-                and isinstance(n0.expr.operand, Reg)
+                and isinstance(n0.expr.operand, Regs) and n0.expr.operand.is_single
                 and n0.expr.operand != Reg("A")):
             unit_op = n0.expr.op
             if expected_op is None or unit_op == expected_op:
@@ -118,7 +118,7 @@ def _carry_operand_matches(lhs: Expr, byte_expr: Expr) -> bool:
     XRAM unit (byte_expr is not a plain Reg): lhs must be Reg("A").
     Register unit (byte_expr is a Reg): lhs must equal byte_expr.
     """
-    if isinstance(byte_expr, Reg):
+    if isinstance(byte_expr, Regs) and byte_expr.is_single:
         return lhs == byte_expr
     return lhs == Reg("A")
 
@@ -137,7 +137,7 @@ def _resolve_var_name(byte_exprs: List[Expr], op: str,
     if not byte_exprs:
         return None
 
-    if isinstance(byte_exprs[0], Reg):
+    if isinstance(byte_exprs[0], Regs) and byte_exprs[0].is_single:
         # Register-based: all regs should map to the same VarInfo
         first_rn = byte_exprs[0].name
         first_vinfo = reg_map.get(first_rn)
@@ -145,13 +145,13 @@ def _resolve_var_name(byte_exprs: List[Expr], op: str,
             same = all(
                 reg_map.get(e.name) is first_vinfo   # type: ignore[union-attr]
                 for e in byte_exprs
-                if isinstance(e, Reg)
+                if isinstance(e, Regs) and e.is_single
             )
             if same:
                 return first_vinfo.name
 
         # Try concatenated register name (e.g. "R6R7")
-        concat = "".join(e.name for e in byte_exprs if isinstance(e, Reg))  # type: ignore[union-attr]
+        concat = "".join(e.name for e in byte_exprs if isinstance(e, Regs) and e.is_single)  # type: ignore[union-attr]
         if concat in reg_map and not reg_map[concat].xram_sym:
             return reg_map[concat].name
         # Fall back to the concatenated register names themselves

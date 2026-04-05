@@ -21,7 +21,7 @@ import re
 from typing import Dict, List, Optional
 
 from pseudo8051.ir.hir import HIRNode, Assign, CompoundAssign, ExprStmt, ReturnStmt, IfGoto, IfNode, Label
-from pseudo8051.ir.expr import Expr, Reg, Name, XRAMRef, BinOp, RegGroup, Const, Cast, UnaryOp
+from pseudo8051.ir.expr import Expr, Reg, Regs, Name, XRAMRef, BinOp, RegGroup, Const, Cast, UnaryOp
 from pseudo8051.constants import dbg
 from pseudo8051.passes.patterns.base   import Pattern, Match, Simplify
 from pseudo8051.passes.patterns._utils import (
@@ -82,9 +82,9 @@ def _try_mul_pair_lookahead(nodes, j, terminal, a_expr, full_product,
             skip_end += 1; continue
         if isinstance(sn, Assign) and sn.lhs != Reg("B") and sn.lhs != rn:
             # Record: resolve rhs through already-seen interleaved vals
-            if isinstance(sn.lhs, Reg):
+            if isinstance(sn.lhs, Regs) and sn.lhs.is_single:
                 def _subst_iv(e: Expr, _iv=interleaved_vals) -> Expr:
-                    if isinstance(e, Reg) and e.name in _iv:
+                    if isinstance(e, Regs) and e.is_single and e.name in _iv:
                         return _iv[e.name]
                     return e
                 interleaved_vals[sn.lhs.name] = _walk_expr(sn.rhs, _subst_iv)
@@ -131,7 +131,8 @@ def _try_mul_pair_lookahead(nodes, j, terminal, a_expr, full_product,
     rk = n_final.lhs
 
     # Must form an adjacent standard pair
-    if not (isinstance(rm, Reg) and isinstance(rk, Reg)
+    if not (isinstance(rm, Regs) and rm.is_single
+            and isinstance(rk, Regs) and rk.is_single
             and _is_adjacent_hi_lo(rm.name, rk.name)):
         return None
 
@@ -139,7 +140,7 @@ def _try_mul_pair_lookahead(nodes, j, terminal, a_expr, full_product,
     # interleaved block), then reg_map for any remaining Reg references.
     if interleaved_vals:
         def _apply_iv(e: Expr, _iv=interleaved_vals) -> Expr:
-            if isinstance(e, Reg) and e.name in _iv:
+            if isinstance(e, Regs) and e.is_single and e.name in _iv:
                 return _iv[e.name]
             return e
         pair_expr_la = _walk_expr(pair_expr_la, _apply_iv)
@@ -340,12 +341,12 @@ class AccumFoldPattern(Pattern):
 
             # MUL AB: Assign(B, b_val) + Assign({B,A}, A*B) → Cast(uint8_t, a_expr*b_val) (issue 2.1)
             if (isinstance(cn, Assign)
-                    and isinstance(cn.lhs, Reg) and cn.lhs.name == "B"
+                    and cn.lhs == Reg("B")
                     and not _contains_a(cn.rhs)
                     and j + 1 < len(nodes)):
                 nxt = nodes[j + 1]
                 if (isinstance(nxt, Assign)
-                        and isinstance(nxt.lhs, RegGroup)
+                        and isinstance(nxt.lhs, Regs) and not nxt.lhs.is_single
                         and set(nxt.lhs.regs) == {"B", "A"}
                         and isinstance(nxt.rhs, BinOp)
                         and nxt.rhs.lhs == Reg("A")
@@ -366,7 +367,7 @@ class AccumFoldPattern(Pattern):
                 # doesn't read A.  Collect and re-emit in the output so that
                 # downstream pruning can handle them normally.
                 if (isinstance(cn, Assign)
-                        and isinstance(cn.lhs, Reg)
+                        and isinstance(cn.lhs, Regs) and cn.lhs.is_single
                         and cn.lhs.name not in _ACCUM_REGS
                         and not _contains_a(cn.rhs)):
                     skipped.append(cn)
@@ -469,7 +470,7 @@ class AccumFoldPattern(Pattern):
             no_carry   = BinOp(minuend, ">=", subtrahend)
 
             def _is_carry(c) -> bool:
-                return isinstance(c, Reg) and c.name == "C"
+                return c == Reg("C")
 
             def _is_not_carry(c) -> bool:
                 from pseudo8051.ir.expr import UnaryOp

@@ -24,7 +24,7 @@ from pseudo8051.passes.typesimplify._post import (
 )
 from pseudo8051.passes.patterns._utils import VarInfo
 from pseudo8051.ir.hir import Assign, CompoundAssign, ExprStmt, IfNode
-from pseudo8051.ir.expr import Reg, RegGroup, Name, Const, Call, UnaryOp
+from pseudo8051.ir.expr import Reg, Regs, RegGroup, Name, Const, Call, UnaryOp
 
 
 EA = 0  # dummy ea
@@ -266,6 +266,6 @@ class TestConsolidateXramSingleLoad:
         # The third node must still have Reg("A") on the rhs, not Name("_arg1")
         r1_assign = result[2]
         assert isinstance(r1_assign, Assign)
-        assert isinstance(r1_assign.rhs, Reg), (
+        assert isinstance(r1_assign.rhs, Regs) and r1_assign.rhs.is_single, (
             f"R1 rhs must stay Reg('A'), not {type(r1_assign.rhs)}")
         assert r1_assign.rhs.name == "A"

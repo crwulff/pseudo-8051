@@ -7,7 +7,7 @@ Collapses a sequential XRAM byte-by-byte read into a typed pointer dereference.
 from typing import Dict, List, Optional, Tuple
 
 from pseudo8051.ir.hir import HIRNode, Assign, TypedAssign, ExprStmt
-from pseudo8051.ir.expr import Reg, RegGroup, Name, XRAMRef, UnaryOp
+from pseudo8051.ir.expr import Reg, Regs, RegGroup, Name, XRAMRef, UnaryOp
 from pseudo8051.constants import dbg
 from pseudo8051.passes.patterns.base   import Pattern, Match, Simplify
 from pseudo8051.passes.patterns._utils import (
@@ -39,7 +39,7 @@ def _node_xram_read(node: HIRNode) -> Optional[str]:
 def _node_reg_from_a(node: HIRNode) -> Optional[str]:
     """If node is 'Rn = A;', return Rn; else None."""
     if isinstance(node, Assign):
-        if isinstance(node.lhs, Reg) and node.rhs == Reg("A"):
+        if isinstance(node.lhs, Regs) and node.lhs.is_single and node.rhs == Reg("A"):
             return node.lhs.name
     return None
 

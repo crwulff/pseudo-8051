@@ -34,7 +34,7 @@ import ida_name
 
 from pseudo8051.ir.hir         import (HIRNode, Label, Assign,
                                         SwitchNode, ComputedJump)
-from pseudo8051.ir.expr        import Reg, Const, BinOp, Expr
+from pseudo8051.ir.expr        import Reg, Regs, Const, BinOp, Expr
 from pseudo8051.ir.function    import Function
 from pseudo8051.ir.basicblock  import BasicBlock
 from pseudo8051.passes         import OptimizationPass
@@ -91,8 +91,7 @@ def _find_preceding_dptr_assign(hir: List[HIRNode], jmp_idx: int) -> Optional[in
         if isinstance(node, Label):
             continue
         if (isinstance(node, Assign)
-                and isinstance(node.lhs, Reg)
-                and node.lhs.name == "DPTR"):
+                and node.lhs == Reg("DPTR")):
             return i
         # Any intervening non-trivial node stops the search
         break

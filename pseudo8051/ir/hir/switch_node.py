@@ -4,7 +4,7 @@ ir/hir/switch_node.py — SwitchNode structured control-flow node.
 
 from typing import Callable, List, Optional, Tuple, Union
 
-from pseudo8051.ir.hir._base import HIRNode, _render_expr, _ann_field
+from pseudo8051.ir.hir._base import HIRNode, _render_expr, _ann_field, _killed_by_seq
 from pseudo8051.ir.expr import Expr
 
 
@@ -78,6 +78,28 @@ class SwitchNode(HIRNode):
             lines.append((self.ea, f"{ind1}default: goto {self.default_label};"))
         lines.append((self.ea, f"{ind}}}"))
         return lines
+
+    def definitely_killed(self) -> frozenset:
+        """Registers killed on ALL case paths (intersection across all inlined bodies)."""
+        inlined = [body for _, body in self.cases if isinstance(body, list)]
+        if self.default_body is not None:
+            inlined.append(self.default_body)
+        if not inlined:
+            return frozenset()
+        result = _killed_by_seq(inlined[0])
+        for body in inlined[1:]:
+            result &= _killed_by_seq(body)
+        return result
+
+    def possibly_killed(self) -> frozenset:
+        """Registers killed on ANY case path (union across all inlined bodies)."""
+        result: frozenset = frozenset()
+        for _, body in self.cases:
+            if isinstance(body, list):
+                result |= _killed_by_seq(body)
+        if self.default_body is not None:
+            result |= _killed_by_seq(self.default_body)
+        return result
 
     def ann_lines(self) -> List[str]:
         out = (["SwitchNode"] + _ann_field("subject", self.subject)

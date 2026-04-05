@@ -6,7 +6,7 @@ tests/patterns/test_accum_fold.py — AccumFoldPattern edge cases:
 """
 
 from pseudo8051.ir.hir import Assign, CompoundAssign, ExprStmt, IfGoto, ReturnStmt
-from pseudo8051.ir.expr import Reg, Const, BinOp, UnaryOp, XRAMRef, Name, RegGroup, Cast
+from pseudo8051.ir.expr import Reg, Regs, Const, BinOp, UnaryOp, XRAMRef, Name, RegGroup, Cast
 
 
 def _match(nodes):
@@ -151,7 +151,7 @@ class TestMulABPairLookahead:
         assert len(replacement) == 1
         node = replacement[0]
         assert isinstance(node, Assign)
-        assert isinstance(node.lhs, RegGroup)
+        assert isinstance(node.lhs, Regs) and not node.lhs.is_single
         assert set(node.lhs.regs) == {"R2", "R3"}
         rendered = node.rhs.render()
         assert "X" in rendered
@@ -181,7 +181,7 @@ class TestMulABPairLookahead:
         assert len(replacement) == 1
         node = replacement[0]
         assert isinstance(node, Assign)
-        assert isinstance(node.lhs, RegGroup)
+        assert isinstance(node.lhs, Regs) and not node.lhs.is_single
         assert set(node.lhs.regs) == {"R2", "R3"}
         rendered = node.rhs.render()
         assert "X" in rendered
@@ -239,7 +239,7 @@ class TestMulABPairLookaheadInterleaved:
         assert len(replacement) == 1
         node = replacement[0]
         assert isinstance(node, Assign)
-        assert isinstance(node.lhs, RegGroup)
+        assert isinstance(node.lhs, Regs) and not node.lhs.is_single
         assert set(node.lhs.regs) == {"R2", "R3"}
         rendered = node.rhs.render()
         assert "R1" in rendered

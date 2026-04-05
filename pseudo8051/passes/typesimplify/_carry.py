@@ -13,7 +13,7 @@ from typing import List, Optional
 from pseudo8051.ir.hir import (HIRNode, Assign, CompoundAssign, ExprStmt,
                                 IfNode, IfGoto, WhileNode, Label)
 from pseudo8051.ir.expr import (BinOp, Const, UnaryOp,
-                                 Reg as RegExpr, RegGroup as RegGroupExpr,
+                                 Reg, Regs as RegExpr,
                                  Name as NameExpr)
 from pseudo8051.constants import dbg
 
@@ -28,23 +28,23 @@ def _match_subb16(nodes: List[HIRNode], k: int):
     if k + 3 >= len(nodes):
         return None
     n0, n1, n2, n3 = nodes[k], nodes[k+1], nodes[k+2], nodes[k+3]
-    if not (isinstance(n0, Assign) and isinstance(n0.lhs, RegExpr) and n0.lhs.name == "C"
+    if not (isinstance(n0, Assign) and n0.lhs == Reg("C")
             and isinstance(n0.rhs, Const) and n0.rhs.value == 0):
         return None
-    if not (isinstance(n1, CompoundAssign) and isinstance(n1.lhs, RegExpr) and n1.lhs.name == "A"
+    if not (isinstance(n1, CompoundAssign) and n1.lhs == Reg("A")
             and n1.op == "-=" and isinstance(n1.rhs, BinOp) and n1.rhs.op == "+"
-            and isinstance(n1.rhs.lhs, RegExpr) and isinstance(n1.rhs.rhs, RegExpr)
-            and n1.rhs.rhs.name == "C"):
+            and isinstance(n1.rhs.lhs, RegExpr) and n1.rhs.lhs.is_single
+            and n1.rhs.rhs == Reg("C")):
         return None
     Rlo_sub = n1.rhs.lhs.name
-    if not (isinstance(n2, Assign) and isinstance(n2.lhs, RegExpr) and n2.lhs.name == "A"
-            and isinstance(n2.rhs, RegExpr)):
+    if not (isinstance(n2, Assign) and n2.lhs == Reg("A")
+            and isinstance(n2.rhs, RegExpr) and n2.rhs.is_single):
         return None
     Rhi_min = n2.rhs.name
-    if not (isinstance(n3, CompoundAssign) and isinstance(n3.lhs, RegExpr) and n3.lhs.name == "A"
+    if not (isinstance(n3, CompoundAssign) and n3.lhs == Reg("A")
             and n3.op == "-=" and isinstance(n3.rhs, BinOp) and n3.rhs.op == "+"
-            and isinstance(n3.rhs.lhs, RegExpr) and isinstance(n3.rhs.rhs, RegExpr)
-            and n3.rhs.rhs.name == "C"):
+            and isinstance(n3.rhs.lhs, RegExpr) and n3.rhs.lhs.is_single
+            and n3.rhs.rhs == Reg("C")):
         return None
     Rhi_sub = n3.rhs.lhs.name
     return (Rlo_sub, Rhi_min, Rhi_sub)
@@ -53,7 +53,7 @@ def _match_subb16(nodes: List[HIRNode], k: int):
 def _find_reggroup_name(nodes: List[HIRNode], before_idx: int, target_reg: str) -> Optional[str]:
     """Search nodes[:before_idx] backward for Assign(RegGroup, Name) containing target_reg."""
     for node in reversed(nodes[:before_idx]):
-        if (isinstance(node, Assign) and isinstance(node.lhs, RegGroupExpr)
+        if (isinstance(node, Assign) and isinstance(node.lhs, RegExpr) and not node.lhs.is_single
                 and target_reg in node.lhs.regs and isinstance(node.rhs, NameExpr)):
             return node.rhs.name
     return None
@@ -95,7 +95,7 @@ def _simplify_carry_comparison(nodes: List[HIRNode]) -> List[HIRNode]:
     for node in nodes:
         if isinstance(node, WhileNode):
             new_body = _simplify_carry_comparison(node.body_nodes)
-            if isinstance(node.condition, RegExpr) and node.condition.name == "C":
+            if node.condition == Reg("C"):
                 transformed = _try_collapse_subb16(node.condition, new_body)
                 if transformed is not None:
                     new_cond, new_body = transformed
@@ -123,10 +123,10 @@ def _simplify_cjne_jnc(nodes: List[HIRNode]) -> List[HIRNode]:
     """
     def _is_not_c(c) -> bool:
         return (isinstance(c, UnaryOp) and c.op == "!"
-                and isinstance(c.operand, RegExpr) and c.operand.name == "C")
+                and c.operand == Reg("C"))
 
     def _is_c(c) -> bool:
-        return isinstance(c, RegExpr) and c.name == "C"
+        return c == Reg("C")
 
     work = [n.map_bodies(_simplify_cjne_jnc) for n in nodes]
     result: List[HIRNode] = []
@@ -191,7 +191,7 @@ def _simplify_orl_zero_check(nodes: List[HIRNode]) -> List[HIRNode]:
     while i < len(nodes):
         node = nodes[i]
         if (isinstance(node, CompoundAssign)
-                and isinstance(node.lhs, RegExpr) and node.lhs.name == "A"
+                and node.lhs == Reg("A")
                 and node.op == "|="
                 and isinstance(node.rhs, NameExpr)):
             m = _RE_BYTE_FIELD.match(node.rhs.name)

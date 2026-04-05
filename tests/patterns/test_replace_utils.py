@@ -8,11 +8,11 @@ class TestReplaceSingleRegs:
         result = _replace_single_regs("R7 = R7;", reg_map)
         assert result == "R7 = H;"
 
-    def test_non_param_not_substituted(self):
-        """Entries without is_param=True are left alone."""
+    def test_non_param_substituted(self):
+        """All register-backed entries are substituted (kill tracking removes stale ones)."""
         reg_map = {"R7": VarInfo("H", "uint8_t", ("R7",))}  # is_param defaults False
         result = _replace_single_regs("R7 = R7;", reg_map)
-        assert result == "R7 = R7;"
+        assert result == "R7 = H;"
 
     def test_no_assignment_substitutes_everywhere(self):
         """In a non-assignment expression, all occurrences are substituted."""

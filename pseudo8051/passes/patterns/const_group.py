@@ -7,7 +7,7 @@ Collapses a byte-by-byte constant load into a multi-byte register group.
 from typing import Dict, List, Optional, Tuple
 
 from pseudo8051.ir.hir import HIRNode, Assign, TypedAssign, ReturnStmt, ExprStmt
-from pseudo8051.ir.expr import Reg, Const, Name, RegGroup
+from pseudo8051.ir.expr import Reg, Regs, Const, Name, RegGroup
 from pseudo8051.constants import dbg
 from pseudo8051.passes.patterns.base   import Pattern, Match, Simplify
 from pseudo8051.passes.patterns._utils import (
@@ -21,7 +21,7 @@ def _node_as_assign_imm(node: HIRNode):
     if isinstance(node, Assign):
         lhs = node.lhs
         rhs = node.rhs
-        if isinstance(lhs, Reg) and isinstance(rhs, Const):
+        if isinstance(lhs, Regs) and lhs.is_single and isinstance(rhs, Const):
             return (lhs.name, rhs.value)
     return None
 
@@ -31,7 +31,7 @@ def _node_as_assign_reg(node: HIRNode):
     if isinstance(node, Assign):
         lhs = node.lhs
         rhs = node.rhs
-        if isinstance(lhs, Reg) and isinstance(rhs, Reg):
+        if isinstance(lhs, Regs) and lhs.is_single and isinstance(rhs, Regs) and rhs.is_single:
             return (lhs.name, rhs.name)
     return None
 
@@ -97,8 +97,7 @@ class ConstGroupPattern(Pattern):
               simplify: Simplify) -> Optional[Match]:
         candidates = sorted(
             {v for v in reg_map.values()
-             if isinstance(v, VarInfo) and len(v.regs) >= 2
-             and not v.is_retval_field},
+             if isinstance(v, VarInfo) and len(v.regs) >= 2},
             key=lambda v: len(v.regs), reverse=True,
         )
         for vinfo in candidates:

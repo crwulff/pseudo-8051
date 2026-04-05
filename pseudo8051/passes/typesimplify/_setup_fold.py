@@ -13,8 +13,8 @@ from pseudo8051.ir.hir import (HIRNode, Assign, CompoundAssign, ExprStmt,
                                 ReturnStmt, IfGoto, IfNode, WhileNode, ForNode,
                                 DoWhileNode, SwitchNode)
 from pseudo8051.ir.expr import (Expr, Const, Call, BinOp, Paren,
-                                 Reg as RegExpr, RegGroup as RegGroupExpr,
-                                 Name as NameExpr)
+                                 Reg as RegExpr, Regs as RegsExpr,
+                                 RegGroup as RegGroupExpr, Name as NameExpr)
 from pseudo8051.passes.patterns._utils import VarInfo, _count_reg_uses_in_node, _subst_reg_in_node
 from pseudo8051.passes.typesimplify._dptr import _is_dptr_inc_node
 from pseudo8051.constants import dbg
@@ -25,7 +25,7 @@ from pseudo8051.constants import dbg
 def _is_call_setup_assign(node: HIRNode) -> bool:
     """True for Assign(Reg/RegGroup, Name/Const) — a consolidated register-setup node."""
     return (isinstance(node, Assign)
-            and isinstance(node.lhs, (RegExpr, RegGroupExpr))
+            and isinstance(node.lhs, RegsExpr)
             and isinstance(node.rhs, (NameExpr, Const)))
 
 
@@ -84,8 +84,7 @@ def _first_kill_before_read(reg: str, nodes: List[HIRNode]) -> bool:
         if isinstance(node, (IfNode, WhileNode, ForNode, DoWhileNode, SwitchNode)):
             return False
         if (isinstance(node, CompoundAssign)
-                and isinstance(node.lhs, RegExpr)
-                and node.lhs.name == reg):
+                and node.lhs == RegExpr(reg)):
             return False  # CompoundAssign reads its LHS
         reads = _count_reg_uses_in_node(reg, node)
         writes = reg in node.written_regs
@@ -124,7 +123,7 @@ def _fold_and_prune_setups(nodes: List[HIRNode],
     for i in range(len(work)):
         node = work[i]
         if not (isinstance(node, Assign)
-                and isinstance(node.lhs, RegExpr)
+                and isinstance(node.lhs, RegsExpr) and node.lhs.is_single
                 and isinstance(node.rhs, Const)):
             continue
         reg = node.lhs.name
@@ -238,7 +237,7 @@ def _fold_call_arg_pairs(nodes: List[HIRNode],
             continue
 
         if not (isinstance(node, Assign)
-                and isinstance(node.lhs, RegExpr)
+                and isinstance(node.lhs, RegsExpr) and node.lhs.is_single
                 and node.lhs.name in reg_to_pair):
             out.append(node)
             continue
@@ -260,7 +259,7 @@ def _fold_call_arg_pairs(nodes: List[HIRNode],
             reads_pair = _reads_any_reg(nd, all_regs)
             writes_pair = _writes_any_reg(nd, all_regs)
 
-            if (isinstance(nd, Assign) and isinstance(nd.lhs, RegExpr)
+            if (isinstance(nd, Assign) and isinstance(nd.lhs, RegsExpr) and nd.lhs.is_single
                     and nd.lhs.name in remaining_regs and not reads_pair):
                 byte_assigns[nd.lhs.name] = (k, nd.rhs)
                 remaining_regs -= {nd.lhs.name}

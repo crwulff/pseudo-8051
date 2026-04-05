@@ -5,7 +5,7 @@ ir/hir/compound_assign.py — CompoundAssign node.
 from typing import List, Tuple
 
 from pseudo8051.ir.hir._base import HIRNode, _render_expr, _ann_field, _lhs_written_regs, _refs_from_expr
-from pseudo8051.ir.expr import Expr, Reg as RegExpr, Name as NameExpr
+from pseudo8051.ir.expr import Expr, Regs as RegsExpr, Name as NameExpr
 
 
 class CompoundAssign(HIRNode):
@@ -27,7 +27,7 @@ class CompoundAssign(HIRNode):
     def name_refs(self) -> frozenset:
         refs = _refs_from_expr(self.rhs)
         # CompoundAssign also READS its LHS operand
-        if isinstance(self.lhs, (RegExpr, NameExpr)):
+        if isinstance(self.lhs, (RegsExpr, NameExpr)):
             refs = refs | frozenset({self.lhs.name})
         return refs
 

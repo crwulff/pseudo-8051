@@ -9,7 +9,7 @@ from typing import Dict, List, Optional
 
 from pseudo8051.ir.hir import (HIRNode, Assign, TypedAssign, ReturnStmt,
                                 IfNode, WhileNode, ForNode, DoWhileNode, SwitchNode)
-from pseudo8051.ir.expr import (Reg as RegExpr, RegGroup as RegGroupExpr,
+from pseudo8051.ir.expr import (Reg, Regs as RegExpr, RegGroup as RegGroupExpr,
                                  Name as NameExpr)
 from pseudo8051.passes.patterns._utils import VarInfo
 from pseudo8051.constants import dbg
@@ -74,7 +74,7 @@ def _fold_return_chains(hir: List[HIRNode], ret_regs: tuple,
             # ── Multi-reg: RegGroup assignment immediately before ReturnStmt ─────
             if (pair_name is not None
                     and isinstance(node, Assign)
-                    and isinstance(node.lhs, RegGroupExpr)
+                    and isinstance(node.lhs, RegExpr) and not node.lhs.is_single
                     and frozenset(node.lhs.regs) == frozenset(ret_regs)
                     and i + 1 < len(nodes)
                     and isinstance(nodes[i + 1], ReturnStmt)
@@ -87,12 +87,12 @@ def _fold_return_chains(hir: List[HIRNode], ret_regs: tuple,
             # ── Single-reg: only for single-register returns ──────────────────
             if (pair_name is None
                     and isinstance(node, Assign)
-                    and isinstance(node.lhs, RegExpr)
+                    and isinstance(node.lhs, RegExpr) and node.lhs.is_single
                     and node.lhs.name in ret_reg_set
                     and i + 1 < len(nodes)
                     and isinstance(nodes[i + 1], ReturnStmt)
                     and (nodes[i + 1].value is None
-                         or nodes[i + 1].value == RegExpr(node.lhs.name))):
+                         or nodes[i + 1].value == Reg(node.lhs.name))):
                 out.append(ReturnStmt(node.ea, node.rhs))
                 dbg("typesimp", f"  [{hex(node.ea)}] fold-return (single): {node.rhs.render()}")
                 i += 2
@@ -107,7 +107,7 @@ def _fold_return_chains(hir: List[HIRNode], ret_regs: tuple,
                 while k >= 0:
                     prev = out[k]
                     if (isinstance(prev, Assign)
-                            and isinstance(prev.lhs, RegExpr)
+                            and isinstance(prev.lhs, RegExpr) and prev.lhs.is_single
                             and prev.lhs.name in ret_reg_set
                             and prev.lhs.name not in collected):
                         collected[prev.lhs.name] = (k, prev.rhs)
@@ -128,9 +128,9 @@ def _fold_return_chains(hir: List[HIRNode], ret_regs: tuple,
                 else:
                     while (out
                            and isinstance(out[-1], Assign)
-                           and isinstance(out[-1].lhs, RegExpr)
+                           and isinstance(out[-1].lhs, RegExpr) and out[-1].lhs.is_single
                            and out[-1].lhs.name in ret_reg_set
-                           and isinstance(out[-1].rhs, RegExpr)
+                           and isinstance(out[-1].rhs, RegExpr) and out[-1].rhs.is_single
                            and out[-1].rhs.name == out[-1].lhs.name):
                         out.pop()
                     combined = _canon_return_expr()

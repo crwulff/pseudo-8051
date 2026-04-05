@@ -17,7 +17,7 @@ from typing import Dict, List, Optional
 
 from pseudo8051.ir.hir import HIRNode, Assign, TypedAssign, ExprStmt
 from pseudo8051.ir.expr import (Expr, BinOp, Call, Const,
-                                 Reg as RegExpr, Name as NameExpr)
+                                 Regs as RegExpr, Name as NameExpr)
 from pseudo8051.passes.patterns._utils import VarInfo
 from pseudo8051.enum_resolve import resolve_enum_const, is_enum_type
 from pseudo8051.constants import dbg

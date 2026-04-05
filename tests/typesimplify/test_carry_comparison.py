@@ -1,6 +1,6 @@
 from pseudo8051.passes.typesimplify._post import _simplify_carry_comparison
 from pseudo8051.ir.hir import Assign, CompoundAssign, WhileNode, ExprStmt
-from pseudo8051.ir.expr import Reg, RegGroup, Name, Const, BinOp, Call
+from pseudo8051.ir.expr import Reg, Regs, RegGroup, Name, Const, BinOp, Call
 
 
 class TestCarryComparison:
@@ -47,5 +47,5 @@ class TestCarryComparison:
         result = _simplify_carry_comparison(nodes)
         wn = result[0]
         # condition still C (couldn't resolve names)
-        assert isinstance(wn.condition, Reg) and wn.condition.name == "C"
+        assert isinstance(wn.condition, Regs) and wn.condition.is_single and wn.condition.name == "C"
         assert len(wn.body_nodes) == 5  # unchanged

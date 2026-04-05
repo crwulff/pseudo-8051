@@ -16,8 +16,7 @@ from pseudo8051.ir.hir import (HIRNode, Assign, TypedAssign, CompoundAssign,
                                 ExprStmt, ReturnStmt, IfGoto, IfNode,
                                 WhileNode, ForNode, DoWhileNode)
 from pseudo8051.ir.expr import (Expr, BinOp, Call,
-                                 Reg as RegExpr, Name as NameExpr,
-                                 RegGroup as RegGroupExpr)
+                                 Regs as RegExpr, Name as NameExpr)
 from pseudo8051.passes.patterns._utils import (
     VarInfo, _count_reg_uses_in_node, _subst_reg_in_node, _walk_expr,
 )
@@ -36,7 +35,7 @@ def _expr_name_refs(expr: Expr) -> frozenset:
     refs: set = set()
 
     def _collect(e: Expr) -> Expr:
-        if isinstance(e, RegGroupExpr):
+        if isinstance(e, RegExpr) and not e.is_single:
             refs.add("".join(e.regs))
         elif isinstance(e, (NameExpr, RegExpr)):
             refs.add(e.name)
@@ -142,12 +141,11 @@ def _fold_compound_assigns(live: List[HIRNode]) -> Tuple[List[HIRNode], bool]:
     while i < len(live):
         node = live[i]
         if (isinstance(node, Assign)
-                and isinstance(node.lhs, RegExpr)
+                and isinstance(node.lhs, RegExpr) and node.lhs.is_single
                 and i + 1 < len(live)):
             nxt = live[i + 1]
             if (isinstance(nxt, CompoundAssign)
-                    and isinstance(nxt.lhs, RegExpr)
-                    and nxt.lhs.name == node.lhs.name
+                    and nxt.lhs == node.lhs
                     and nxt.op in _COMPOUND_OPS):
                 op_str = _COMPOUND_OPS[nxt.op]
                 live[i + 1] = Assign(nxt.ea, nxt.lhs, BinOp(node.rhs, op_str, nxt.rhs))
@@ -179,7 +177,7 @@ def _propagate_register_copies(live: List[HIRNode],
     i = 0
     while i < len(live):
         node = live[i]
-        if not (isinstance(node, Assign) and isinstance(node.lhs, RegExpr)):
+        if not (isinstance(node, Assign) and isinstance(node.lhs, RegExpr) and node.lhs.is_single):
             i += 1
             continue
         r = node.lhs.name
@@ -294,6 +292,7 @@ def _inline_retvals(live: List[HIRNode],
                             break
                     if (isinstance(tgt, Assign)
                             and isinstance(tgt.rhs, (NameExpr, RegExpr))
+                            and (not isinstance(tgt.rhs, RegExpr) or tgt.rhs.is_single)
                             and tgt.rhs.name == retval_name):
                         live[abs_j] = Assign(tgt.ea, tgt.lhs, call_expr)
                     else:

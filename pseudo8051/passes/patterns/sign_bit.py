@@ -12,7 +12,7 @@ into:
 from typing import Dict, List, Optional
 
 from pseudo8051.ir.hir import HIRNode, Assign, IfNode
-from pseudo8051.ir.expr import Reg
+from pseudo8051.ir.expr import Reg, Regs
 from pseudo8051.constants import dbg
 from pseudo8051.passes.patterns.base  import Pattern, Match, Simplify
 from pseudo8051.passes.patterns._utils import VarInfo, _type_bytes, _is_signed
@@ -21,7 +21,7 @@ from pseudo8051.passes.patterns._utils import VarInfo, _type_bytes, _is_signed
 def _is_a_load_reg(node: HIRNode) -> Optional[str]:
     """If node is 'A = Rn;', return Rn; else None."""
     if isinstance(node, Assign):
-        if node.lhs == Reg("A") and isinstance(node.rhs, Reg):
+        if node.lhs == Reg("A") and isinstance(node.rhs, Regs) and node.rhs.is_single:
             return node.rhs.name
     return None
 

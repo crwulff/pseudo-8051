@@ -27,7 +27,7 @@ Recognises the 8051 XCH-based dual-pointer copy idiom in two forms:
 from typing import Dict, List, Optional, Tuple
 
 from pseudo8051.ir.hir import HIRNode, Assign, ExprStmt
-from pseudo8051.ir.expr import Reg, Const, BinOp, UnaryOp, Call, CROMRef, XRAMRef, RegGroup
+from pseudo8051.ir.expr import Reg, Regs, Const, BinOp, UnaryOp, Call, CROMRef, XRAMRef, RegGroup
 from pseudo8051.constants import dbg
 from pseudo8051.passes.patterns.base   import Pattern, Match, Simplify
 from pseudo8051.passes.patterns._utils import VarInfo
@@ -42,8 +42,8 @@ def _is_swap(node: HIRNode, a_name: str, x_name: str) -> bool:
     expr = node.expr
     return (isinstance(expr, Call) and expr.func_name == "swap"
             and len(expr.args) == 2
-            and isinstance(expr.args[0], Reg) and expr.args[0].name == a_name
-            and isinstance(expr.args[1], Reg) and expr.args[1].name == x_name)
+            and expr.args[0] == Reg(a_name)
+            and expr.args[1] == Reg(x_name))
 
 
 def _swap_target(node: HIRNode, a_name: str) -> Optional[str]:
@@ -53,8 +53,8 @@ def _swap_target(node: HIRNode, a_name: str) -> Optional[str]:
     expr = node.expr
     if (isinstance(expr, Call) and expr.func_name == "swap"
             and len(expr.args) == 2
-            and isinstance(expr.args[0], Reg) and expr.args[0].name == a_name
-            and isinstance(expr.args[1], Reg)):
+            and expr.args[0] == Reg(a_name)
+            and isinstance(expr.args[1], Regs) and expr.args[1].is_single):
         return expr.args[1].name
     return None
 
@@ -64,8 +64,7 @@ def _is_inc_dptr(node: HIRNode) -> bool:
     return (isinstance(node, ExprStmt)
             and isinstance(node.expr, UnaryOp)
             and node.expr.op == "++"
-            and isinstance(node.expr.operand, Reg)
-            and node.expr.operand.name == "DPTR"
+            and node.expr.operand == Reg("DPTR")
             and node.expr.post)
 
 
@@ -139,7 +138,7 @@ def _try_match_read(nodes: List[HIRNode], i: int):
             and isinstance(nodes[j], Assign)
             and nodes[j].lhs == Reg("A")
             and isinstance(nodes[j].rhs, XRAMRef)
-            and isinstance(nodes[j].rhs.inner, Reg)
+            and isinstance(nodes[j].rhs.inner, Regs) and nodes[j].rhs.inner.is_single
             and nodes[j].rhs.inner.name == "DPTR"):
         return (XRAMRef(Reg("DPTR")), j + 1, nodes[j].ea)
 
@@ -159,11 +158,11 @@ def _try_match_read(nodes: List[HIRNode], i: int):
     inner = node.rhs.inner
     if isinstance(inner, BinOp):
         # CROM[A + DPTR] — valid because preceding clr A made A = 0
-        if not (isinstance(inner.lhs, Reg) and inner.lhs.name == "A"
+        if not (inner.lhs == Reg("A")
                 and inner.op == "+"
-                and isinstance(inner.rhs, Reg) and inner.rhs.name == "DPTR"):
+                and inner.rhs == Reg("DPTR")):
             return None
-    elif isinstance(inner, Reg) and inner.name == "DPTR":
+    elif inner == Reg("DPTR"):
         pass   # already simplified form
     else:
         return None
@@ -210,8 +209,7 @@ class XchCopyPattern(Pattern):
         movx = nodes[j]
         if not (isinstance(movx, Assign)
                 and isinstance(movx.lhs, XRAMRef)
-                and isinstance(movx.lhs.inner, Reg)
-                and movx.lhs.inner.name == "DPTR"
+                and movx.lhs.inner == Reg("DPTR")
                 and movx.rhs == Reg("A")):
             return None
         j += 1

@@ -8,7 +8,7 @@ and storing the result byte-by-byte into a declared XRAM local.
 from typing import Dict, List, Optional
 
 from pseudo8051.ir.hir import HIRNode, Assign, CompoundAssign, ExprStmt
-from pseudo8051.ir.expr import Reg, Const, XRAMRef, UnaryOp, Name, BinOp, Cast, Expr
+from pseudo8051.ir.expr import Reg, Regs, Const, XRAMRef, UnaryOp, Name, BinOp, Cast, Expr
 from pseudo8051.constants import dbg
 from pseudo8051.passes.patterns.base   import Pattern, Match, Simplify
 from pseudo8051.passes.patterns._utils import (
@@ -23,7 +23,7 @@ def _parse_const(s: str) -> int:
 def _node_is_a_from_reg(node: HIRNode) -> Optional[str]:
     """If node is 'A = Rn;', return Rn; else None."""
     if isinstance(node, Assign):
-        if node.lhs == Reg("A") and isinstance(node.rhs, Reg):
+        if node.lhs == Reg("A") and isinstance(node.rhs, Regs) and node.rhs.is_single:
             return node.rhs.name
     return None
 

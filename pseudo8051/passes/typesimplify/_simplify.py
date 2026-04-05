@@ -63,50 +63,45 @@ def _simplify_bool_str(cond: str) -> str:
 def _effective_map(node: HIRNode, base_eff: Dict[str, VarInfo]) -> Dict[str, VarInfo]:
     """Build per-node effective reg map from base_eff merged with node annotations.
 
-    For is_param entries: suppresses any whose registers are absent from
-    node.ann.reg_names (the annotation forward-pass already tracked kills across
-    all control-flow paths, including kills inside IfNode/WhileNode branches that
-    the local `killed` set never sees).
-
-    Then adds entries from node.ann.reg_names and node.ann.call_arg_ann via
-    setdefault, so annotations never override entries that survived suppression.
+    Adds entries from node.ann.reg_names, node.ann.call_arg_ann, and
+    node.ann.callee_args via setdefault, so annotations never override entries
+    already present in base_eff (which has already been pruned by _kill_written).
     """
     ann = node.ann
     if ann is None:
         return base_eff
 
-    eff: Dict[str, VarInfo] = {}
-    for k, v in base_eff.items():
-        if isinstance(v, VarInfo) and v.is_param and v.regs:
-            # Keep this param only if at least one of its registers is still
-            # live according to the annotation (not killed by any path).
-            if any(r in ann.reg_names for r in v.regs):
-                eff[k] = v
-            # else: all paths through preceding control flow wrote to these
-            # regs — the param name no longer applies here.
-        else:
-            eff[k] = v
-
+    eff = dict(base_eff)
     for r, vi in ann.reg_names.items():
         eff.setdefault(r, vi)
     for r, vi in ann.call_arg_ann.items():
         eff.setdefault(r, vi)
-    # Merge callee_args so the call node's RegGroup/Reg args get renamed to param names
     if ann.callee_args:
         for r, vi in ann.callee_args.items():
             eff.setdefault(r, vi)
     return eff
 
 
-def _kill_params(reg_map: Dict[str, VarInfo], killed: set) -> Dict[str, VarInfo]:
-    """Return reg_map with entries whose param or retval-field registers overlap *killed* removed."""
-    if not killed:
+def _kill_written(reg_map: Dict[str, VarInfo],
+                  written_regs: frozenset,
+                  pre_snap: Optional[Dict[str, VarInfo]] = None) -> Dict[str, VarInfo]:
+    """Return reg_map with ALL register-backed entries whose registers overlap
+    *written_regs* removed.
+
+    If *pre_snap* is provided, only entries present in pre_snap are eligible
+    for removal — entries that were absent from pre_snap (newly added by the
+    current pattern match) are immune so they survive the node that created them.
+
+    XRAM-backed entries (vinfo.xram_sym != '') are never removed.
+    """
+    if not written_regs:
         return reg_map
     result = {}
     for k, v in reg_map.items():
-        if isinstance(v, VarInfo) and (v.is_param or v.is_retval_field) and v.regs:
-            if any(r in killed for r in v.regs):
-                continue
+        if isinstance(v, VarInfo) and v.regs and not v.xram_sym:
+            if any(r in written_regs for r in v.regs):
+                if pre_snap is None or k in pre_snap:
+                    continue   # kill this entry
         result[k] = v
     return result
 
@@ -144,8 +139,8 @@ def _transform_default(node: HIRNode,
 
     if isinstance(node, Assign):
         from pseudo8051.ir.hir import TypedAssign
-        from pseudo8051.ir.expr import Reg as RegExpr, Name as NameExpr, RegGroup as RegGroupExpr
-        if isinstance(node.lhs, RegExpr) and node.lhs.name == "DPTR":
+        from pseudo8051.ir.expr import Reg, Regs as RegExpr, Name as NameExpr
+        if node.lhs == Reg("DPTR"):
             sym = node.rhs.render()
             if any(v.xram_sym == sym for v in reg_map.values()
                    if isinstance(v, VarInfo) and v.xram_sym):
@@ -271,23 +266,16 @@ def _simplify_once(nodes: List[HIRNode], reg_map: Dict[str, VarInfo],
                    simplify_fn=None) -> List[HIRNode]:
     """Apply one round of pattern matching + default transforms to each node.
 
-    Tracks registers written by previous nodes so that non-param callee-return
-    placeholder mappings (e.g. R7 → "retval") are suppressed once the register
-    has been overwritten.
+    Applies unified kill tracking: every register write removes all register-backed
+    entries for those registers from the working copy of reg_map so that stale
+    mappings never reach subsequent nodes.
     """
     if simplify_fn is None:
         simplify_fn = _simplify
     out: List[HIRNode] = []
-    written: set = set()   # registers overwritten so far in this pass
+    cur_map = reg_map   # updated after each node via _kill_written
     for node in nodes:
-        # Suppress entries for registers already written in this pass.
-        if written:
-            base_eff = {k: v for k, v in reg_map.items()
-                        if not (isinstance(v, VarInfo) and not v.xram_sym and v.regs
-                                and any(r in written for r in v.regs))}
-        else:
-            base_eff = reg_map
-        eff = _effective_map(node, base_eff)
+        eff = _effective_map(node, cur_map)
         for pat in _PATTERNS:
             result = pat.match([node], 0, eff, simplify_fn)
             if result is not None:
@@ -297,116 +285,59 @@ def _simplify_once(nodes: List[HIRNode], reg_map: Dict[str, VarInfo],
             transformed = _transform_default(node, eff, simplify_fn)
             if transformed is not None:
                 out.append(transformed)
-        written.update(node.written_regs)
-        if isinstance(node, IfNode):
-            written.update(_if_definite_kills(node))
+        written = node.written_regs | node.definitely_killed()
+        cur_map = _kill_written(cur_map, written)
     return out
 
 
-def _if_definite_kills(node: IfNode) -> frozenset:
-    """Registers definitely written in ALL execution paths through an IfNode.
-
-    Both arms always execute exactly one, so the intersection of their writes
-    is guaranteed to be killed at the merge point.  Used by _simplify_once to
-    prevent stale param mappings from leaking into post-branch nodes that lack
-    annotation (because they were created by patterns earlier in the pipeline).
-    """
-    return _definite_kills_list(node.then_nodes) & _definite_kills_list(node.else_nodes)
-
-
-def _definite_kills_list(nodes: List[HIRNode]) -> frozenset:
-    result: set = set()
-    for n in nodes:
-        result |= n.written_regs
-        if isinstance(n, IfNode):
-            result |= _if_definite_kills(n)
-    return frozenset(result)
-
-
-def _simplify(nodes: List[HIRNode], reg_map: Dict[str, VarInfo],
-              _killed: Optional[set] = None) -> List[HIRNode]:
+def _simplify(nodes: List[HIRNode], reg_map: Dict[str, VarInfo]) -> List[HIRNode]:
     """
     Walk nodes, trying each registered Pattern in turn.  Falls back to
     _transform_default for nodes not consumed by any pattern.
 
-    Flow-sensitive kill tracking: when a node assigns to a register that
-    carries an is_param mapping, that mapping is suppressed for all
-    subsequent nodes (including nested IfNode/WhileNode/ForNode bodies).
+    Unified kill tracking: every register write removes ALL register-backed
+    VarInfo entries for those registers from reg_map.  Entries newly added by
+    a pattern match are immune for the creating node via pre-snapshot comparison.
+    Structured-node definite kills are applied after each such node.
     """
     out: List[HIRNode] = []
     i = 0
-    killed: set = set() if _killed is None else set(_killed)
 
     def _sub_simplify(ns: List[HIRNode], rm: Dict[str, VarInfo]) -> List[HIRNode]:
-        """Recursive simplify that carries the current kill-set inward."""
-        return _simplify(ns, rm, killed)
-
-    def _update_killed(node: HIRNode) -> None:
-        for r in node.written_regs:
-            v = reg_map.get(r)
-            if isinstance(v, VarInfo) and (v.is_param or v.is_retval_field):
-                killed.add(r)
+        """Recursive simplify; receives the already-killed reg_map."""
+        return _simplify(ns, rm)
 
     while i < len(nodes):
-        base_eff = _kill_params(reg_map, killed)
-        eff = _effective_map(nodes[i], base_eff)
+        eff = _effective_map(nodes[i], reg_map)
 
         for pat in _PATTERNS:
             result = pat.match(nodes, i, eff, _sub_simplify)
             if result is not None:
                 replacement, new_i = result
-                # Snapshot the reg_map state before propagating pattern mutations.
-                # This snapshot is used for kill-tracking below so that entries
-                # added by the pattern (e.g. struct member retval fields) are not
-                # immediately killed by the same node that produced them.
+                # Snapshot reg_map BEFORE propagating pattern mutations so that
+                # _kill_written can distinguish pre-existing entries (eligible for
+                # killing) from entries newly added by the pattern (immune).
                 pre_snap = dict(reg_map)
-                # Propagate new/changed keys from eff back to the original reg_map
-                # (patterns mutate their reg_map arg, which may be a _kill_params copy).
-                # Skip keys that _kill_params intentionally removed (killed params).
+                # Propagate new/changed keys from eff back to reg_map.
                 if eff is not reg_map:
                     for k, v in eff.items():
                         if reg_map.get(k) is not v:
-                            orig_v = reg_map.get(k)
-                            # Block propagation only when a killed param entry would be
-                            # overwritten by another param entry.  Non-param entries
-                            # (retval, retval-field) must always be allowed through so
-                            # that struct member entries populate the individual register
-                            # slots even when those registers were previously killed as
-                            # function parameters.
-                            new_is_param = isinstance(v, VarInfo) and v.is_param
-                            if not (isinstance(orig_v, VarInfo) and orig_v.is_param
-                                    and orig_v.regs
-                                    and any(r in killed for r in orig_v.regs)
-                                    and new_is_param):
-                                reg_map[k] = v
-                # Gather kills from the consumed range using the pre-pattern snapshot
-                # so newly-added struct-member entries survive their creating node.
+                            reg_map[k] = v
+                # Kill pre-existing entries for all registers written by consumed nodes.
+                written: frozenset = frozenset()
                 for j in range(i, new_i):
-                    for r in nodes[j].written_regs:
-                        sv = pre_snap.get(r)
-                        if isinstance(sv, VarInfo) and (sv.is_param or sv.is_retval_field):
-                            killed.add(r)
-                # Un-kill only registers belonging to retval-field entries that were
-                # freshly added by this pattern match.  Comparing reg_map against
-                # pre_snap lets us distinguish new entries from pre-existing ones so
-                # we don't accidentally un-kill registers from an earlier retval whose
-                # fields were legitimately overwritten by subsequent argument loads.
-                for k, _v in reg_map.items():
-                    if isinstance(_v, VarInfo) and _v.is_retval_field:
-                        if pre_snap.get(k) is not _v:
-                            for _r in _v.regs:
-                                killed.discard(_r)
-                base_eff = _kill_params(reg_map, killed)
-                eff = _effective_map(nodes[i], base_eff)
+                    written |= nodes[j].written_regs | nodes[j].definitely_killed()
+                reg_map = _kill_written(reg_map, written, pre_snap)
                 i = new_i
-                out.extend(_simplify_once(replacement, eff, _sub_simplify))
+                out.extend(_simplify_once(replacement, reg_map, _sub_simplify))
                 break
         else:
-            # Transform BEFORE killing so the node's own RHS uses its old mapping
+            # Transform BEFORE killing so the node's own RHS sees current mapping.
             transformed = _transform_default(nodes[i], eff, _sub_simplify)
             if transformed is not None:
                 out.append(transformed)
-            # Kill AFTER transform
-            _update_killed(nodes[i])
+            # Kill AFTER transform — includes structured-node definite kills.
+            written = nodes[i].written_regs | nodes[i].definitely_killed()
+            reg_map = _kill_written(reg_map, written)
             i += 1
     return out

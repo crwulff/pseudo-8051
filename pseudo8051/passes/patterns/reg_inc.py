@@ -25,7 +25,7 @@ Both patterns:
 from typing import Dict, List, Optional
 
 from pseudo8051.ir.hir import HIRNode, ExprStmt
-from pseudo8051.ir.expr import Reg, UnaryOp
+from pseudo8051.ir.expr import Reg, Regs, UnaryOp
 from pseudo8051.constants import dbg
 from pseudo8051.passes.patterns.base   import Pattern, Match, Simplify
 from pseudo8051.passes.patterns._utils import (
@@ -40,7 +40,7 @@ def _match_inc_node(node: HIRNode):
     e = node.expr
     if not (isinstance(e, UnaryOp)
             and e.op in ("++", "--")
-            and isinstance(e.operand, Reg)
+            and isinstance(e.operand, Regs) and e.operand.is_single
             and e.post):
         return None
     return (e.operand.name, e.op)

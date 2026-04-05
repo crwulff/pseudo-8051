@@ -20,7 +20,7 @@ from typing import Dict, List, Optional, Tuple, Union
 from pseudo8051.ir.hir import (
     HIRNode, Label, Assign, CompoundAssign, IfGoto, SwitchNode,
     GotoStatement, BreakStmt, IfNode, WhileNode, ForNode, DoWhileNode, ReturnStmt)
-from pseudo8051.ir.expr import Reg, Const, BinOp, Expr, UnaryOp
+from pseudo8051.ir.expr import Reg, Regs, Const, BinOp, Expr, UnaryOp
 from pseudo8051.ir.function   import Function
 from pseudo8051.ir.basicblock import BasicBlock
 from pseudo8051.passes        import OptimizationPass
@@ -38,8 +38,8 @@ def _label_for(block: BasicBlock) -> str:
 
 def _contains_a(expr: Expr) -> bool:
     """True if the expression tree contains a reference to register A."""
-    if isinstance(expr, Reg):
-        return expr.name == "A"
+    if isinstance(expr, Regs) and expr.is_single:
+        return expr == Reg("A")
     if isinstance(expr, BinOp):
         return _contains_a(expr.lhs) or _contains_a(expr.rhs)
     if isinstance(expr, UnaryOp):

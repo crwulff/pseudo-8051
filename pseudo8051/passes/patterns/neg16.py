@@ -8,7 +8,7 @@ Collapses the 7-statement 8051 16-bit two's-complement negation into:
 from typing import Dict, List, Optional
 
 from pseudo8051.ir.hir import HIRNode, Assign, CompoundAssign
-from pseudo8051.ir.expr import Reg, Const, BinOp, UnaryOp, Name
+from pseudo8051.ir.expr import Reg, Regs, Const, BinOp, UnaryOp, Name
 from pseudo8051.constants import dbg
 from pseudo8051.passes.patterns.base   import Pattern, Match, Simplify
 from pseudo8051.passes.patterns._utils import VarInfo
@@ -26,7 +26,7 @@ def _is_subb_reg(node: HIRNode) -> Optional[str]:
                 and isinstance(node.rhs, BinOp)
                 and node.rhs.op == "+"
                 and node.rhs.rhs == Reg("C")
-                and isinstance(node.rhs.lhs, Reg)):
+                and isinstance(node.rhs.lhs, Regs) and node.rhs.lhs.is_single):
             return node.rhs.lhs.name
     return None
 

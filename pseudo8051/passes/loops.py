@@ -23,7 +23,7 @@ from typing import List, Set, Optional, Tuple
 from pseudo8051.ir.hir      import (HIRNode, Assign, CompoundAssign, ExprStmt,
                                     WhileNode, ForNode, DoWhileNode, Label,
                                     IfGoto, GotoStatement, IfNode)
-from pseudo8051.ir.expr     import Expr, Reg, Const, BinOp, UnaryOp
+from pseudo8051.ir.expr     import Expr, Reg, Regs, Const, BinOp, UnaryOp
 from pseudo8051.passes      import OptimizationPass
 from pseudo8051.constants import dbg
 
@@ -57,7 +57,7 @@ def _is_djnz_node(node: HIRNode) -> Optional[str]:
         if isinstance(cond, BinOp) and cond.op == "!=" and cond.rhs == Const(0):
             lhs = cond.lhs
             if (isinstance(lhs, UnaryOp) and lhs.op == "--" and not lhs.post
-                    and isinstance(lhs.operand, Reg)):
+                    and isinstance(lhs.operand, Regs) and lhs.operand.is_single):
                 return lhs.operand.name
     return None
 
@@ -111,9 +111,9 @@ def _collect_loop_body(header: BasicBlock, tail: BasicBlock) -> Set[int]:
 
 def _extract_cond_reg(cond) -> Optional[str]:
     """Extract the primary register name from a loop condition."""
-    if isinstance(cond, Reg):
+    if isinstance(cond, Regs) and cond.is_single:
         return cond.name
-    if isinstance(cond, BinOp) and isinstance(cond.lhs, Reg):
+    if isinstance(cond, BinOp) and isinstance(cond.lhs, Regs) and cond.lhs.is_single:
         return cond.lhs.name
     if isinstance(cond, str):
         m = re.match(r'^(\w+)\s*(?:!=|==|<|>|<=|>=)', cond)
@@ -125,13 +125,12 @@ def _extract_cond_reg(cond) -> Optional[str]:
 def _node_to_update_if_writes(node: HIRNode, reg: str):
     """Return update expression/string if node writes reg as a simple side-effect, else None."""
     if isinstance(node, CompoundAssign):
-        if isinstance(node.lhs, Reg) and node.lhs.name == reg:
+        if node.lhs == Reg(reg):
             return f"{node.lhs.render()} {node.op} {node.rhs.render()}"
     if isinstance(node, ExprStmt):
         expr = node.expr
         if (isinstance(expr, UnaryOp)
-                and isinstance(expr.operand, Reg)
-                and expr.operand.name == reg):
+                and expr.operand == Reg(reg)):
             return expr
     return None
 
@@ -458,7 +457,7 @@ class LoopStructurer(OptimizationPass):
             if pred.start_ea in body_eas:   # skip back-edge predecessors
                 continue
             for node in reversed(pred.hir):
-                if isinstance(node, Assign) and node.lhs == Reg(reg):
+                if isinstance(node, Assign) and node.lhs == Reg(reg):  # Reg factory still works
                     return node.rhs.render()
                 break   # stop at first non-label node from the end
         return None

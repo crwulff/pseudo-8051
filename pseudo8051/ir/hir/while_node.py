@@ -4,7 +4,7 @@ ir/hir/while_node.py — WhileNode structured control-flow node.
 
 from typing import Callable, List, Tuple
 
-from pseudo8051.ir.hir._base import HIRNode, _render_cond, _ann_field, _Cond
+from pseudo8051.ir.hir._base import HIRNode, _render_cond, _ann_field, _Cond, _killed_by_seq
 
 
 class WhileNode(HIRNode):
@@ -22,6 +22,14 @@ class WhileNode(HIRNode):
 
     def map_bodies(self, fn: Callable[[List[HIRNode]], List[HIRNode]]) -> "WhileNode":
         return WhileNode(self.ea, self.condition, fn(self.body_nodes))
+
+    def definitely_killed(self) -> frozenset:
+        """Body may execute zero times, so no register is guaranteed killed."""
+        return frozenset()
+
+    def possibly_killed(self) -> frozenset:
+        """Registers possibly killed if the body executes at least once."""
+        return _killed_by_seq(self.body_nodes)
 
     def replace_condition(self, new_cond) -> "WhileNode":
         return WhileNode(self.ea, new_cond, self.body_nodes)

@@ -11,7 +11,7 @@ from typing import Dict, List
 
 from pseudo8051.ir.hir import (HIRNode, Assign, IfNode, WhileNode, ForNode,
                                 DoWhileNode, SwitchNode)
-from pseudo8051.ir.expr import Reg as RegExpr, RegGroup as RegGroupExpr, Name as NameExpr
+from pseudo8051.ir.expr import Reg, Regs as RegExpr, RegGroup, Name as NameExpr
 from pseudo8051.passes.patterns._utils import VarInfo, _type_bytes, _byte_names, _subst_reg_in_node
 from pseudo8051.passes.typesimplify._dptr import _is_dptr_inc_node, _as_dph_assign
 from pseudo8051.constants import dbg
@@ -72,7 +72,7 @@ def _consolidate_xram_local_loads(nodes: List[HIRNode],
     def _as_byte_assign(n):
         """Return (reg_name, name_str) if n is 'Reg(r) = Name(s)'; else None."""
         if (isinstance(n, Assign)
-                and isinstance(n.lhs, RegExpr)
+                and isinstance(n.lhs, RegExpr) and n.lhs.is_single
                 and isinstance(n.rhs, NameExpr)):
             return (n.lhs.name, n.rhs.name)
         return None
@@ -114,7 +114,7 @@ def _consolidate_xram_local_loads(nodes: List[HIRNode],
                             # collapse to DPTR = var instead of RegGroup = var.
                             if (regs[-1] == "DPL" and j < len(nodes)
                                     and _as_dph_assign(nodes[j]) == regs[0]):
-                                out.append(Assign(node.ea, RegExpr("DPTR"),
+                                out.append(Assign(node.ea, Reg("DPTR"),
                                                   NameExpr(parent_nm)))
                                 j += 1
                                 dbg("typesimp",
@@ -122,7 +122,7 @@ def _consolidate_xram_local_loads(nodes: List[HIRNode],
                                     f" (via {pair_key} + DPH)")
                             else:
                                 out.append(Assign(node.ea,
-                                                  RegGroupExpr(tuple(regs)),
+                                                  RegGroup(tuple(regs)),
                                                   NameExpr(parent_nm)))
                                 dbg("typesimp",
                                     f"  [{hex(node.ea)}] xram-pair-consolidate: {pair_key} = {parent_nm}")

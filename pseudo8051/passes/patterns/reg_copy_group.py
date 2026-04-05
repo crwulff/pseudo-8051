@@ -8,7 +8,7 @@ together copy a complete multi-byte variable into a new set of registers.
 from typing import Dict, List, Optional
 
 from pseudo8051.ir.hir import HIRNode, Assign
-from pseudo8051.ir.expr import Reg
+from pseudo8051.ir.expr import Reg, Regs
 from pseudo8051.constants import dbg
 from pseudo8051.passes.patterns.base   import Pattern, Match, Simplify
 from pseudo8051.passes.patterns._utils import VarInfo
@@ -17,7 +17,8 @@ from pseudo8051.passes.patterns._utils import VarInfo
 def _as_reg_copy(node: HIRNode) -> Optional[tuple]:
     """Return (dst_name, src_name) if node is a simple Reg=Reg copy; else None."""
     if isinstance(node, Assign):
-        if isinstance(node.lhs, Reg) and isinstance(node.rhs, Reg):
+        if (isinstance(node.lhs, Regs) and node.lhs.is_single
+                and isinstance(node.rhs, Regs) and node.rhs.is_single):
             return (node.lhs.name, node.rhs.name)
     return None
 
