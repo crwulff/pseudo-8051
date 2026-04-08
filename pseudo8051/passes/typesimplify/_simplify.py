@@ -3,14 +3,14 @@ passes/typesimplify/_simplify.py — Boolean helpers, default transform, core si
 """
 
 import re
-from typing import Dict, List, Optional
+from typing import Dict, FrozenSet, List, Optional, Tuple
 
 from pseudo8051.ir.hir    import (HIRNode, Assign, CompoundAssign,
                                    ExprStmt, ReturnStmt, IfGoto, IfNode, WhileNode, ForNode,
                                    DoWhileNode, SwitchNode)
 from pseudo8051.passes.patterns         import _PATTERNS
 from pseudo8051.passes.patterns._utils  import (
-    VarInfo, _replace_pairs, _replace_xram_syms, _replace_single_regs,
+    TypeGroup, VarInfo, _replace_pairs, _replace_xram_syms, _replace_single_regs,
     _subst_all_expr,
     _walk_expr,
 )
@@ -57,54 +57,175 @@ def _simplify_bool_str(cond: str) -> str:
     return cond
 
 
-# ── Default node transformation ───────────────────────────────────────────────
+# ── TypeGroup working-state helpers ──────────────────────────────────────────
 
 
-def _effective_map(node: HIRNode, base_eff: Dict[str, VarInfo]) -> Dict[str, VarInfo]:
-    """Build per-node effective reg map from base_eff merged with node annotations.
+def _tg_to_varinfo(tg: TypeGroup) -> VarInfo:
+    """Convert a TypeGroup to a VarInfo for pattern compat (uses full_regs)."""
+    return VarInfo(tg.name, tg.type, tg.full_regs,
+                   xram_sym=tg.xram_sym, is_param=tg.is_param,
+                   is_retval_field=False)
 
-    Adds entries from node.ann.reg_names, node.ann.call_arg_ann, and
-    node.ann.callee_args via setdefault, so annotations never override entries
-    already present in base_eff (which has already been pruned by _kill_written).
+
+def _varinfo_to_groups(reg_map: Dict) -> List[TypeGroup]:
+    """Convert non-XRAM VarInfo entries in reg_map to TypeGroups.
+
+    active_regs is inferred from which individual-register keys in reg_map
+    point to each VarInfo (pair-name keys like 'R6R7' are ignored).
     """
+    seen: Dict[int, Tuple[VarInfo, set]] = {}
+    for k, v in reg_map.items():
+        if not isinstance(v, VarInfo) or v.xram_sym or k == "__n__":
+            continue
+        if not v.regs or k not in v.regs:
+            continue
+        vi_id = id(v)
+        if vi_id not in seen:
+            seen[vi_id] = (v, set())
+        seen[vi_id][1].add(k)
+    return [TypeGroup(vi.name, vi.type, vi.regs,
+                      active_regs=frozenset(active),
+                      is_param=vi.is_param)
+            for vi, active in seen.values()]
+
+
+def _kill_groups_written(groups: List[TypeGroup],
+                          killed_regs: FrozenSet[str],
+                          written: FrozenSet[str]) -> Tuple[List[TypeGroup], FrozenSet[str]]:
+    """Narrow active_regs of each group for written registers; discard empty groups.
+
+    Returns updated (groups, killed_regs).  XRAM-backed groups are never touched.
+    """
+    if not written:
+        return groups, killed_regs
+    result: List[TypeGroup] = []
+    new_killed = set(killed_regs)
+    for g in groups:
+        if g.xram_sym:
+            result.append(g)
+            continue
+        ng: Optional[TypeGroup] = g
+        for r in written:
+            if ng is not None and r in ng.active_regs:
+                ng = ng.killed(r)
+                new_killed.add(r)
+        if ng is not None:
+            result.append(ng)
+    return result, frozenset(new_killed)
+
+
+def _absorb_eff_mutations(eff: Dict, pre_eff: Dict,
+                           extra_groups: List[TypeGroup],
+                           killed_regs: FrozenSet[str]
+                           ) -> Tuple[List[TypeGroup], FrozenSet[str]]:
+    """Detect new/changed VarInfo entries in eff after a pattern ran.
+
+    Converts each mutation to a TypeGroup and merges into extra_groups via
+    eviction of overlapping active_regs.  Newly installed registers are removed
+    from killed_regs so they can appear in subsequent reg_groups lookups.
+    """
+    result = list(extra_groups)
+    new_killed = set(killed_regs)
+    seen_vi_ids: set = set()
+    for k, v in eff.items():
+        if not isinstance(v, VarInfo) or v.xram_sym or k == "__n__":
+            continue
+        if not v.regs or k not in v.regs:
+            continue
+        if pre_eff.get(k) is v:
+            continue   # unchanged
+        if id(v) in seen_vi_ids:
+            continue
+        seen_vi_ids.add(id(v))
+        active = frozenset(r for r in v.regs if eff.get(r) is v)
+        if not active:
+            continue
+        tg = TypeGroup(v.name, v.type, v.regs, active_regs=active,
+                       xram_sym=v.xram_sym, is_param=v.is_param)
+        result = [g for g in result if not (g.active_regs & tg.active_regs)]
+        result.append(tg)
+        new_killed -= active
+    return result, frozenset(new_killed)
+
+
+def _build_node_eff(node: HIRNode,
+                    extra_groups: List[TypeGroup],
+                    killed_regs: FrozenSet[str],
+                    xram_map: Dict,
+                    counter) -> Dict:
+    """Build per-node effective map from extra_groups + annotation + xram_map.
+
+    Priority (highest → lowest):
+      1. xram_map / counter  — always present, never killed
+      2. extra_groups        — pattern-accumulated, kill-tracked (force-install)
+      3. call_arg_ann written regs — evict stale + force-install
+      4. reg_groups (annotation snapshot) — setdefault, skip killed_regs
+      5. call_arg_ann non-written regs — setdefault
+      6. callee_args         — setdefault (lowest)
+    Stale is_retval_field entries for written regs are evicted at the end.
+    """
+    eff: Dict = dict(xram_map)
+    if counter is not None:
+        eff["__n__"] = counter
+
+    # extra_groups — force (pattern-created state is authoritative)
+    seen_tg_ids: set = set()
+    for tg in extra_groups:
+        if tg.xram_sym or id(tg) in seen_tg_ids:
+            continue
+        seen_tg_ids.add(id(tg))
+        vi = _tg_to_varinfo(tg)
+        for r in tg.active_regs:
+            eff[r] = vi
+        if len(tg.full_regs) > 1 and tg.is_complete:
+            eff[tg.pair_name] = vi
+
     ann = node.ann
     if ann is None:
-        return base_eff
+        return eff
 
-    eff = dict(base_eff)
-    for r, vi in ann.reg_names.items():
-        if not vi.is_retval:
-            eff.setdefault(r, vi)
-
-    # call_arg_ann is back-propagated from the NEXT use of each register.
-    # For registers being WRITTEN by this node, call_arg names the destination —
-    # it takes precedence over stale pre-write reg_names entries so that patterns
-    # (e.g. ConstGroupPattern) use the correct name for the write target.
     written = node.written_regs
-    for r, vi in ann.call_arg_names.items():
-        if r in written:
-            # Evict stale VarInfo entries (for all of old_vi's regs)
-            # so they don't appear as competing ConstGroupPattern candidates.
-            old_vi = eff.get(r)
-            if old_vi is not None and old_vi is not vi and getattr(old_vi, 'regs', None):
-                for old_r in old_vi.regs:
-                    if eff.get(old_r) is old_vi:
-                        del eff[old_r]
-            # Install the call_arg VarInfo for all its regs.
-            for new_r in vi.regs:
-                eff[new_r] = vi
+
+    # reg_groups (annotation snapshot) — setdefault, honouring killed_regs
+    for tg in ann.reg_groups:
+        vi = _tg_to_varinfo(tg)
+        for r in tg.active_regs:
+            if r not in killed_regs:
+                eff.setdefault(r, vi)
+        if (len(tg.full_regs) > 1 and tg.is_complete
+                and not any(r in killed_regs for r in tg.full_regs)):
+            eff.setdefault(tg.pair_name, vi)
+
+    # call_arg_ann — written regs: evict stale entries then force-install;
+    #                non-written regs: setdefault
+    for tg in ann.call_arg_ann:
+        vi = _tg_to_varinfo(tg)
+        written_in_tg = tg.active_regs & written
+        if written_in_tg:
+            for r in written_in_tg:
+                old_vi = eff.get(r)
+                if old_vi is not None and old_vi is not vi and getattr(old_vi, 'regs', None):
+                    for old_r in old_vi.regs:
+                        if eff.get(old_r) is old_vi:
+                            del eff[old_r]
+            for r in tg.active_regs:
+                eff[r] = vi
+            if len(tg.full_regs) > 1:
+                eff[tg.pair_name] = vi
         else:
-            eff.setdefault(r, vi)
+            for r in tg.active_regs:
+                eff.setdefault(r, vi)
 
-    _callee_dict = ann.callee_args_dict
-    if _callee_dict:
-        for r, vi in _callee_dict.items():
-            eff.setdefault(r, vi)
+    # callee_args — setdefault (lowest priority)
+    if ann.callee_args is not None:
+        for tg in ann.callee_args:
+            vi = _tg_to_varinfo(tg)
+            for r in tg.active_regs:
+                eff.setdefault(r, vi)
+            if len(tg.full_regs) > 1:
+                eff.setdefault(tg.pair_name, vi)
 
-    # Unconditionally evict stale retval struct-field entries for written registers.
-    # RegCopyGroupPattern copies field regs to new regs but leaves source entries
-    # in reg_map; without this, ConstGroupPattern would use the stale field name
-    # as the write destination for subsequent const-loads into the same registers.
+    # Evict stale is_retval_field entries for written registers.
     for r in written:
         old_vi = eff.get(r)
         if (old_vi is not None and isinstance(old_vi, VarInfo)
@@ -116,27 +237,19 @@ def _effective_map(node: HIRNode, base_eff: Dict[str, VarInfo]) -> Dict[str, Var
     return eff
 
 
-def _kill_written(reg_map: Dict[str, VarInfo],
-                  written_regs: frozenset,
-                  pre_snap: Optional[Dict[str, VarInfo]] = None) -> Dict[str, VarInfo]:
-    """Return reg_map with ALL register-backed entries whose registers overlap
-    *written_regs* removed.
-
-    If *pre_snap* is provided, only entries present in pre_snap are eligible
-    for removal — entries that were absent from pre_snap (newly added by the
-    current pattern match) are immune so they survive the node that created them.
-
-    XRAM-backed entries (vinfo.xram_sym != '') are never removed.
-    """
-    if not written_regs:
-        return reg_map
-    result = {}
-    for k, v in reg_map.items():
-        if isinstance(v, VarInfo) and v.regs and not v.xram_sym:
-            if any(r in written_regs for r in v.regs):
-                if pre_snap is None or k in pre_snap:
-                    continue   # kill this entry
-        result[k] = v
+def _rebuild_reg_map(extra_groups: List[TypeGroup], xram_map: Dict, counter) -> Dict:
+    """Build a reg_map dict from extra_groups + xram_map for passing to _simplify."""
+    result = dict(xram_map)
+    if counter is not None:
+        result["__n__"] = counter
+    for tg in extra_groups:
+        if tg.xram_sym:
+            continue
+        vi = _tg_to_varinfo(tg)
+        for r in tg.active_regs:
+            result[r] = vi
+        if len(tg.full_regs) > 1 and tg.is_complete:
+            result[tg.pair_name] = vi
     return result
 
 
@@ -305,96 +418,106 @@ def _simplify_once(nodes: List[HIRNode], reg_map: Dict[str, VarInfo],
                    simplify_fn=None) -> List[HIRNode]:
     """Apply one round of pattern matching + default transforms to each node.
 
-    Applies unified kill tracking: every register write removes all register-backed
-    entries for those registers from the working copy of reg_map so that stale
+    Uses TypeGroup-based kill tracking: every register write narrows the
+    active_regs of affected TypeGroups (removing them when empty) so stale
     mappings never reach subsequent nodes.
     """
     if simplify_fn is None:
         simplify_fn = _simplify
+
+    xram_map = {k: v for k, v in reg_map.items()
+                if isinstance(v, VarInfo) and v.xram_sym}
+    counter = reg_map.get("__n__")
+    extra_groups: List[TypeGroup] = _varinfo_to_groups(reg_map)
+    killed_regs: FrozenSet[str] = frozenset()
+
     out: List[HIRNode] = []
-    cur_map = reg_map   # updated after each node via _kill_written
     for node in nodes:
-        eff = _effective_map(node, cur_map)
+        eff = _build_node_eff(node, extra_groups, killed_regs, xram_map, counter)
+        pre_eff = dict(eff)
+        written = node.written_regs | node.definitely_killed()
         for pat in _PATTERNS:
             result = pat.match([node], 0, eff, simplify_fn)
             if result is not None:
+                # Kill old entries BEFORE absorbing pattern mutations so that
+                # newly-added TypeGroups are immune to the kill.
+                extra_groups, killed_regs = _kill_groups_written(extra_groups, killed_regs, written)
+                extra_groups, killed_regs = _absorb_eff_mutations(
+                    eff, pre_eff, extra_groups, killed_regs)
                 out.extend(result[0])
                 break
         else:
             transformed = _transform_default(node, eff, simplify_fn)
             if transformed is not None:
                 out.append(transformed)
-        written = node.written_regs | node.definitely_killed()
-        cur_map = _kill_written(cur_map, written)
+            extra_groups, killed_regs = _kill_groups_written(extra_groups, killed_regs, written)
     return out
 
 
 def _simplify(nodes: List[HIRNode], reg_map: Dict[str, VarInfo]) -> List[HIRNode]:
-    """
-    Walk nodes, trying each registered Pattern in turn.  Falls back to
-    _transform_default for nodes not consumed by any pattern.
+    """Walk nodes, trying each registered Pattern in turn.
 
-    Unified kill tracking: every register write removes ALL register-backed
-    VarInfo entries for those registers from reg_map.  Entries newly added by
-    a pattern match are immune for the creating node via pre-snapshot comparison.
-    Structured-node definite kills are applied after each such node.
+    Falls back to _transform_default for nodes not consumed by any pattern.
+    Uses TypeGroup-based working state: extra_groups tracks pattern-created
+    TypeGroups with kill-tracking via active_regs narrowing.  killed_regs
+    prevents stale annotation reg_groups from re-appearing after a kill.
+    At exit, reg_map is updated in-place with the final extra_groups state
+    so downstream passes (e.g. _simplify_once in _pass.py) see retval names.
     """
+    xram_map = {k: v for k, v in reg_map.items()
+                if isinstance(v, VarInfo) and v.xram_sym}
+    counter = reg_map.get("__n__")
+    extra_groups: List[TypeGroup] = _varinfo_to_groups(reg_map)
+    killed_regs: FrozenSet[str] = frozenset()
+
     out: List[HIRNode] = []
     i = 0
 
-    def _sub_simplify(ns: List[HIRNode], rm: Dict[str, VarInfo]) -> List[HIRNode]:
-        """Recursive simplify; receives the already-killed reg_map."""
+    def _sub_simplify(ns: List[HIRNode], rm: Dict) -> List[HIRNode]:
         return _simplify(ns, rm)
 
     while i < len(nodes):
-        eff = _effective_map(nodes[i], reg_map)
-        # Snapshot eff BEFORE the pattern runs so we can distinguish annotation-derived
-        # entries (added by _effective_map from reg_groups/call_arg_ann/callee_args) from
-        # entries mutated by the pattern itself.  Annotation-derived entries that the
-        # pattern doesn't touch should be killable, not immune like true pattern mutations.
-        pre_pattern_eff = dict(eff)
+        eff = _build_node_eff(nodes[i], extra_groups, killed_regs, xram_map, counter)
+        pre_eff = dict(eff)
 
         for pat in _PATTERNS:
             result = pat.match(nodes, i, eff, _sub_simplify)
             if result is not None:
                 replacement, new_i = result
-                # Snapshot reg_map BEFORE propagating pattern mutations so that
-                # _kill_written can distinguish pre-existing entries (eligible for
-                # killing) from entries newly added by the pattern (immune).
-                pre_snap = dict(reg_map)
-                # Propagate new/changed keys from eff back to reg_map.
-                if eff is not reg_map:
-                    for k, v in eff.items():
-                        if reg_map.get(k) is not v:
-                            reg_map[k] = v
-                # Remove from pre_snap any keys whose values were changed by the
-                # pattern — changed entries are treated as newly-added and immune.
-                for k in list(pre_snap.keys()):
-                    if reg_map.get(k) is not pre_snap[k]:
-                        del pre_snap[k]
-                # Annotation-derived entries were in eff (from _effective_map) but not
-                # in reg_map, so they're absent from pre_snap and would be treated as
-                # immune.  If the pattern didn't mutate them (value unchanged from
-                # pre_pattern_eff), mark them as eligible for killing by adding them to
-                # pre_snap — they're stale annotation data, not new pattern outputs.
-                for k, v_before in pre_pattern_eff.items():
-                    if k not in pre_snap and eff.get(k) is v_before:
-                        pre_snap[k] = reg_map.get(k)
-                # Kill pre-existing entries for all registers written by consumed nodes.
-                written: frozenset = frozenset()
+                # Kill old entries BEFORE absorbing pattern mutations so that
+                # newly-added TypeGroups (e.g. retval1) are immune to the kill.
+                written: FrozenSet[str] = frozenset()
                 for j in range(i, new_i):
                     written |= nodes[j].written_regs | nodes[j].definitely_killed()
-                reg_map = _kill_written(reg_map, written, pre_snap)
+                extra_groups, killed_regs = _kill_groups_written(
+                    extra_groups, killed_regs, written)
+                extra_groups, killed_regs = _absorb_eff_mutations(
+                    eff, pre_eff, extra_groups, killed_regs)
+                new_reg_map = _rebuild_reg_map(extra_groups, xram_map, counter)
                 i = new_i
-                out.extend(_simplify_once(replacement, reg_map, _sub_simplify))
+                out.extend(_simplify_once(replacement, new_reg_map, _sub_simplify))
                 break
         else:
-            # Transform BEFORE killing so the node's own RHS sees current mapping.
             transformed = _transform_default(nodes[i], eff, _sub_simplify)
             if transformed is not None:
                 out.append(transformed)
-            # Kill AFTER transform — includes structured-node definite kills.
             written = nodes[i].written_regs | nodes[i].definitely_killed()
-            reg_map = _kill_written(reg_map, written)
+            extra_groups, killed_regs = _kill_groups_written(
+                extra_groups, killed_regs, written)
             i += 1
+
+    # Update reg_map in-place with final extra_groups state so that downstream
+    # passes (_simplify_once, _fold_call_arg_pairs, etc.) see retval/param names.
+    for k in [k for k, v in reg_map.items()
+              if isinstance(v, VarInfo) and not v.xram_sym]:
+        del reg_map[k]
+    for tg in extra_groups:
+        if tg.xram_sym:
+            continue
+        vi = _tg_to_varinfo(tg)
+        for r in tg.active_regs:
+            reg_map[r] = vi
+        if len(tg.full_regs) > 1 and tg.is_complete:
+            reg_map[tg.pair_name] = vi
+
     return out
