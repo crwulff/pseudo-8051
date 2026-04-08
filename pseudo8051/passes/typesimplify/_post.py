@@ -19,7 +19,6 @@ from pseudo8051.passes.typesimplify._xram_loads import (     # noqa: F401
 from pseudo8051.passes.typesimplify._setup_fold import (     # noqa: F401
     _is_call_setup_assign,
     _collect_hir_name_refs,
-    _expand_pair_refs,
     _fold_and_prune_setups,
     _fold_call_arg_pairs,
 )

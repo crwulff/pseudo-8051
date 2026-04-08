@@ -441,8 +441,9 @@ class AccumFoldPattern(Pattern):
                     return (skipped + replacement_nodes, new_j)
 
             dbg("typesimp", f"  [{hex(a_start_node.ea)}] accum_fold (Assign relay): folded {a_expr_subst.render()} into {terminal.lhs.render()}")
+            from pseudo8051.ir.hir import NodeAnnotation as _NA
             new_node = Assign(a_start_node.ea, terminal.lhs, a_expr_subst)
-            new_node.ann = terminal.ann   # preserve call_arg_ann for downstream pair folding
+            new_node.ann = _NA.merge(a_start_node, terminal)
             return (skipped + [new_node], j + 1)
 
         # ReturnStmt(Reg("A")): only if compound > 0 or DPTR consumed

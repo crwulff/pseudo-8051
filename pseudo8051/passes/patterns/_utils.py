@@ -10,7 +10,7 @@ Phase 6 adds Expr-tree walking functions alongside the legacy text functions.
 
 import re
 import sys
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, FrozenSet, List, Optional, Tuple
 
 from pseudo8051.ir.hir import (HIRNode, Assign, TypedAssign, CompoundAssign,  # noqa: F401
                                ExprStmt, ReturnStmt, IfGoto)
@@ -39,6 +39,79 @@ def _is_signed(t: str) -> bool:
     return t in ("int8_t", "int16_t", "int32_t")
 
 
+# ── TypeGroup ────────────────────────────────────────────────────────────────
+
+class TypeGroup:
+    """A named, typed register group with ordered bytes and a live active subset.
+
+    ``full_regs`` is the canonical ordered tuple of all registers belonging to
+    this variable (high-byte first, e.g. ``('R6', 'R7')`` for int16_t).
+    ``active_regs`` is the subset of ``full_regs`` that have not yet been
+    killed (overwritten) at the current program point.
+
+    TypeGroup is immutable: mutation returns a new instance.
+    When ``active_regs`` becomes empty the group should be discarded.
+    """
+
+    __slots__ = ('name', 'type', 'full_regs', 'active_regs',
+                 'xram_sym', 'is_param', 'xram_addr')
+
+    def __init__(self, name: str, type_str: str,
+                 full_regs: Tuple[str, ...],
+                 active_regs: Optional[FrozenSet[str]] = None,
+                 xram_sym: str = "",
+                 is_param: bool = False,
+                 xram_addr: int = 0):
+        self.name        = name
+        self.type        = type_str
+        self.full_regs   = full_regs
+        self.active_regs = (active_regs if active_regs is not None
+                            else frozenset(full_regs))
+        self.xram_sym    = xram_sym
+        self.is_param    = is_param
+        self.xram_addr   = xram_addr
+
+    # ── Derived properties ────────────────────────────────────────────────────
+
+    @property
+    def pair_name(self) -> str:
+        """Concatenated full register key, e.g. 'R6R7'."""
+        return "".join(self.full_regs)
+
+    @property
+    def is_complete(self) -> bool:
+        """True when all registers are still live (active_regs == full_regs)."""
+        return self.active_regs == frozenset(self.full_regs)
+
+    def byte_of(self, reg: str) -> int:
+        """Byte index from MSB (0 = full_regs[0] = most-significant byte)."""
+        return self.full_regs.index(reg)
+
+    def covers(self, regs) -> bool:
+        """True when every register in *regs* is in active_regs."""
+        return all(r in self.active_regs for r in regs)
+
+    # ── Mutation helpers (return new instances) ───────────────────────────────
+
+    def killed(self, reg: str) -> Optional['TypeGroup']:
+        """Return a new TypeGroup with *reg* removed from active_regs.
+
+        Returns ``None`` when active_regs would become empty (group is dead).
+        """
+        new_active = self.active_regs - {reg}
+        if not new_active:
+            return None
+        return TypeGroup(self.name, self.type, self.full_regs,
+                         active_regs=new_active,
+                         xram_sym=self.xram_sym,
+                         is_param=self.is_param,
+                         xram_addr=self.xram_addr)
+
+    def __repr__(self) -> str:
+        return (f"TypeGroup({self.name!r}, {self.type!r}, "
+                f"full={self.full_regs!r}, active={tuple(self.active_regs)!r})")
+
+
 # ── VarInfo ───────────────────────────────────────────────────────────────────
 
 class VarInfo:
@@ -46,15 +119,18 @@ class VarInfo:
 
     def __init__(self, name: str, type_str: str, regs: Tuple[str, ...],
                  xram_sym: str = "", is_byte_field: bool = False,
-                 xram_addr: int = 0, is_param: bool = False):
-        self.name         = name
-        self.type         = type_str
-        self.regs         = regs           # high → low order, e.g. ('R6', 'R7'); () for XRAM locals
-        self.pair_name    = "".join(regs)  # e.g. 'R6R7'; '' for XRAM locals
-        self.xram_sym     = xram_sym       # XRAM base address symbol, e.g. 'EXT_DC8A'; '' for reg vars
-        self.is_byte_field = is_byte_field # True for per-byte entries of multi-byte XRAM locals
-        self.xram_addr    = xram_addr      # raw integer XRAM address (0 for register vars)
-        self.is_param     = is_param       # True only for params from the current function's proto
+                 xram_addr: int = 0, is_param: bool = False,
+                 is_retval: bool = False, is_retval_field: bool = False):
+        self.name          = name
+        self.type          = type_str
+        self.regs          = regs              # high → low order, e.g. ('R6', 'R7'); () for XRAM locals
+        self.pair_name     = "".join(regs)     # e.g. 'R6R7'; '' for XRAM locals
+        self.xram_sym      = xram_sym          # XRAM base address symbol, e.g. 'EXT_DC8A'; '' for reg vars
+        self.is_byte_field = is_byte_field     # True for per-byte entries of multi-byte XRAM locals
+        self.xram_addr     = xram_addr         # raw integer XRAM address (0 for register vars)
+        self.is_param      = is_param          # True only for params from the current function's proto
+        self.is_retval     = is_retval         # True for retval VarInfos seeded by annotation pass
+        self.is_retval_field = is_retval_field # True for struct retval field VarInfos (_split_struct_regs)
 
     @property
     def hi(self) -> Optional[str]:
@@ -109,16 +185,27 @@ def _replace_xram_syms(text: str, reg_map: Dict[str, "VarInfo"]) -> str:
 
 def _replace_pairs(text: str, reg_map: Dict[str, VarInfo]) -> str:
     """Replace register-pair tokens (e.g. R6R7) with the variable name.
-    Also replaces single-register consolidated XRAM local tokens (len==2, regs=(r,))."""
-    for key in sorted(
-            (k for k in reg_map
-             if isinstance(reg_map[k], VarInfo)
-             and not reg_map[k].xram_sym
-             and (len(k) > 2 or
-                  (len(k) == 2 and len(reg_map[k].regs) == 1
-                   and not reg_map[k].is_param))),
-            key=len, reverse=True):
-        text = re.sub(r"\b" + re.escape(key) + r"\b", reg_map[key].name, text)
+
+    Derives the text token from VarInfo.regs (concatenated) so no pair key
+    needs to exist in reg_map.  Also handles single-register consolidated
+    XRAM local tokens (len==2 key, regs=(r,)) via the legacy key path.
+    """
+    # Collect substitutions: (token_str, var_name) — deduped by VarInfo identity.
+    seen_vi_ids: set = set()
+    subs: list = []
+    for key, vinfo in reg_map.items():
+        if not isinstance(vinfo, VarInfo) or vinfo.xram_sym:
+            continue
+        if id(vinfo) not in seen_vi_ids and len(vinfo.regs) > 1:
+            seen_vi_ids.add(id(vinfo))
+            subs.append(("".join(vinfo.regs), vinfo.name))
+        # Legacy: single-reg consolidated token stored under a len-2 key
+        if (len(key) == 2 and len(vinfo.regs) == 1 and not vinfo.is_param
+                and (key, vinfo.name) not in subs):
+            subs.append((key, vinfo.name))
+    # Longest token first to avoid partial matches
+    for token, name in sorted(subs, key=lambda x: len(x[0]), reverse=True):
+        text = re.sub(r"\b" + re.escape(token) + r"\b", name, text)
     return text
 
 
@@ -201,21 +288,29 @@ def _subst_pairs_in_expr(expr: Expr, reg_map: Dict[str, "VarInfo"]) -> Expr:
     register identity (regs/name) is preserved for conflict detection while
     render() still returns the human-readable variable name.
     """
-    # Build lookup: canonical register key → display name  (skip XRAM locals)
-    pair_map: Dict[str, str] = {}
+    # Build single-reg lookup: short key → display name (skip XRAM locals, skip params)
+    single_map: Dict[str, str] = {}
     for key, vinfo in reg_map.items():
-        if not isinstance(vinfo, VarInfo) or vinfo.xram_sym:
+        if not isinstance(vinfo, VarInfo) or vinfo.xram_sym or vinfo.is_param:
             continue
-        if len(key) > 2:
-            pair_map[key] = vinfo.name
-        elif len(key) == 2 and len(vinfo.regs) == 1 and not vinfo.is_param:
-            # Single-register consolidated XRAM local (e.g. R3 → "_src_type")
-            pair_map[key] = vinfo.name
-        elif len(key) == 1 and len(vinfo.regs) == 1 and not vinfo.is_param:
-            # Single-char register (e.g. "A" → "retval1")
-            pair_map[key] = vinfo.name
+        if len(vinfo.regs) == 1 and len(key) <= 2:
+            # Single-register consolidated entry (e.g. "R3" → "_src_type", "A" → "retval1")
+            single_map[key] = vinfo.name
 
-    if not pair_map:
+    # Build multi-reg lookup: frozenset of individual regs → display name
+    # Also: concatenated-pair-name → display name (for legacy Reg("R6R7") nodes)
+    seen_vi_ids: set = set()
+    multi_entries: list = []   # [(frozenset_of_regs, name), ...]
+    pair_name_map: Dict[str, str] = {}   # "R6R7" → "val" (legacy single-node pairs)
+    for vinfo in reg_map.values():
+        if not isinstance(vinfo, VarInfo) or vinfo.xram_sym or id(vinfo) in seen_vi_ids:
+            continue
+        if len(vinfo.regs) > 1:
+            seen_vi_ids.add(id(vinfo))
+            multi_entries.append((frozenset(vinfo.regs), vinfo.name))
+            pair_name_map["".join(vinfo.regs)] = vinfo.name
+
+    if not single_map and not multi_entries:
         return expr
 
     def _fn(e: Expr) -> Expr:
@@ -224,13 +319,21 @@ def _subst_pairs_in_expr(expr: Expr, reg_map: Dict[str, "VarInfo"]) -> Expr:
             # overwritten by a later _subst_pairs_in_expr call that sees updated
             # reg_map entries (e.g. retval VarInfo added after the arg alias).
             if not e.alias:
-                key = "".join(e.names)
-                if key in pair_map:
-                    return RegGroup(e.names, e.brace, alias=pair_map[key])
+                if e.is_single:
+                    if e.name in single_map:
+                        return RegGroup(e.names, e.brace, alias=single_map[e.name])
+                    # Legacy: Reg("R6R7") — single node whose name is a pair concat
+                    if e.name in pair_name_map:
+                        return RegGroup(e.names, e.brace, alias=pair_name_map[e.name])
+                else:
+                    reg_set = frozenset(e.names)
+                    for entry_regs, entry_name in multi_entries:
+                        if reg_set == entry_regs:
+                            return RegGroup(e.names, e.brace, alias=entry_name)
         elif isinstance(e, Name):
-            # Name("R7") / Name("R4R5R6R7") are register placeholders in call args
-            if e.name in pair_map:
-                return Reg(e.name, alias=pair_map[e.name])
+            # Name("R7") style register placeholders in call args
+            if e.name in single_map:
+                return Reg(e.name, alias=single_map[e.name])
         return e
 
     return _walk_expr(expr, _fn)
@@ -334,13 +437,20 @@ def _replace_single_regs_in_node(node: HIRNode,
 
 
 def _count_reg_uses_in_node(r: str, node: HIRNode) -> int:
-    """Count read-position occurrences of Reg/Name(r) in node."""
+    """Count read-position occurrences of Reg/Name(r) in node.
+
+    Also counts multi-component Regs nodes that contain r as one of their
+    individual register names, so that RegGroup(('R4','R5','R6','R7')) is
+    counted as a use of 'R4', 'R5', 'R6', and 'R7'.
+    """
     count = [0]
 
     def _fn(e: Expr) -> Expr:
         if e == Reg(r):
             count[0] += 1
         elif isinstance(e, Name) and e.name == r:
+            count[0] += 1
+        elif isinstance(e, Regs) and not e.is_single and r in e.names:
             count[0] += 1
         return e
 
@@ -373,6 +483,10 @@ def _subst_reg_in_node(node: HIRNode, r: str,
             return replacement
         return e
 
+    def _out(new_node: HIRNode) -> HIRNode:
+        new_node.ann = node.ann
+        return new_node
+
     if isinstance(node, Assign):
         new_rhs = _walk_expr(node.rhs, _fn)
         new_lhs = node.lhs
@@ -381,32 +495,32 @@ def _subst_reg_in_node(node: HIRNode, r: str,
         if new_rhs is node.rhs and new_lhs is node.lhs:
             return None
         if isinstance(node, TypedAssign):
-            return TypedAssign(node.ea, node.type_str, new_lhs, new_rhs)
-        return Assign(node.ea, new_lhs, new_rhs)
+            return _out(TypedAssign(node.ea, node.type_str, new_lhs, new_rhs))
+        return _out(Assign(node.ea, new_lhs, new_rhs))
 
     if isinstance(node, CompoundAssign):
         new_rhs = _walk_expr(node.rhs, _fn)
         if new_rhs is node.rhs:
             return None
-        return CompoundAssign(node.ea, node.lhs, node.op, new_rhs)
+        return _out(CompoundAssign(node.ea, node.lhs, node.op, new_rhs))
 
     if isinstance(node, ExprStmt):
         new_expr = _walk_expr(node.expr, _fn)
         if new_expr is node.expr:
             return None
-        return ExprStmt(node.ea, new_expr)
+        return _out(ExprStmt(node.ea, new_expr))
 
     if isinstance(node, ReturnStmt) and node.value is not None:
         new_val = _walk_expr(node.value, _fn)
         if new_val is node.value:
             return None
-        return ReturnStmt(node.ea, new_val)
+        return _out(ReturnStmt(node.ea, new_val))
 
     if isinstance(node, IfGoto):
         new_cond = _walk_expr(node.cond, _fn)
         if new_cond is node.cond:
             return None
-        return IfGoto(node.ea, new_cond, node.label)
+        return _out(IfGoto(node.ea, new_cond, node.label))
 
     return None
 
@@ -431,25 +545,27 @@ def _fold_into_node(node: HIRNode, name_expr: Expr,
             return replacement
         return e
 
+    def _finalize(new_node: HIRNode) -> HIRNode:
+        result = _replace_pairs_in_node(new_node, reg_map)
+        result.ann = node.ann
+        return result
+
     if isinstance(node, Assign):
         new_rhs = _walk_expr(node.rhs, _subst_fn)
         if new_rhs is node.rhs:
             return None  # not found in rhs
-        new_node = Assign(node.ea, node.lhs, new_rhs)
-        return _replace_pairs_in_node(new_node, reg_map)
+        return _finalize(Assign(node.ea, node.lhs, new_rhs))
 
     if isinstance(node, ReturnStmt) and node.value is not None:
         new_val = _walk_expr(node.value, _subst_fn)
         if new_val is node.value:
             return None
-        new_node = ReturnStmt(node.ea, new_val)
-        return _replace_pairs_in_node(new_node, reg_map)
+        return _finalize(ReturnStmt(node.ea, new_val))
 
     if isinstance(node, ExprStmt):
         new_expr = _walk_expr(node.expr, _subst_fn)
         if new_expr is node.expr:
             return None
-        new_node = ExprStmt(node.ea, new_expr)
-        return _replace_pairs_in_node(new_node, reg_map)
+        return _finalize(ExprStmt(node.ea, new_expr))
 
     return None

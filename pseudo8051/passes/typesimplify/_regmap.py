@@ -17,9 +17,50 @@ from pseudo8051.prototypes  import FuncProto, expand_regs, get_struct
 
 # ── Struct return splitting ───────────────────────────────────────────────────
 
+def _build_type_groups(proto: FuncProto,
+                       live_in: frozenset = frozenset()) -> list:
+    """Build List[TypeGroup] from a function prototype (params + return value)."""
+    from pseudo8051.passes.patterns._utils import TypeGroup
+    reg_map = _build_reg_map(proto, live_in)
+    seen: dict = {}  # id(vi) -> TypeGroup
+    result = []
+    for vi in reg_map.values():
+        if not isinstance(vi, VarInfo) or vi.xram_sym:
+            continue
+        if id(vi) not in seen:
+            tg = TypeGroup(vi.name, vi.type, vi.regs,
+                           is_param=vi.is_param)
+            seen[id(vi)] = tg
+            result.append(tg)
+    return result
+
+
+def _split_struct_groups(retval_name: str, struct_type: str,
+                          return_regs: Tuple[str, ...]) -> list:
+    """Split a struct return type into per-field TypeGroups."""
+    from pseudo8051.passes.patterns._utils import TypeGroup
+    struct_def = get_struct(struct_type)
+    if struct_def is None:
+        return []
+    result = []
+    reg_idx = 0
+    for field in struct_def.fields:
+        field_bytes = _type_bytes(field.type)
+        if field_bytes <= 0 or reg_idx + field_bytes > len(return_regs):
+            break
+        field_regs = return_regs[reg_idx:reg_idx + field_bytes]
+        field_name = f"{retval_name}.{field.name}"
+        tg = TypeGroup(field_name, field.type, tuple(field_regs))
+        result.append(tg)
+        dbg("typesimp", f"  struct-split TypeGroup: {field_name} ({field.type}) = {field_regs}")
+        reg_idx += field_bytes
+    return result
+
+
 def _split_struct_regs(retval_name: str, struct_type: str,
                         return_regs: Tuple[str, ...],
-                        reg_map: Dict[str, VarInfo]) -> None:
+                        reg_map: Dict[str, VarInfo],
+                        is_retval: bool = False) -> None:
     """Split a struct return type into per-field VarInfo entries in reg_map.
 
     For each field of the struct, creates a VarInfo with name
@@ -36,9 +77,8 @@ def _split_struct_regs(retval_name: str, struct_type: str,
             break
         field_regs = return_regs[reg_idx:reg_idx + field_bytes]
         field_name = f"{retval_name}.{field.name}"
-        pair = "".join(field_regs)
-        vinfo = VarInfo(field_name, field.type, field_regs)
-        reg_map[pair] = vinfo
+        vinfo = VarInfo(field_name, field.type, field_regs, is_retval=is_retval,
+                        is_retval_field=True)
         for r in field_regs:
             reg_map[r] = vinfo
         dbg("typesimp", f"  struct-split: {field_name} ({field.type}) = {field_regs}")
@@ -130,17 +170,10 @@ def _build_reg_map(proto: FuncProto,
         info = VarInfo(p.name, p.type, regs, is_param=True)
         for r in regs:
             reg_map[r] = info
-        if len(regs) > 1:
-            reg_map[info.pair_name] = info
 
     if proto.return_regs:
         ret_regs = expand_regs(tuple(proto.return_regs), proto.return_type)
-        ret_info = next((reg_map[r] for r in ret_regs if r in reg_map), None)
-        if ret_info is None:
-            ret_info = VarInfo("retval", proto.return_type, ret_regs)
-        pair = "".join(ret_regs)
-        if pair not in reg_map:
-            reg_map[pair] = ret_info
+        ret_info = VarInfo("retval", proto.return_type, ret_regs)
         for r in ret_regs:
             if r not in reg_map:
                 reg_map[r] = ret_info

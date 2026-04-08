@@ -1,5 +1,6 @@
 """passes/chunk_inline.py — ChunkInliner pass."""
 
+import copy
 from typing import List, Optional
 
 from pseudo8051.passes import OptimizationPass
@@ -49,7 +50,7 @@ class ChunkInliner(OptimizationPass):
                 for cb in sorted(chunk_blocks, key=lambda b: b.start_ea):
                     for node in cb.hir:
                         if not isinstance(node, (Label, ReturnStmt)):
-                            inline_hir.append(node)
+                            inline_hir.append(copy.deepcopy(node))
 
                 # Find insertion point: first HIR node whose EA is strictly
                 # greater than the call instruction's EA.  Since the chunk call

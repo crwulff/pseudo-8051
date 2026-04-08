@@ -13,7 +13,7 @@ import idc
 
 from pseudo8051.ir.instruction import Instruction
 from pseudo8051.ir.hir         import HIRNode, Label, ReturnStmt, ExprStmt
-from pseudo8051.ir.expr        import Name, Call
+from pseudo8051.ir.expr        import Name, Call, RegGroup
 from pseudo8051.ir.cpstate     import CPState, propagate_insn
 
 
@@ -204,7 +204,8 @@ class BasicBlock:
             from pseudo8051.constants  import dbg
             if proto:
                 regs_list = _prs(proto)
-                args = [Name("".join(r)) if r else Name("?") for r in regs_list]
+                args = [(RegGroup(r) if len(r) > 1 else Name(r[0])) if r else Name("?")
+                        for r in regs_list]
                 call_node = Call(target_name, args)
                 dbg("func", f"  fall-through tail call → {target_name}")
                 if proto.return_type != "void":

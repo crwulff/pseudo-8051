@@ -61,14 +61,6 @@ class StructDef:
     fields: List[StructField]
 
 
-def return_expr(proto: "FuncProto") -> str:
-    """
-    C expression for the return value — concatenation of return_regs names:
-    ('R6','R7') → 'R6R7',  ('C',) → 'C'.
-    """
-    return "".join(proto.return_regs)
-
-
 # ── Standard 8051 calling-convention register allocation ─────────────────────
 
 _PROTO_REG_POOL = ["R0", "R1", "R2", "R3", "R4", "R5", "R6", "R7"]

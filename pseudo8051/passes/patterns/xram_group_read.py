@@ -107,25 +107,29 @@ class XRAMGroupReadPattern(Pattern):
             ptr_expr = f"*({vinfo.type}*){base_addr}"
             dbg("typesimp", f"  xram-group-read: {vinfo.name} = {ptr_expr}")
             # Re-assert vinfo in reg_map so subsequent aliasing uses vinfo.name.
-            pair = "".join(vinfo.regs)
-            reg_map[pair] = vinfo
             for r in vinfo.regs:
                 reg_map[r] = vinfo
 
+            from pseudo8051.ir.hir import NodeAnnotation
+
             next_node = nodes[end_i] if end_i < len(nodes) else None
             if next_node is not None:
-                pair_name_expr = Name(vinfo.pair_name)
-                var_name_expr  = Name(vinfo.name)
-                ptr_name_expr  = Name(ptr_expr)
+                regs_expr     = RegGroup(vinfo.regs) if len(vinfo.regs) > 1 else Name(vinfo.regs[0])
+                var_name_expr = Name(vinfo.name)
+                ptr_name_expr = Name(ptr_expr)
 
-                folded_node = _fold_into_node(next_node, pair_name_expr, ptr_name_expr, reg_map)
-                if folded_node is None and vinfo.name != vinfo.pair_name:
+                folded_node = _fold_into_node(next_node, regs_expr, ptr_name_expr, reg_map)
+                if folded_node is None and vinfo.name:
                     folded_node = _fold_into_node(next_node, var_name_expr, ptr_name_expr, reg_map)
 
                 if folded_node is not None:
+                    folded_node.ann = NodeAnnotation.merge(nodes[i], next_node)
                     return ([folded_node], end_i + 1)
 
-            return ([TypedAssign(nodes[i].ea, vinfo.type,
-                                RegGroup(vinfo.regs, alias=vinfo.name), Name(ptr_expr))], end_i)
+            last = nodes[end_i - 1] if end_i > i else nodes[i]
+            out = TypedAssign(nodes[i].ea, vinfo.type,
+                              RegGroup(vinfo.regs, alias=vinfo.name), Name(ptr_expr))
+            out.ann = NodeAnnotation.merge(nodes[i], last)
+            return ([out], end_i)
 
         return None

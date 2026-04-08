@@ -60,8 +60,6 @@ class RegCopyGroupPattern(Pattern):
             dsts.append(dk)
 
         new_info = VarInfo(vinfo.name, vinfo.type, tuple(dsts))
-        pair_key = "".join(dsts)
-        reg_map[pair_key] = new_info
         for d in dsts:
             reg_map[d] = new_info
 

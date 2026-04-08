@@ -46,6 +46,9 @@ class AccumRelayPattern(Pattern):
                 new_rhs = _subst_all_expr(n0.rhs, reg_map)
                 new_lhs = n1.lhs
                 dbg("typesimp", f"  [{hex(n0.ea)}] accum_relay (expr): {n0.lhs.render()} = {n0.rhs.render()} + {n1.lhs.render()} = {n1.rhs.render()}")
-                return ([Assign(n0.ea, new_lhs, new_rhs)], i + 2)
+                from pseudo8051.ir.hir import NodeAnnotation as _NA
+                new_node = Assign(n0.ea, new_lhs, new_rhs)
+                new_node.ann = _NA.merge(n0, n1)
+                return ([new_node], i + 2)
 
         return None

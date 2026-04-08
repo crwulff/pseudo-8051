@@ -11,7 +11,7 @@ from typing import Dict, List, Optional
 
 from pseudo8051.ir.hir import (HIRNode, Assign, CompoundAssign, ExprStmt,
                                 ReturnStmt, IfGoto, IfNode, WhileNode, ForNode,
-                                DoWhileNode, SwitchNode)
+                                DoWhileNode, SwitchNode, TypedAssign)
 from pseudo8051.ir.expr import (Expr, Const, Call, BinOp, Paren,
                                  Reg as RegExpr, Regs as RegsExpr,
                                  RegGroup as RegGroupExpr, Name as NameExpr)
@@ -37,20 +37,6 @@ def _collect_hir_name_refs(nodes: List[HIRNode]) -> frozenset:
     for n in nodes:
         result |= n.name_refs()
     return frozenset(result)
-
-
-def _expand_pair_refs(refs, reg_map: Dict[str, VarInfo]) -> frozenset:
-    """
-    Expand pair register names (e.g. 'R2R3') to their individual components
-    ('R2', 'R3') using the reg_map, so that a setup-assign for R3 that feeds
-    R2R3 is not incorrectly pruned.
-    """
-    extra: set = set()
-    for name in refs:
-        vinfo = reg_map.get(name)
-        if isinstance(vinfo, VarInfo) and len(vinfo.regs) > 1:
-            extra.update(vinfo.regs)
-    return frozenset(refs) | frozenset(extra) if extra else frozenset(refs)
 
 
 # ── Setup-fold helpers ────────────────────────────────────────────────────────
@@ -112,8 +98,7 @@ def _fold_and_prune_setups(nodes: List[HIRNode],
     """
     result: List[HIRNode] = []
     for k, node in enumerate(nodes):
-        succ_refs = _expand_pair_refs(
-            frozenset(_collect_hir_name_refs(nodes[k + 1:])) | _outer_refs, reg_map)
+        succ_refs = frozenset(_collect_hir_name_refs(nodes[k + 1:])) | _outer_refs
         result.append(node.map_bodies(
             lambda ns: _fold_and_prune_setups(ns, reg_map, succ_refs)))
 
@@ -145,8 +130,7 @@ def _fold_and_prune_setups(nodes: List[HIRNode],
     for i, node in enumerate(work):
         if _is_call_setup_assign(node):
             lhs_regs = node.written_regs
-            all_downstream = _expand_pair_refs(
-                _collect_hir_name_refs(work[i + 1:]) | _outer_refs, reg_map)
+            all_downstream = _collect_hir_name_refs(work[i + 1:]) | _outer_refs
             if lhs_regs.isdisjoint(all_downstream):
                 dbg("typesimp",
                     f"  [{hex(node.ea)}] prune-setup: {node.lhs.render()} = {node.rhs.render()}")
@@ -215,7 +199,7 @@ def _fold_call_arg_pairs(nodes: List[HIRNode],
         ann = getattr(node, "ann", None)
         if ann is None:
             continue
-        for r, v in ann.call_arg_ann.items():
+        for r, v in ann.call_arg_names.items():
             if isinstance(v, VarInfo) and len(v.regs) > 1 and r in v.regs:
                 key = tuple(v.regs)
                 if key not in pair_groups:
@@ -290,7 +274,25 @@ def _fold_call_arg_pairs(nodes: List[HIRNode],
             term: Expr = Paren(BinOp(lo, "<<", Const(shift))) if shift > 0 else lo
             combined = BinOp(combined, "|", term)
 
-        out.append(Assign(node.ea, RegGroupExpr(regs_key), combined))
+        # Prefer naming from consumed nodes' call_arg_ann over global pair_groups,
+        # since pair_groups uses setdefault and a different callee's annotation may
+        # have won for the same register tuple.
+        naming_vinfo = vinfo
+        for r_check, (idx_check, _) in byte_assigns.items():
+            nd_check = nodes[idx_check]
+            ann_check = getattr(nd_check, "ann", None)
+            if ann_check is not None:
+                ca_vi = ann_check.call_arg_names.get(r_check)
+                if (ca_vi is not None and isinstance(ca_vi, VarInfo)
+                        and tuple(ca_vi.regs) == regs_key):
+                    naming_vinfo = ca_vi
+                    break
+
+        if naming_vinfo.type and naming_vinfo.name:
+            out.append(TypedAssign(node.ea, naming_vinfo.type,
+                                   RegGroupExpr(regs_key, alias=naming_vinfo.name), combined))
+        else:
+            out.append(Assign(node.ea, RegGroupExpr(regs_key), combined))
         dbg("typesimp",
             f"  [{hex(node.ea)}] fold-call-arg-pair: {''.join(regs_key)} = {combined.render()}")
 

@@ -105,27 +105,48 @@ def _consolidate_xram_local_loads(nodes: List[HIRNode],
                             regs.append(next_ba[0])
                             j += 1
                         if len(regs) == n_bytes:
-                            pair_key = "".join(regs)
+                            from pseudo8051.ir.hir import NodeAnnotation as _NA
                             new_vinfo = VarInfo(parent_nm, parent_vinfo.type, tuple(regs))
-                            reg_map[pair_key] = new_vinfo
                             for r in regs:
                                 reg_map[r] = new_vinfo
+                            last_byte_node = nodes[j - 1]
+                            merged_ann = _NA.merge(node, last_byte_node)
+                            # Check if call_arg_ann provides a register alias (e.g. 'dividend').
+                            # active_regs is narrowed per-write-node (e.g. {R7} for the last
+                            # byte), so we check full_regs (the full callee param definition)
+                            # instead.  Also aggregate from all consumed nodes, not just last.
+                            lhs_alias = None
+                            regs_fs = frozenset(regs)
+                            candidate_groups = list(merged_ann.call_arg_ann) if merged_ann else []
+                            for idx in range(i, j - 1):
+                                n = nodes[idx]
+                                if n.ann and n.ann.call_arg_ann:
+                                    candidate_groups.extend(n.ann.call_arg_ann)
+                            for g in candidate_groups:
+                                if (g.name and not g.xram_sym and g.full_regs
+                                        and frozenset(g.full_regs) >= regs_fs):
+                                    lhs_alias = g.name
+                                    break
                             # If lo byte landed in DPL and next node is DPH = Rhi,
                             # collapse to DPTR = var instead of RegGroup = var.
                             if (regs[-1] == "DPL" and j < len(nodes)
                                     and _as_dph_assign(nodes[j]) == regs[0]):
-                                out.append(Assign(node.ea, Reg("DPTR"),
-                                                  NameExpr(parent_nm)))
+                                new_node = Assign(node.ea, Reg("DPTR"),
+                                                  NameExpr(parent_nm))
+                                new_node.ann = merged_ann
+                                out.append(new_node)
                                 j += 1
                                 dbg("typesimp",
                                     f"  [{hex(node.ea)}] xram-pair-consolidate: DPTR = {parent_nm}"
-                                    f" (via {pair_key} + DPH)")
+                                    f" (via {regs[0]} + DPH)")
                             else:
-                                out.append(Assign(node.ea,
-                                                  RegGroup(tuple(regs)),
-                                                  NameExpr(parent_nm)))
+                                lhs_expr = RegGroup(tuple(regs), alias=lhs_alias)
+                                new_node = Assign(node.ea, lhs_expr, NameExpr(parent_nm))
+                                new_node.ann = merged_ann
+                                out.append(new_node)
+                                label = lhs_alias or "".join(regs)
                                 dbg("typesimp",
-                                    f"  [{hex(node.ea)}] xram-pair-consolidate: {pair_key} = {parent_nm}")
+                                    f"  [{hex(node.ea)}] xram-pair-consolidate: {label} = {parent_nm}")
                             i = j
                             continue
             else:

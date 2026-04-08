@@ -73,12 +73,46 @@ def _effective_map(node: HIRNode, base_eff: Dict[str, VarInfo]) -> Dict[str, Var
 
     eff = dict(base_eff)
     for r, vi in ann.reg_names.items():
-        eff.setdefault(r, vi)
-    for r, vi in ann.call_arg_ann.items():
-        eff.setdefault(r, vi)
-    if ann.callee_args:
-        for r, vi in ann.callee_args.items():
+        if not vi.is_retval:
             eff.setdefault(r, vi)
+
+    # call_arg_ann is back-propagated from the NEXT use of each register.
+    # For registers being WRITTEN by this node, call_arg names the destination —
+    # it takes precedence over stale pre-write reg_names entries so that patterns
+    # (e.g. ConstGroupPattern) use the correct name for the write target.
+    written = node.written_regs
+    for r, vi in ann.call_arg_names.items():
+        if r in written:
+            # Evict stale VarInfo entries (for all of old_vi's regs)
+            # so they don't appear as competing ConstGroupPattern candidates.
+            old_vi = eff.get(r)
+            if old_vi is not None and old_vi is not vi and getattr(old_vi, 'regs', None):
+                for old_r in old_vi.regs:
+                    if eff.get(old_r) is old_vi:
+                        del eff[old_r]
+            # Install the call_arg VarInfo for all its regs.
+            for new_r in vi.regs:
+                eff[new_r] = vi
+        else:
+            eff.setdefault(r, vi)
+
+    _callee_dict = ann.callee_args_dict
+    if _callee_dict:
+        for r, vi in _callee_dict.items():
+            eff.setdefault(r, vi)
+
+    # Unconditionally evict stale retval struct-field entries for written registers.
+    # RegCopyGroupPattern copies field regs to new regs but leaves source entries
+    # in reg_map; without this, ConstGroupPattern would use the stale field name
+    # as the write destination for subsequent const-loads into the same registers.
+    for r in written:
+        old_vi = eff.get(r)
+        if (old_vi is not None and isinstance(old_vi, VarInfo)
+                and old_vi.is_retval_field and old_vi.regs and not old_vi.xram_sym):
+            for old_r in old_vi.regs:
+                if eff.get(old_r) is old_vi:
+                    del eff[old_r]
+
     return eff
 
 
@@ -137,6 +171,11 @@ def _transform_default(node: HIRNode,
     if simplify_fn is None:
         simplify_fn = _simplify
 
+    def _out(new_node: HIRNode) -> HIRNode:
+        """Copy annotation from input node to any newly created output node."""
+        new_node.ann = node.ann
+        return new_node
+
     if isinstance(node, Assign):
         from pseudo8051.ir.hir import TypedAssign
         from pseudo8051.ir.expr import Reg, Regs as RegExpr, Name as NameExpr
@@ -156,33 +195,33 @@ def _transform_default(node: HIRNode,
         new_rhs = _subst_expr(node.rhs, reg_map)
         if new_lhs is not node.lhs or new_rhs is not node.rhs:
             if isinstance(node, TypedAssign):
-                return TypedAssign(node.ea, node.type_str, new_lhs, new_rhs)
-            return Assign(node.ea, new_lhs, new_rhs)
+                return _out(TypedAssign(node.ea, node.type_str, new_lhs, new_rhs))
+            return _out(Assign(node.ea, new_lhs, new_rhs))
         return node
 
     if isinstance(node, CompoundAssign):
         new_rhs = _subst_expr(node.rhs, reg_map)
         if new_rhs is not node.rhs:
-            return CompoundAssign(node.ea, node.lhs, node.op, new_rhs)
+            return _out(CompoundAssign(node.ea, node.lhs, node.op, new_rhs))
         return node
 
     if isinstance(node, ExprStmt):
         new_expr = _subst_expr(node.expr, reg_map)
         if new_expr is not node.expr:
-            return ExprStmt(node.ea, new_expr)
+            return _out(ExprStmt(node.ea, new_expr))
         return node
 
     if isinstance(node, ReturnStmt):
         if node.value is not None:
             new_val = _subst_expr(node.value, reg_map)
             if new_val is not node.value:
-                return ReturnStmt(node.ea, new_val)
+                return _out(ReturnStmt(node.ea, new_val))
         return node
 
     if isinstance(node, IfGoto):
         new_cond = _simplify_bool_expr(_subst_expr(node.cond, reg_map))
         if new_cond is not node.cond:
-            return IfGoto(node.ea, new_cond, node.label)
+            return _out(IfGoto(node.ea, new_cond, node.label))
         return node
 
     if isinstance(node, IfNode):
@@ -191,23 +230,23 @@ def _transform_default(node: HIRNode,
             new_cond = _simplify_bool_str(_subst_text(cond, reg_map))
         else:
             new_cond = _simplify_bool_expr(_subst_expr(cond, reg_map))
-        return IfNode(
+        return _out(IfNode(
             ea         = node.ea,
             condition  = new_cond,
             then_nodes = simplify_fn(node.then_nodes, reg_map),
             else_nodes = simplify_fn(node.else_nodes, reg_map),
-        )
+        ))
     if isinstance(node, WhileNode):
         cond = node.condition
         if isinstance(cond, str):
             new_cond = _simplify_bool_str(_subst_text(cond, reg_map))
         else:
             new_cond = _simplify_bool_expr(_subst_expr(cond, reg_map))
-        return WhileNode(
+        return _out(WhileNode(
             ea         = node.ea,
             condition  = new_cond,
             body_nodes = simplify_fn(node.body_nodes, reg_map),
-        )
+        ))
     if isinstance(node, ForNode):
         init = node.init
         cond = node.condition
@@ -227,24 +266,24 @@ def _transform_default(node: HIRNode,
             new_update = _subst_text(update, reg_map)
         else:
             new_update = _subst_expr(update, reg_map)
-        return ForNode(
+        return _out(ForNode(
             ea         = node.ea,
             init       = new_init,
             condition  = new_cond,
             update     = new_update,
             body_nodes = simplify_fn(node.body_nodes, reg_map),
-        )
+        ))
     if isinstance(node, DoWhileNode):
         cond = node.condition
         if isinstance(cond, str):
             new_cond = _simplify_bool_str(_subst_text(cond, reg_map))
         else:
             new_cond = _simplify_bool_expr(_subst_expr(cond, reg_map))
-        return DoWhileNode(
+        return _out(DoWhileNode(
             ea         = node.ea,
             condition  = new_cond,
             body_nodes = simplify_fn(node.body_nodes, reg_map),
-        )
+        ))
     if isinstance(node, SwitchNode):
         new_subject = _subst_expr(node.subject, reg_map)
         new_cases = [
@@ -255,8 +294,8 @@ def _transform_default(node: HIRNode,
             simplify_fn(node.default_body, reg_map)
             if isinstance(node.default_body, list) else node.default_body
         )
-        return SwitchNode(node.ea, new_subject, new_cases,
-                          node.default_label, new_default_body)
+        return _out(SwitchNode(node.ea, new_subject, new_cases,
+                               node.default_label, new_default_body))
     return node
 
 
@@ -309,6 +348,11 @@ def _simplify(nodes: List[HIRNode], reg_map: Dict[str, VarInfo]) -> List[HIRNode
 
     while i < len(nodes):
         eff = _effective_map(nodes[i], reg_map)
+        # Snapshot eff BEFORE the pattern runs so we can distinguish annotation-derived
+        # entries (added by _effective_map from reg_groups/call_arg_ann/callee_args) from
+        # entries mutated by the pattern itself.  Annotation-derived entries that the
+        # pattern doesn't touch should be killable, not immune like true pattern mutations.
+        pre_pattern_eff = dict(eff)
 
         for pat in _PATTERNS:
             result = pat.match(nodes, i, eff, _sub_simplify)
@@ -323,6 +367,19 @@ def _simplify(nodes: List[HIRNode], reg_map: Dict[str, VarInfo]) -> List[HIRNode
                     for k, v in eff.items():
                         if reg_map.get(k) is not v:
                             reg_map[k] = v
+                # Remove from pre_snap any keys whose values were changed by the
+                # pattern — changed entries are treated as newly-added and immune.
+                for k in list(pre_snap.keys()):
+                    if reg_map.get(k) is not pre_snap[k]:
+                        del pre_snap[k]
+                # Annotation-derived entries were in eff (from _effective_map) but not
+                # in reg_map, so they're absent from pre_snap and would be treated as
+                # immune.  If the pattern didn't mutate them (value unchanged from
+                # pre_pattern_eff), mark them as eligible for killing by adding them to
+                # pre_snap — they're stale annotation data, not new pattern outputs.
+                for k, v_before in pre_pattern_eff.items():
+                    if k not in pre_snap and eff.get(k) is v_before:
+                        pre_snap[k] = reg_map.get(k)
                 # Kill pre-existing entries for all registers written by consumed nodes.
                 written: frozenset = frozenset()
                 for j in range(i, new_i):

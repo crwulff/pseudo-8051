@@ -14,7 +14,7 @@ from typing import Dict, List, Optional, Tuple
 
 from pseudo8051.ir.hir import (HIRNode, Assign, TypedAssign, CompoundAssign,
                                 ExprStmt, ReturnStmt, IfGoto, IfNode,
-                                WhileNode, ForNode, DoWhileNode)
+                                WhileNode, ForNode, DoWhileNode, NodeAnnotation)
 from pseudo8051.ir.expr import (Expr, BinOp, Call,
                                  Regs as RegExpr, Name as NameExpr)
 from pseudo8051.passes.patterns._utils import (
@@ -28,15 +28,15 @@ from pseudo8051.constants import dbg
 def _expr_name_refs(expr: Expr) -> frozenset:
     """Collect register/name identities referenced in an expression tree.
 
-    For RegGroup nodes, emits the canonical joined key (e.g. "R4R5R6R7") so
-    that conflict detection operates in register-name space regardless of
-    whether the node carries an alias.
+    For RegGroup nodes, emits each individual register name so that conflict
+    detection operates in register-name space regardless of whether the node
+    carries an alias.
     """
     refs: set = set()
 
     def _collect(e: Expr) -> Expr:
         if isinstance(e, RegExpr):
-            refs.add("".join(e.regs))
+            refs.update(e.regs)
         elif isinstance(e, NameExpr):
             refs.add(e.name)
         return e
@@ -148,7 +148,9 @@ def _fold_compound_assigns(live: List[HIRNode]) -> Tuple[List[HIRNode], bool]:
                     and nxt.lhs == node.lhs
                     and nxt.op in _COMPOUND_OPS):
                 op_str = _COMPOUND_OPS[nxt.op]
-                live[i + 1] = Assign(nxt.ea, nxt.lhs, BinOp(node.rhs, op_str, nxt.rhs))
+                folded = Assign(nxt.ea, nxt.lhs, BinOp(node.rhs, op_str, nxt.rhs))
+                folded.ann = NodeAnnotation.merge(node, nxt)
+                live[i + 1] = folded
                 live[i] = None
                 dbg("typesimp",
                     f"  [{hex(node.ea)}] fold-compound: "
@@ -290,16 +292,21 @@ def _inline_retvals(live: List[HIRNode],
                                 f"  [{hex(live[i].ea)}] inline-retval: blocked — "
                                 f"intermediate writes {call_reads & mid_writes}")
                             break
+                    src_node = live[i]
                     if (isinstance(tgt, Assign)
                             and isinstance(tgt.rhs, (NameExpr, RegExpr))
                             and (not isinstance(tgt.rhs, RegExpr) or tgt.rhs.is_single)
                             and tgt.rhs.name == retval_name):
-                        live[abs_j] = Assign(tgt.ea, tgt.lhs, call_expr)
+                        new_node = Assign(tgt.ea, tgt.lhs, call_expr)
+                        new_node.ann = NodeAnnotation.merge(src_node, tgt)
+                        live[abs_j] = new_node
                     else:
                         new_node = _subst_reg_in_node(tgt, retval_name, call_expr)
                         if new_node is not None:
+                            # _subst_reg_in_node already copies tgt.ann; merge in src callee_args
+                            new_node.ann = NodeAnnotation.merge(src_node, tgt)
                             live[abs_j] = new_node
-                    src_ea = hex(live[i].ea)
+                    src_ea = hex(src_node.ea)
                     live[i] = None
                     dbg("typesimp",
                         f"  [{src_ea}] prop-values: inlined {retval_name} into node {abs_j}")

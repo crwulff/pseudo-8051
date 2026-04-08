@@ -70,7 +70,8 @@ class SjmpHandler(MnemonicHandler):
             proto = get_proto(tail)
             if proto:
                 regs_list = param_regs(proto)
-                args = [Name("".join(r)) if r else Name("?") for r in regs_list]
+                args = [RegGroup(r) if len(r) > 1 else (Name("".join(r)) if r else Name("?"))
+                        for r in regs_list]
                 call_node = Call(tail, args)
                 if proto.return_type != "void" and proto.return_regs:
                     # Emit Assign(ret_reg(s), Call(...)) + bare ReturnStmt so that

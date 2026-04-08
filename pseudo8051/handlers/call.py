@@ -47,7 +47,7 @@ class LcallHandler(MnemonicHandler):
     def lift(self, insn, state=None) -> List[HIRNode]:
         if _is_chunk_call(insn):
             return []
-        from pseudo8051.prototypes import get_proto, return_expr, param_regs, expand_regs
+        from pseudo8051.prototypes import get_proto, param_regs, expand_regs
         callee_expr = _op_expr(insn, 0, state)
         callee = callee_expr.name if isinstance(callee_expr, Name) else callee_expr.render()
         proto  = get_proto(callee)

@@ -8,7 +8,8 @@ Exports:
 from typing import Dict, List, Optional
 
 from pseudo8051.ir.hir import (HIRNode, Assign, TypedAssign, ReturnStmt,
-                                IfNode, WhileNode, ForNode, DoWhileNode, SwitchNode)
+                                IfNode, WhileNode, ForNode, DoWhileNode, SwitchNode,
+                                NodeAnnotation)
 from pseudo8051.ir.expr import (Reg, Regs as RegExpr, RegGroup as RegGroupExpr,
                                  Name as NameExpr)
 from pseudo8051.passes.patterns._utils import VarInfo
@@ -54,14 +55,15 @@ def _fold_return_chains(hir: List[HIRNode], ret_regs: tuple,
             else fall back to reg_map pair name.
     """
     ret_reg_set = set(ret_regs)
-    pair_name   = "".join(ret_regs) if len(ret_regs) > 1 else None
 
     def _canon_return_expr():
-        if pair_name and reg_map:
-            vinfo = reg_map.get(pair_name)
-            if isinstance(vinfo, VarInfo) and vinfo.name:
-                return NameExpr(vinfo.name)
-        if pair_name:
+        if len(ret_regs) > 1:
+            if reg_map:
+                # Look up by first return register (all share the same VarInfo)
+                vinfo = reg_map.get(ret_regs[0])
+                if (isinstance(vinfo, VarInfo) and vinfo.name
+                        and frozenset(vinfo.regs) == frozenset(ret_regs)):
+                    return NameExpr(vinfo.name)
             return RegGroupExpr(ret_regs)
         return None
 
@@ -72,20 +74,22 @@ def _fold_return_chains(hir: List[HIRNode], ret_regs: tuple,
             node = nodes[i]
 
             # ── Multi-reg: RegGroup assignment immediately before ReturnStmt ─────
-            if (pair_name is not None
+            if (len(ret_regs) > 1
                     and isinstance(node, Assign)
                     and isinstance(node.lhs, RegExpr) and not node.lhs.is_single
                     and node.lhs.reg_set() == frozenset(ret_regs)
                     and i + 1 < len(nodes)
                     and isinstance(nodes[i + 1], ReturnStmt)
                     and nodes[i + 1].value is None):
-                out.append(ReturnStmt(node.ea, node.rhs))
+                ret = ReturnStmt(node.ea, node.rhs)
+                ret.ann = NodeAnnotation.merge(node, nodes[i + 1])
+                out.append(ret)
                 dbg("typesimp", f"  [{hex(node.ea)}] fold-return (RegGroup): {node.rhs.render()}")
                 i += 2
                 continue
 
             # ── Single-reg: only for single-register returns ──────────────────
-            if (pair_name is None
+            if (len(ret_regs) == 1
                     and isinstance(node, Assign)
                     and isinstance(node.lhs, RegExpr) and node.lhs.is_single
                     and node.lhs.name in ret_reg_set
@@ -93,13 +97,15 @@ def _fold_return_chains(hir: List[HIRNode], ret_regs: tuple,
                     and isinstance(nodes[i + 1], ReturnStmt)
                     and (nodes[i + 1].value is None
                          or nodes[i + 1].value == Reg(node.lhs.name))):
-                out.append(ReturnStmt(node.ea, node.rhs))
+                ret = ReturnStmt(node.ea, node.rhs)
+                ret.ann = NodeAnnotation.merge(node, nodes[i + 1])
+                out.append(ret)
                 dbg("typesimp", f"  [{hex(node.ea)}] fold-return (single): {node.rhs.render()}")
                 i += 2
                 continue
 
             # ── Multi-reg ReturnStmt(None): produce canonical pair expression ──
-            if (pair_name is not None
+            if (len(ret_regs) > 1
                     and isinstance(node, ReturnStmt)
                     and node.value is None):
                 collected: Dict[str, tuple] = {}
@@ -122,6 +128,7 @@ def _fold_return_chains(hir: List[HIRNode], ret_regs: tuple,
                                 or _canon_return_expr()
                                 or RegGroupExpr(ret_regs))
                     start_idx = min(v[0] for v in collected.values())
+                    first_consumed = out[start_idx] if start_idx < len(out) else node
                     del out[start_idx:]
                     dbg("typesimp",
                         f"  [{hex(node.ea)}] fold-return (multi-all): {combined.render()}")
@@ -132,12 +139,18 @@ def _fold_return_chains(hir: List[HIRNode], ret_regs: tuple,
                            and out[-1].lhs.name in ret_reg_set
                            and out[-1].rhs == out[-1].lhs):
                         out.pop()
+                    first_consumed = node
                     combined = _canon_return_expr()
                     if combined is not None:
                         dbg("typesimp",
                             f"  [{hex(node.ea)}] fold-return (multi-canon): {combined.render()}")
 
-                out.append(ReturnStmt(node.ea, combined) if combined is not None else node)
+                if combined is not None:
+                    ret = ReturnStmt(node.ea, combined)
+                    ret.ann = NodeAnnotation.merge(first_consumed, node)
+                    out.append(ret)
+                else:
+                    out.append(node)
                 i += 1
                 continue
 

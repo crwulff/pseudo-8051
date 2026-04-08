@@ -97,9 +97,28 @@ class ConstGroupPattern(Pattern):
               simplify: Simplify) -> Optional[Match]:
         candidates = sorted(
             {v for v in reg_map.values()
-             if isinstance(v, VarInfo) and len(v.regs) >= 2},
+             if isinstance(v, VarInfo) and len(v.regs) >= 2
+             and not v.is_retval_field},
             key=lambda v: len(v.regs), reverse=True,
         )
+        if not candidates:
+            # No named candidates in reg_map (e.g. all covered by stale retval_field
+            # entries that were excluded above).  Peek into the upcoming nodes'
+            # call_arg_ann: backward annotation from the following call may have
+            # decorated the Rn=A relay nodes (but not the A=const lead-in node that
+            # ConstGroupPattern starts from).
+            forward_vi: Dict[int, VarInfo] = {}
+            for peek in nodes[i : min(i + 20, len(nodes))]:
+                ann = getattr(peek, 'ann', None)
+                if ann is None:
+                    continue
+                for vi in ann.call_arg_names.values():
+                    if (isinstance(vi, VarInfo) and len(vi.regs) >= 2
+                            and not vi.is_retval_field):
+                        forward_vi[id(vi)] = vi
+            if forward_vi:
+                candidates = sorted(forward_vi.values(),
+                                    key=lambda v: len(v.regs), reverse=True)
         for vinfo in candidates:
             result = _scan_const_group(nodes, i, vinfo)
             if result is None:
@@ -110,28 +129,33 @@ class ConstGroupPattern(Pattern):
             dbg("typesimp", f"  const-load: {vinfo.name} = {const_s}")
             # Re-assert vinfo in reg_map so subsequent aliasing uses vinfo.name,
             # not a stale retval name left behind by an earlier RetvalPattern run.
-            pair = "".join(vinfo.regs)
-            reg_map[pair] = vinfo
             for r in vinfo.regs:
                 reg_map[r] = vinfo
 
             # Try to fold the constant into the immediately following statement
             next_node = nodes[end_i] if end_i < len(nodes) else None
             if next_node is not None:
-                # Try expr-tree fold first
-                pair_expr = Name(vinfo.pair_name) if vinfo.pair_name else None
-                name_expr = Name(vinfo.name) if vinfo.name != vinfo.pair_name else None
+                # Try expr-tree fold first: match by register group, then by variable name
+                regs_expr = RegGroup(vinfo.regs) if len(vinfo.regs) > 1 else None
+                name_expr = Name(vinfo.name) if vinfo.name else None
 
                 folded_node = None
-                if pair_expr is not None:
-                    folded_node = _fold_into_node(next_node, pair_expr, const_expr, reg_map)
+                if regs_expr is not None:
+                    folded_node = _fold_into_node(next_node, regs_expr, const_expr, reg_map)
                 if folded_node is None and name_expr is not None:
                     folded_node = _fold_into_node(next_node, name_expr, const_expr, reg_map)
 
                 if folded_node is not None:
+                    # Span: nodes[i]…next_node; reg_groups from first, call_arg from last
+                    from pseudo8051.ir.hir import NodeAnnotation
+                    folded_node.ann = NodeAnnotation.merge(nodes[i], next_node)
                     return ([folded_node], end_i + 1)
 
             # Declare with type
-            return ([TypedAssign(nodes[i].ea, vinfo.type,
-                                RegGroup(vinfo.regs, alias=vinfo.name), const_expr)], end_i)
+            from pseudo8051.ir.hir import NodeAnnotation
+            last = nodes[end_i - 1] if end_i > i else nodes[i]
+            out = TypedAssign(nodes[i].ea, vinfo.type,
+                              RegGroup(vinfo.regs, alias=vinfo.name), const_expr)
+            out.ann = NodeAnnotation.merge(nodes[i], last)
+            return ([out], end_i)
         return None

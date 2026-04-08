@@ -184,7 +184,8 @@ class PseudocodeViewer(ida_kernwin.simplecustviewer_t):
             if annotate:
                 chain = self._node_map.get(i)
                 if chain:
-                    for ann in chain[-1].ann_lines():
+                    node = chain[-1]
+                    for ann in node.ann_lines() + node.node_ann_lines():
                         self._ea_map[vline] = ea
                         self.AddLine(f"    // {ann}")
                         vline += 1

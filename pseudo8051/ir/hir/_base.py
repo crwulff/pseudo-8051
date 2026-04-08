@@ -3,23 +3,112 @@ ir/hir/_base.py — NodeAnnotation, HIRNode ABC, and shared helpers.
 """
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Callable, Dict, FrozenSet, List, Optional, Tuple, Union
 
 from pseudo8051.ir.expr import Expr, Regs as _RegsExpr, Name as _NameExpr
 
 if TYPE_CHECKING:
-    from pseudo8051.passes.patterns._utils import VarInfo
+    from pseudo8051.passes.patterns._utils import VarInfo, TypeGroup
 
 
 class NodeAnnotation:
     """Per-node annotation: register names/types and constant values at this point."""
-    __slots__ = ("reg_names", "reg_consts", "call_arg_ann", "callee_args")
+    __slots__ = ("reg_groups", "reg_consts", "call_arg_ann", "callee_args")
 
     def __init__(self):
-        self.reg_names:    "Dict[str, VarInfo]" = {}   # reg → VarInfo (name, type)
-        self.reg_consts:   Dict[str, int]        = {}   # reg → known const
-        self.call_arg_ann: "Dict[str, VarInfo]"  = {}   # backward-propagated callee param
-        self.callee_args:  "Optional[Dict[str, VarInfo]]" = None  # call node only
+        self.reg_groups:   "List[TypeGroup]"           = []   # forward-propagated TypeGroups
+        self.reg_consts:   Dict[str, int]               = {}   # reg → known const
+        self.call_arg_ann: "List[TypeGroup]"            = []   # backward-propagated callee params
+        self.callee_args:  "Optional[List[TypeGroup]]"  = None # call node only
+
+    @staticmethod
+    def merge(first: "object", last: "object") -> "Optional[NodeAnnotation]":
+        """Build an annotation for a node that replaces a span of consumed nodes.
+
+        *first* and *last* may be HIRNode objects or NodeAnnotation objects (or None).
+
+        reg_groups / reg_consts come from *first* (the state at the start of the
+        span).  call_arg_ann comes from *last* (what downstream code expects after
+        the span).  callee_args is taken from whichever side has it (first wins).
+        """
+        first_ann = (first.ann if hasattr(first, 'ann') else first)
+        last_ann  = (last.ann  if hasattr(last,  'ann') else last)
+        if first_ann is None and last_ann is None:
+            return None
+        ann = NodeAnnotation()
+        if first_ann is not None:
+            ann.reg_groups  = first_ann.reg_groups
+            ann.reg_consts  = first_ann.reg_consts
+            ann.callee_args = first_ann.callee_args
+        if last_ann is not None:
+            ann.call_arg_ann = last_ann.call_arg_ann
+            if ann.callee_args is None:
+                ann.callee_args = last_ann.callee_args
+        return ann
+
+    # ── New TypeGroup lookup helpers ──────────────────────────────────────────
+
+    def group_for(self, reg: str) -> "Optional[TypeGroup]":
+        """Find the TypeGroup whose active_regs contains *reg*."""
+        for g in self.reg_groups:
+            if reg in g.active_regs:
+                return g
+        return None
+
+    def call_arg_for(self, reg: str) -> "Optional[TypeGroup]":
+        """Find the call_arg_ann TypeGroup whose active_regs contains *reg*."""
+        for g in self.call_arg_ann:
+            if reg in g.active_regs:
+                return g
+        return None
+
+    # ── Compat shim: reg_names dict built on demand from reg_groups ───────────
+
+    @property
+    def reg_names(self) -> "Dict[str, VarInfo]":
+        """Legacy dict view of reg_groups for code not yet migrated to TypeGroup."""
+        from pseudo8051.passes.patterns._utils import VarInfo as _VI
+        d: Dict[str, _VI] = {}
+        for g in self.reg_groups:
+            vi = _VI(g.name, g.type, g.full_regs,
+                     xram_sym=g.xram_sym, is_param=g.is_param,
+                     xram_addr=g.xram_addr,
+                     is_retval=False)
+            for r in g.active_regs:
+                d[r] = vi
+        return d
+
+    @property
+    def call_arg_names(self) -> "Dict[str, VarInfo]":
+        """Legacy dict view of call_arg_ann for code not yet migrated to TypeGroup."""
+        from pseudo8051.passes.patterns._utils import VarInfo as _VI
+        d: Dict[str, _VI] = {}
+        for g in self.call_arg_ann:
+            vi = _VI(g.name, g.type, g.full_regs,
+                     xram_sym=g.xram_sym, is_param=g.is_param,
+                     xram_addr=g.xram_addr, is_retval=False)
+            if g.xram_sym and not g.full_regs:
+                # XRAM-backed: index by xram_sym key
+                d[g.xram_sym] = vi
+            else:
+                for r in g.active_regs:
+                    d[r] = vi
+        return d
+
+    @property
+    def callee_args_dict(self) -> "Optional[Dict[str, VarInfo]]":
+        """Legacy dict view of callee_args for code not yet migrated to TypeGroup."""
+        if self.callee_args is None:
+            return None
+        from pseudo8051.passes.patterns._utils import VarInfo as _VI
+        d: Dict[str, _VI] = {}
+        for g in self.callee_args:
+            vi = _VI(g.name, g.type, g.full_regs,
+                     xram_sym=g.xram_sym, is_param=g.is_param,
+                     xram_addr=g.xram_addr, is_retval=False)
+            for r in g.active_regs:
+                d[r] = vi
+        return d
 
 
 class HIRNode(ABC):
@@ -93,6 +182,42 @@ class HIRNode(ABC):
         """Return annotation lines for this node (class name + fields)."""
         return [type(self).__name__]
 
+    def node_ann_lines(self) -> List[str]:
+        """Return annotation lines for self.ann (NodeAnnotation fields), or [] if absent."""
+        if self.ann is None:
+            return []
+        out: List[str] = []
+        ann = self.ann
+        if ann.reg_groups:
+            out.append("  ann.reg_groups:")
+            for g in ann.reg_groups:
+                active = ",".join(sorted(g.active_regs, key=lambda r: g.full_regs.index(r)
+                                         if r in g.full_regs else 99))
+                full   = ",".join(g.full_regs)
+                label  = f"param " if g.is_param else ""
+                xram   = f" @{g.xram_sym}" if g.xram_sym else ""
+                out.append(f"    {label}{g.name}: {g.type} [{active}/{full}]{xram}")
+        if ann.reg_consts:
+            out.append("  ann.reg_consts: " +
+                       ", ".join(f"{k}={v:#x}" for k, v in ann.reg_consts.items()))
+        if ann.call_arg_ann:
+            out.append("  ann.call_arg_ann:")
+            for g in ann.call_arg_ann:
+                active = ",".join(sorted(g.active_regs, key=lambda r: g.full_regs.index(r)
+                                          if r in g.full_regs else 99))
+                full   = ",".join(g.full_regs)
+                xram   = f" @{g.xram_sym}" if g.xram_sym else ""
+                out.append(f"    {g.name}: {g.type} [{active}/{full}]{xram}")
+        if ann.callee_args is not None:
+            out.append("  ann.callee_args:")
+            for g in ann.callee_args:
+                active = ",".join(sorted(g.active_regs, key=lambda r: g.full_regs.index(r)
+                                          if r in g.full_regs else 99))
+                full   = ",".join(g.full_regs)
+                label  = "param " if g.is_param else "retval "
+                out.append(f"    {label}{g.name}: {g.type} [{active}/{full}]")
+        return out
+
     def name_refs(self) -> frozenset:
         """Collect all Reg/Name/RegGroup strings referenced in read positions in this node."""
         return frozenset()
@@ -107,7 +232,7 @@ class HIRNode(ABC):
 def _refs_from_expr(expr: Expr) -> frozenset:
     """Collect all Reg/Name/RegGroup name strings referenced in read positions in expr."""
     if isinstance(expr, _RegsExpr):
-        return expr.reg_set() | {"".join(expr.names)}
+        return expr.reg_set()
     if isinstance(expr, _NameExpr):
         return frozenset({expr.name})
     children = expr.children()
@@ -175,7 +300,7 @@ def _ann_field(label: str, val) -> List[str]:
 def _lhs_written_regs(lhs: Expr) -> frozenset:
     """Extract written register names from an assignment LHS expression."""
     if isinstance(lhs, _RegsExpr):
-        return lhs.reg_set() | {"".join(lhs.names)}
+        return lhs.reg_set()
     return frozenset()
 
 

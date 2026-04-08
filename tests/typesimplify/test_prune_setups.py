@@ -8,9 +8,9 @@ Bug 2a: _fold_and_prune_setups recurse into IfNode branches without outer
         context, pruning assigns whose values are used AFTER the enclosing
         IfNode in the merge block.
 
-Bug 2b: Reg('R2R3') in call args adds 'R2R3' to refs but not 'R2'/'R3'.
-        _expand_pair_refs uses reg_map to expand pair names so that a branch
-        Assign(R3, ...) is preserved when the merge block uses Reg('R2R3').
+Bug 2b: RegGroup(('R2','R3')) in call args must add 'R2' and 'R3' to refs
+        (via individual names in Regs.reg_set()) so that a branch
+        Assign(R3, ...) is preserved when the merge block uses RegGroup.
 
 Bug 2c: _outer_refs must NOT be consulted when pruning DPTR++ nodes; a DPTR++
         value never flows across a control-flow merge, and passing outer refs
@@ -19,7 +19,6 @@ Bug 2c: _outer_refs must NOT be consulted when pruning DPTR++ nodes; a DPTR++
 from pseudo8051.passes.typesimplify._post import (
     _fold_and_prune_setups,
     _collect_hir_name_refs,
-    _expand_pair_refs,
     _is_dptr_inc_node,
 )
 from pseudo8051.passes.patterns._utils import VarInfo
@@ -125,52 +124,31 @@ class TestPruneSetupsIfNodeScoping:
         assert isinstance(ifnode, IfNode)
         assert len(ifnode.else_nodes) == 0
 
-    def test_branch_assign_kept_via_reg_pair_name(self):
+    def test_branch_assign_kept_via_reggroup(self):
         """
-        Bug 2b: merge call uses Reg('R2R3'); _expand_pair_refs must expand
-        'R2R3' → {'R2','R3'} via reg_map so that R3=font_base_hi is preserved.
+        Bug 2b: merge call uses RegGroup(('R2','R3')); individual names 'R2' and
+        'R3' must appear in refs so that R3=font_base_hi is preserved.
         """
-        reg_map = {"R2R3": VarInfo("osd_addr", "int16_t", ("R2", "R3"))}
         nodes = [
             self._make_ifnode_with_else_assign("R3", "font_base_hi"),
             ExprStmt(EA, Call("set_osd_addr", [Const(8), Name("_byte_sel"),
-                                               Reg("R2R3")])),
+                                               RegGroup(("R2", "R3"))])),
         ]
-        result = _fold_and_prune_setups(nodes, reg_map)
+        result = _fold_and_prune_setups(nodes, {})
         ifnode = result[0]
         assert isinstance(ifnode, IfNode)
         assert len(ifnode.else_nodes) == 1, "R3=font_base_hi must not be pruned"
 
     def test_collect_refs_includes_reggroup_components(self):
         """
-        _collect_hir_name_refs must add each component name (and the pair name)
-        when a RegGroupExpr appears in a read position.
+        _collect_hir_name_refs must add each component name when a RegGroupExpr
+        appears in a read position (individual regs, not the concatenated pair name).
         """
         node = ExprStmt(EA, Call("f", [RegGroup(("R2", "R3"))]))
         refs = _collect_hir_name_refs([node])
         assert "R2" in refs
         assert "R3" in refs
-        assert "R2R3" in refs
-
-
-class TestExpandPairRefs:
-    """_expand_pair_refs must expand pair register names to individual components."""
-
-    def test_expands_pair_name(self):
-        reg_map = {"R2R3": VarInfo("addr", "int16_t", ("R2", "R3"))}
-        result = _expand_pair_refs(frozenset({"R2R3"}), reg_map)
-        assert "R2" in result
-        assert "R3" in result
-        assert "R2R3" in result
-
-    def test_no_expansion_for_single_reg(self):
-        reg_map = {"R7": VarInfo("arg1", "uint8_t", ("R7",))}
-        result = _expand_pair_refs(frozenset({"R7"}), reg_map)
-        assert result == frozenset({"R7"})
-
-    def test_unknown_name_unchanged(self):
-        result = _expand_pair_refs(frozenset({"foo"}), {})
-        assert result == frozenset({"foo"})
+        assert "R2R3" not in refs
 
 
 class TestPruneDptrInc:

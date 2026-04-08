@@ -81,36 +81,53 @@ def _resolve_binop_const(expr: Expr, reg_map: dict) -> Expr:
     return expr
 
 
-def _resolve_call_args(call_expr: Call) -> Call:
+def _param_types_from_ann(ann) -> Optional[list]:
+    """Return [(name, type), ...] for callee params from a NodeAnnotation, or None."""
+    if ann is None or ann.callee_args is None:
+        return None
+    pairs = [(g.name, g.type) for g in ann.callee_args if g.is_param]
+    return pairs if pairs else None
+
+
+def _param_types_from_proto(func_name: str) -> Optional[list]:
+    """Fetch proto from IDA and return [(name, type), ...] for params, or None."""
+    try:
+        from pseudo8051.prototypes import get_proto
+    except Exception:
+        return None
+    proto = get_proto(func_name)
+    if not proto:
+        return None
+    return [(p.name, p.type) for p in proto.params]
+
+
+def _resolve_call_args(call_expr: Call, ann=None) -> Call:
     """
     For each arg in a Call where the corresponding param has an enum type,
     replace Const args with enum member Names.
-    """
-    try:
-        from pseudo8051.prototypes import get_proto, param_regs
-    except Exception:
-        return call_expr
 
-    proto = get_proto(call_expr.func_name)
-    if not proto:
-        dbg("enum", f"  _resolve_call_args({call_expr.func_name!r}): no proto")
+    Uses ann.callee_args (TypeGroups) when available; falls back to get_proto.
+    """
+    param_types = _param_types_from_ann(ann) or _param_types_from_proto(call_expr.func_name)
+    if not param_types:
+        dbg("enum", f"  _resolve_call_args({call_expr.func_name!r}): no param info")
         return call_expr
 
     dbg("enum", f"  _resolve_call_args({call_expr.func_name!r}): "
-        f"{len(proto.params)} params, {len(call_expr.args)} args")
+        f"{len(param_types)} params, {len(call_expr.args)} args")
 
     new_args = list(call_expr.args)
     changed = False
-    for i, (p, arg) in enumerate(zip(proto.params, call_expr.args)):
-        dbg("enum", f"    arg[{i}] {p.name!r}: type={p.type!r}, "
+    for i, ((pname, ptype), arg) in enumerate(zip(param_types, call_expr.args)):
+        dbg("enum", f"    arg[{i}] {pname!r}: type={ptype!r}, "
             f"arg={arg.render()!r} (Const={isinstance(arg, Const)})")
         if not isinstance(arg, Const) or arg.alias:
             continue
-        if not is_enum_type(p.type):
-            dbg("enum", f"    → {p.type!r} is not an IDA enum, skipping")
+        if not is_enum_type(ptype):
+            dbg("enum", f"    → {ptype!r} is not an IDA enum, skipping")
             continue
-        replacement = _try_resolve(p.type, arg.value,
-                                   f"call {call_expr.func_name} arg {i} ({p.name})")
+        replacement = _try_resolve(ptype, arg.value,
+                                   f"call {call_expr.func_name} arg {i} ({pname})")
         if replacement is not None:
             new_args[i] = replacement
             changed = True
@@ -128,12 +145,15 @@ def _get_call_expr(node: HIRNode) -> Optional[Call]:
 
 def _patch_call(node: HIRNode, new_call: Call) -> HIRNode:
     if isinstance(node, ExprStmt):
-        return ExprStmt(node.ea, new_call)
-    if isinstance(node, TypedAssign):
-        return TypedAssign(node.ea, node.type_str, node.lhs, new_call)
-    if isinstance(node, Assign):
-        return Assign(node.ea, node.lhs, new_call)
-    return node
+        new_node = ExprStmt(node.ea, new_call)
+    elif isinstance(node, TypedAssign):
+        new_node = TypedAssign(node.ea, node.type_str, node.lhs, new_call)
+    elif isinstance(node, Assign):
+        new_node = Assign(node.ea, node.lhs, new_call)
+    else:
+        return node
+    new_node.ann = node.ann
+    return new_node
 
 
 # ── Condition walker ─────────────────────────────────────────────────────────
@@ -167,7 +187,7 @@ def _resolve_enum_consts(nodes: List[HIRNode], reg_map: dict) -> List[HIRNode]:
         # 1. Call arguments
         call_expr = _get_call_expr(node)
         if call_expr is not None:
-            new_call = _resolve_call_args(call_expr)
+            new_call = _resolve_call_args(call_expr, ann=node.ann)
             if new_call is not call_expr:
                 node = _patch_call(node, new_call)
 
@@ -179,10 +199,12 @@ def _resolve_enum_consts(nodes: List[HIRNode], reg_map: dict) -> List[HIRNode]:
                 if type_str:
                     new_rhs = _resolve_in_expr(node.rhs, type_str)
                     if new_rhs is not node.rhs:
+                        old_ann = node.ann
                         if isinstance(node, TypedAssign):
                             node = TypedAssign(node.ea, node.type_str, lhs, new_rhs)
                         else:
                             node = Assign(node.ea, lhs, new_rhs)
+                        node.ann = old_ann
 
         # 3. Comparison conditions: IfNode / IfGoto
         if hasattr(node, "condition") or hasattr(node, "cond"):
