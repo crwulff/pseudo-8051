@@ -30,7 +30,7 @@ import re
 from typing import List, Optional, Tuple
 
 from pseudo8051.ir.hir   import HIRNode, Assign, ExprStmt, IfNode, WhileNode, ForNode, DoWhileNode
-from pseudo8051.ir.expr  import Reg, UnaryOp, Name, Const
+from pseudo8051.ir.expr  import Reg, Regs, UnaryOp, Name, Const
 from pseudo8051.constants import dbg
 
 # Match a bare integer constant (used to parse Name("0x12") from XRAMLocalWritePattern)
@@ -74,6 +74,48 @@ def _rhs_as_const(rhs) -> Optional[int]:
     if isinstance(rhs, Name):
         return _parse_int(rhs.name)
     return None
+
+
+def _try_collapse_rmw_inc(nodes: List[HIRNode], i: int):
+    """
+    Recognize the accumulator read-modify-write increment pattern for XRAM locals:
+
+      A = <var>;       (load XRAM local into A)
+      <var> = ++A;     (increment A and store back)
+
+    Collapses to a post-increment statement:
+      <var>++;
+    """
+    n0 = nodes[i]
+    if not (isinstance(n0, Assign)
+            and isinstance(n0.lhs, Regs) and n0.lhs.is_single
+            and n0.lhs.names == ('A',)
+            and isinstance(n0.rhs, Name)):
+        return None, i
+
+    var_name = n0.rhs.name
+    if i + 1 >= len(nodes):
+        return None, i
+
+    n1 = nodes[i + 1]
+    if not (isinstance(n1, Assign)
+            and isinstance(n1.lhs, Name)
+            and n1.lhs.name == var_name):
+        return None, i
+
+    rhs = n1.rhs
+    is_inc_a = (
+        (isinstance(rhs, Name) and rhs.name == '++A')
+        or (isinstance(rhs, UnaryOp) and rhs.op == '++'
+            and not getattr(rhs, 'post', True)
+            and isinstance(rhs.operand, Regs)
+            and rhs.operand.names == ('A',))
+    )
+    if not is_inc_a:
+        return None, i
+
+    dbg("typesimp", f"  mb_assign: {var_name}++ (rmw-inc)")
+    return ExprStmt(n0.ea, UnaryOp('++', Name(var_name), post=True)), i + 2
 
 
 def _try_collapse(nodes: List[HIRNode], i: int):
@@ -187,7 +229,9 @@ def collapse_mb_assigns(nodes: List[HIRNode]) -> List[HIRNode]:
             i += 1
             continue
 
-        collapsed, new_i = _try_collapse(nodes, i)
+        collapsed, new_i = _try_collapse_rmw_inc(nodes, i)
+        if collapsed is None:
+            collapsed, new_i = _try_collapse(nodes, i)
         if collapsed is not None:
             out.append(collapsed)
             i = new_i
