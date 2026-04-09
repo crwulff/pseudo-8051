@@ -211,6 +211,10 @@ class LoopStructurer(OptimizationPass):
 
         if not back_edges:
             dbg("loops", "no back-edges found")
+            from pseudo8051.passes.debug_dump import dump_pass_hir
+            all_nodes = [n for b in func.blocks
+                         if not getattr(b, "_absorbed", False) for n in b.hir]
+            dump_pass_hir("loops", all_nodes, func.name)
             return
 
         # Group by header so multiple tails → one loop
@@ -222,6 +226,11 @@ class LoopStructurer(OptimizationPass):
             header = func._block_map[header_ea]
             dbg("loops", f"header={hex(header_ea)}  tails={[hex(t.start_ea) for t in tails]}")
             self._structure_loop(func, header, tails)
+
+        from pseudo8051.passes.debug_dump import dump_pass_hir
+        all_nodes = [n for b in func.blocks
+                     if not getattr(b, "_absorbed", False) for n in b.hir]
+        dump_pass_hir("loops", all_nodes, func.name)
 
     def _structure_loop(self, func: Function,
                         header: BasicBlock, tails: List[BasicBlock]) -> None:

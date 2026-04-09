@@ -4,20 +4,41 @@ constants.py — 8051 / RTD2660 constants and address-resolution helpers.
 Migrated from IDA_8051_Pseudocode.py (top-level constants section).
 """
 
+import os as _os
+
 # ── Debug output ──────────────────────────────────────────────────────────────
-# Set to True to print pass-by-pass diagnostics to the IDA console.
+# Set to True to write pass-by-pass diagnostics to /tmp/<tag>.dbg.
 DEBUG = True
+
+_DBG_DIR = "/tmp/pseudo8051"
+_dbg_opened: set = set()   # tags whose .dbg file has been opened (write) this session
+
+
+def reset_debug_session() -> None:
+    """Clear the opened-file registry so the next dbg() call per tag overwrites."""
+    _os.makedirs(_DBG_DIR, exist_ok=True)
+    _dbg_opened.clear()
+
+
+def dbg(tag: str, msg: str) -> None:
+    """Write a debug line to /tmp/<tag>.dbg.
+
+    The first call for each tag in a session opens the file in write mode
+    (clearing any previous content); subsequent calls append.
+    """
+    if not DEBUG:
+        return
+    _os.makedirs(_DBG_DIR, exist_ok=True)
+    path = _os.path.join(_DBG_DIR, f"{tag}.dbg")
+    mode = 'w' if tag not in _dbg_opened else 'a'
+    _dbg_opened.add(tag)
+    with open(path, mode) as f:
+        f.write(msg + '\n')
 
 # ── Display options ────────────────────────────────────────────────────────────
 # When True, integer constants are rendered in hexadecimal; when False, decimal.
 # Toggled at runtime via the right-click menu in the pseudocode viewer.
 USE_HEX: bool = True
-
-
-def dbg(tag: str, msg: str) -> None:
-    """Print a debug line to the IDA console if DEBUG is enabled."""
-    if DEBUG:
-        print(f"[pseudo8051:{tag}] {msg}")
 
 import ida_name
 import ida_segment

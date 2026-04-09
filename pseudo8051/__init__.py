@@ -185,7 +185,10 @@ class PseudocodeViewer(ida_kernwin.simplecustviewer_t):
                 chain = self._node_map.get(i)
                 if chain:
                     node = chain[-1]
-                    for ann in node.ann_lines() + node.node_ann_lines():
+                    anns = node.ann_lines() + node.node_ann_lines()
+                    if anns:
+                        anns[0] = f"{anns[0]} [{hex(node.ea)}]"
+                    for ann in anns:
                         self._ea_map[vline] = ea
                         self.AddLine(f"    // {ann}")
                         vline += 1

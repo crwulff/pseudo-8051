@@ -126,3 +126,7 @@ class RMWCollapser(OptimizationPass):
                 if after < before:
                     dbg("RMW", f"block {hex(block.start_ea)}: "
                                f"{before - after} line(s) collapsed")
+        from pseudo8051.passes.debug_dump import dump_pass_hir
+        all_nodes = [n for b in func.blocks
+                     if not getattr(b, "_absorbed", False) for n in b.hir]
+        dump_pass_hir("rmw", all_nodes, func.name)

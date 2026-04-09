@@ -523,4 +523,6 @@ class AnnotationPass(OptimizationPass):
         func._annotation_pass_ran = True
         dbg("annotate", f"{func.name}: annotation complete")
         if DEBUG:
-            _dump_annotated_hir(func)
+            from pseudo8051.passes.debug_dump import dump_pass_hir
+            all_nodes = [n for block in _rpo(func) for n in block.hir]
+            dump_pass_hir("annotate", all_nodes, func.name)

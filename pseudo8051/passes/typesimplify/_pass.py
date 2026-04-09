@@ -125,3 +125,6 @@ class TypeAwareSimplifier(OptimizationPass):
         from pseudo8051.passes.ifelse import _collect_goto_targets, _drop_dead_labels
         _live_labels = _collect_goto_targets(func.hir)
         func.hir = _drop_dead_labels(func.hir, _live_labels)
+
+        from pseudo8051.passes.debug_dump import dump_pass_hir
+        dump_pass_hir("typesimp", func.hir, func.name)

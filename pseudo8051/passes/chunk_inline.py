@@ -67,6 +67,10 @@ class ChunkInliner(OptimizationPass):
                             f"at pos {insert_pos} (call ea={hex(call_ea)})")
                 for cb in chunk_blocks:
                     cb._absorbed = True
+        from pseudo8051.passes.debug_dump import dump_pass_hir
+        all_nodes = [n for b in func.blocks
+                     if not getattr(b, "_absorbed", False) for n in b.hir]
+        dump_pass_hir("chunk_inline", all_nodes, func.name)
 
 
 def _chunk_target(insn, func_ea: int) -> Optional[int]:

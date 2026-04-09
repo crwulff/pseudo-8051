@@ -147,9 +147,10 @@ class HIRNode(ABC):
                 active = ",".join(sorted(g.active_regs, key=lambda r: g.full_regs.index(r)
                                          if r in g.full_regs else 99))
                 full   = ",".join(g.full_regs)
+                regs   = active if active == full else f"{active}/{full}"
                 label  = f"param " if g.is_param else ""
                 xram   = f" @{g.xram_sym}" if g.xram_sym else ""
-                out.append(f"    {label}{g.name}: {g.type} [{active}/{full}]{xram}")
+                out.append(f"    {label}{g.name}: {g.type} [{regs}]{xram}")
         if ann.reg_consts:
             out.append("  ann.reg_consts: " +
                        ", ".join(f"{k}={v:#x}" for k, v in ann.reg_consts.items()))
@@ -159,16 +160,18 @@ class HIRNode(ABC):
                 active = ",".join(sorted(g.active_regs, key=lambda r: g.full_regs.index(r)
                                           if r in g.full_regs else 99))
                 full   = ",".join(g.full_regs)
+                regs   = active if active == full else f"{active}/{full}"
                 xram   = f" @{g.xram_sym}" if g.xram_sym else ""
-                out.append(f"    {g.name}: {g.type} [{active}/{full}]{xram}")
+                out.append(f"    {g.name}: {g.type} [{regs}]{xram}")
         if ann.callee_args is not None:
             out.append("  ann.callee_args:")
             for g in ann.callee_args:
                 active = ",".join(sorted(g.active_regs, key=lambda r: g.full_regs.index(r)
                                           if r in g.full_regs else 99))
                 full   = ",".join(g.full_regs)
+                regs   = active if active == full else f"{active}/{full}"
                 label  = "param " if g.is_param else "retval "
-                out.append(f"    {label}{g.name}: {g.type} [{active}/{full}]")
+                out.append(f"    {label}{g.name}: {g.type} [{regs}]")
         return out
 
     def name_refs(self) -> frozenset:

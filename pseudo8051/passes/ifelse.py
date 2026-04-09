@@ -324,6 +324,10 @@ class IfElseStructurer(OptimizationPass):
                 removed.extend(dead)
         if removed:
             dbg("ifelse", f"dead labels removed: {removed}")
+        from pseudo8051.passes.debug_dump import dump_pass_hir
+        all_nodes = [n for b in func.blocks
+                     if not getattr(b, "_absorbed", False) for n in b.hir]
+        dump_pass_hir("ifelse", all_nodes, func.name)
 
     def _try_structure(self, func: Function, block: BasicBlock) -> bool:
         succs = [s for s in block.successors
