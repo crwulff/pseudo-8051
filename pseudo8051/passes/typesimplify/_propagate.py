@@ -15,7 +15,7 @@ from typing import Dict, List, Optional, Tuple
 from pseudo8051.ir.hir import (HIRNode, Assign, TypedAssign, CompoundAssign,
                                 ExprStmt, ReturnStmt, IfGoto, IfNode,
                                 WhileNode, ForNode, DoWhileNode, NodeAnnotation)
-from pseudo8051.ir.expr import (Expr, BinOp, Call,
+from pseudo8051.ir.expr import (Expr, BinOp, Call, Const,
                                  Regs as RegExpr, Name as NameExpr)
 from pseudo8051.passes.patterns._utils import (
     VarInfo, _count_reg_uses_in_node, _subst_reg_in_node, _walk_expr,
@@ -249,6 +249,121 @@ def _propagate_register_copies(live: List[HIRNode],
     return [n for n in live if n is not None], changed
 
 
+# ── Sub-pass C: multi-register group setup inlining ──────────────────────────
+
+def _subst_group_in_call_node(node: HIRNode, regs_tuple: tuple,
+                               replacement: Expr) -> Optional[HIRNode]:
+    """Replace Regs(names==regs_tuple) in call args of node with replacement.
+
+    Returns a new node on success, None if the group is not found in any call arg.
+    """
+    def _patch(call: Call) -> Optional[Call]:
+        new_args = []
+        found = False
+        for a in call.args:
+            if isinstance(a, RegExpr) and not a.is_single and a.names == regs_tuple:
+                new_args.append(replacement)
+                found = True
+            else:
+                new_args.append(a)
+        return Call(call.func_name, new_args) if found else None
+
+    result: Optional[HIRNode] = None
+    if isinstance(node, TypedAssign) and isinstance(node.rhs, Call):
+        new_call = _patch(node.rhs)
+        if new_call is not None:
+            result = TypedAssign(node.ea, node.type_str, node.lhs, new_call)
+    elif isinstance(node, Assign) and isinstance(node.rhs, Call):
+        new_call = _patch(node.rhs)
+        if new_call is not None:
+            result = Assign(node.ea, node.lhs, new_call)
+    elif isinstance(node, ExprStmt) and isinstance(node.expr, Call):
+        new_call = _patch(node.expr)
+        if new_call is not None:
+            result = ExprStmt(node.ea, new_call)
+    if result is not None:
+        result.ann = node.ann
+    return result
+
+
+def _inline_group_setups(live: List[HIRNode],
+                          reg_map: Dict = {}) -> Tuple[List[HIRNode], bool]:
+    """
+    C: Fold single-use multi-register setup assignments into call arguments.
+
+    Transforms:
+      Assign(Regs(regs_tuple, alias=name), rhs)   [rhs is Const or Name]
+      ...  [no intervening use of any reg in the group]
+      call(..., Regs(regs_tuple, ...), ...)
+    →
+      call(..., rhs, ...)
+
+    Handles both plain Assign and TypedAssign (typed multi-byte setups).
+    """
+    changed = False
+    live = list(live)
+    i = 0
+    while i < len(live):
+        node = live[i]
+        if not (isinstance(node, Assign)
+                and isinstance(node.lhs, RegExpr)
+                and not node.lhs.is_single
+                and isinstance(node.rhs, (Const, NameExpr))):
+            i += 1
+            continue
+
+        regs_tuple = node.lhs.names
+        regs_set = set(regs_tuple)
+        rhs = node.rhs
+
+        # Find first downstream use of any register in the group.
+        # Stop scanning at the first kill (write) of any group register.
+        use_idx = None
+        conflict = False
+        for j in range(i + 1, len(live)):
+            nd = live[j]
+            uses = sum(_count_reg_uses_in_node(r, nd) for r in regs_tuple)
+            writes = nd.written_regs & regs_set
+            if uses > 0:
+                if use_idx is not None:
+                    conflict = True
+                    break
+                use_idx = j
+            if writes:
+                break  # killed (or used-then-killed at call site — stop either way)
+
+        if conflict or use_idx is None:
+            i += 1
+            continue
+
+        # Guard: don't inline past intermediate writes of names referenced in rhs.
+        if use_idx > i + 1:
+            rhs_refs = _expr_name_refs(rhs)
+            if rhs_refs:
+                mid_writes = _collect_mid_writes(live[i + 1:use_idx], reg_map)
+                if rhs_refs & mid_writes:
+                    dbg("typesimp",
+                        f"  [{hex(node.ea)}] prop-group: blocked — "
+                        f"intermediate writes {rhs_refs & mid_writes}")
+                    i += 1
+                    continue
+
+        new_use = _subst_group_in_call_node(live[use_idx], regs_tuple, rhs)
+        if new_use is None:
+            i += 1
+            continue
+
+        live[use_idx] = new_use
+        live[i] = None
+        dbg("typesimp",
+            f"  [{hex(node.ea)}] prop-group: folded {''.join(regs_tuple)} = "
+            f"{rhs.render()!r} into call")
+        changed = True
+        i += 1
+
+    return [n for n in live if n is not None], changed
+
+
 # ── Sub-pass B: retval inlining ───────────────────────────────────────────────
 
 def _inline_retvals(live: List[HIRNode],
@@ -343,6 +458,7 @@ def _propagate_values(nodes: List[HIRNode],
         work, c0 = _fold_compound_assigns(work)
         work, cA = _propagate_register_copies(work, reg_map)
         work, cB = _inline_retvals(work, reg_map)
-        changed = c0 or cA or cB
+        work, cC = _inline_group_setups(work, reg_map)
+        changed = c0 or cA or cB or cC
 
     return work
