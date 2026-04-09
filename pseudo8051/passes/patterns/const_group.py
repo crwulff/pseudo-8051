@@ -101,9 +101,16 @@ class ConstGroupPattern(Pattern):
              and "." not in v.name},
             key=lambda v: len(v.regs), reverse=True,
         )
+        if candidates:
+            node0 = nodes[i] if i < len(nodes) else None
+            dbg("typesimp",
+                f"  const-group @ {hex(node0.ea) if node0 else '?'}: "
+                f"candidates={[v.name for v in candidates]} "
+                f"node0={type(node0).__name__ if node0 else 'None'}")
         for vinfo in candidates:
             result = _scan_const_group(nodes, i, vinfo)
             if result is None:
+                dbg("typesimp", f"  const-group: {vinfo.name} scan failed")
                 continue
             value, end_i = result
             const_s = _const_str(value, vinfo.type)

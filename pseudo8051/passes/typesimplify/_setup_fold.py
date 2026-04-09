@@ -15,9 +15,23 @@ from pseudo8051.ir.hir import (HIRNode, Assign, CompoundAssign, ExprStmt,
 from pseudo8051.ir.expr import (Expr, Const, Call, BinOp, Paren,
                                  Reg as RegExpr, Regs as RegsExpr,
                                  RegGroup as RegGroupExpr, Name as NameExpr)
-from pseudo8051.passes.patterns._utils import TypeGroup, VarInfo, _count_reg_uses_in_node, _subst_reg_in_node
+from pseudo8051.passes.patterns._utils import TypeGroup, VarInfo, _count_reg_uses_in_node, _subst_reg_in_node, _const_str
 from pseudo8051.passes.typesimplify._dptr import _is_dptr_inc_node
 from pseudo8051.constants import dbg
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _resolve_const(expr: Expr, node: HIRNode) -> Expr:
+    """If expr is a single-register Regs and its value is known in node.ann.reg_consts,
+    return Const(val); otherwise return expr unchanged."""
+    if isinstance(expr, RegsExpr) and expr.is_single:
+        ann = getattr(node, 'ann', None)
+        if ann is not None:
+            val = ann.reg_consts.get(expr.name)
+            if val is not None:
+                return Const(val)
+    return expr
 
 
 # ── Predicates ────────────────────────────────────────────────────────────────
@@ -232,7 +246,7 @@ def _fold_call_arg_pairs(nodes: List[HIRNode],
         all_regs = set(regs_key)
         remaining_regs = all_regs - {r0}
 
-        byte_assigns: Dict[str, tuple] = {r0: (i, node.rhs)}
+        byte_assigns: Dict[str, tuple] = {r0: (i, _resolve_const(node.rhs, node))}
         interleaved: List[int] = []
         conflict = False
 
@@ -245,7 +259,7 @@ def _fold_call_arg_pairs(nodes: List[HIRNode],
 
             if (isinstance(nd, Assign) and isinstance(nd.lhs, RegsExpr) and nd.lhs.is_single
                     and nd.lhs.name in remaining_regs and not reads_pair):
-                byte_assigns[nd.lhs.name] = (k, nd.rhs)
+                byte_assigns[nd.lhs.name] = (k, _resolve_const(nd.rhs, nd))
                 remaining_regs -= {nd.lhs.name}
                 if not remaining_regs:
                     break
@@ -259,21 +273,6 @@ def _fold_call_arg_pairs(nodes: List[HIRNode],
             out.append(node)
             continue
 
-        # Build combined expression: (byte0 << (n-1)*8) | byte1 | ... | byte_{n-1}
-        n_bytes = len(regs_key)
-        ordered_exprs = [byte_assigns[r][1] for r in regs_key]
-
-        def _paren_if_binop(e: Expr) -> Expr:
-            return Paren(e) if isinstance(e, BinOp) else e
-
-        hi = _paren_if_binop(ordered_exprs[0])
-        combined: Expr = Paren(BinOp(hi, "<<", Const((n_bytes - 1) * 8)))
-        for b in range(1, n_bytes):
-            shift = (n_bytes - 1 - b) * 8
-            lo = _paren_if_binop(ordered_exprs[b])
-            term: Expr = Paren(BinOp(lo, "<<", Const(shift))) if shift > 0 else lo
-            combined = BinOp(combined, "|", term)
-
         # Prefer naming from consumed nodes' call_arg_ann over global pair_groups,
         # since pair_groups uses setdefault and a different callee's annotation may
         # have won for the same register tuple.
@@ -286,6 +285,36 @@ def _fold_call_arg_pairs(nodes: List[HIRNode],
                 if ca_g is not None and ca_g.full_regs == regs_key:
                     naming_vinfo = ca_g
                     break
+
+        # Build combined expression: (byte0 << (n-1)*8) | byte1 | ... | byte_{n-1}
+        n_bytes = len(regs_key)
+        ordered_exprs = [byte_assigns[r][1] for r in regs_key]
+
+        dbg("typesimp",
+            f"  [{hex(node.ea)}] fold-call-arg-pair exprs: "
+            + ", ".join(f"{type(e).__name__}({e.render()!r})" for e in ordered_exprs))
+        if all(isinstance(e, Const) for e in ordered_exprs):
+            # All bytes are known constants — fold to a single integer Const.
+            int_val = 0
+            for b, e in enumerate(ordered_exprs):
+                int_val = (int_val << 8) | (e.value & 0xFF)
+            alias = _const_str(int_val, naming_vinfo.type) if naming_vinfo.type else None
+            combined: Expr = Const(int_val, alias=alias)
+            dbg("typesimp",
+                f"  [{hex(node.ea)}] fold-call-arg-pair → const {combined.render()!r}")
+        else:
+            def _paren_if_binop(e: Expr) -> Expr:
+                return Paren(e) if isinstance(e, BinOp) else e
+
+            hi = _paren_if_binop(ordered_exprs[0])
+            combined: Expr = Paren(BinOp(hi, "<<", Const((n_bytes - 1) * 8)))
+            for b in range(1, n_bytes):
+                shift = (n_bytes - 1 - b) * 8
+                lo = _paren_if_binop(ordered_exprs[b])
+                term: Expr = Paren(BinOp(lo, "<<", Const(shift))) if shift > 0 else lo
+                combined = BinOp(combined, "|", term)
+            dbg("typesimp",
+                f"  [{hex(node.ea)}] fold-call-arg-pair → binop (not all Const)")
 
         if naming_vinfo.type and naming_vinfo.name:
             out.append(TypedAssign(node.ea, naming_vinfo.type,
