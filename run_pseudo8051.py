@@ -33,6 +33,7 @@ _RELOAD_ORDER = [
     "pseudo8051.ir.hir.statement",
     "pseudo8051.ir.hir.goto_statement",
     "pseudo8051.ir.hir.break_stmt",
+    "pseudo8051.ir.hir.continue_stmt",
     "pseudo8051.ir.hir.var_decl",
     "pseudo8051.ir.hir.computed_jump",
     "pseudo8051.ir.hir.label",

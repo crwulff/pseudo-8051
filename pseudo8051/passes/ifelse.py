@@ -243,6 +243,160 @@ def _replace_goto_in_hir(nodes: List[HIRNode], label: str,
     return result
 
 
+def _structure_flat_ifelse(nodes: List[HIRNode]) -> List[HIRNode]:
+    """
+    Apply if/else structuring to a flat HIR list containing IfGoto / GotoStatement /
+    Label nodes assembled from absorbed loop-body blocks.
+
+    Detects the diamond pattern::
+
+        IfGoto(cond, else_label)
+        [then_body]
+        GotoStatement(merge_label)
+        Label(else_label)+
+        [else_body]
+        Label(merge_label)+
+        [continuation]
+
+    and replaces it with ``IfNode(cond, then_body, else_body)`` followed by
+    ``Label(merge_label)`` + continuation.
+
+    Also detects the one-sided pattern::
+
+        IfGoto(cond, end_label)
+        [body]
+        Label(end_label)+
+
+    → ``IfNode(inverted_cond, body)  Label(end_label)``
+
+    The ``cond`` in ``IfGoto(cond, else_label)`` is the *jump* condition: when
+    cond is true the else-label arm executes, when false the fall-through executes.
+    Accordingly the resulting IfNode keeps cond with the jumped-to arm as
+    ``then_nodes`` and the fall-through as ``else_nodes``, matching the convention
+    used by ``IfElseStructurer``.
+
+    Recurses into existing structured node bodies via ``map_bodies``.
+    Iterates until no further transformations are possible.
+    """
+    # Recurse into existing structured nodes before trying this level
+    nodes = [node.map_bodies(_structure_flat_ifelse) for node in nodes]
+    changed = True
+    while changed:
+        nodes, changed = _structure_flat_ifelse_pass(nodes)
+    return nodes
+
+
+def _structure_flat_ifelse_pass(nodes: List[HIRNode]) -> Tuple[List[HIRNode], bool]:
+    """Single scan of ``_structure_flat_ifelse``. Returns (new_nodes, changed)."""
+    result = list(nodes)
+    i = 0
+    while i < len(result):
+        node = result[i]
+        if not isinstance(node, IfGoto):
+            i += 1
+            continue
+
+        cond       = node.cond
+        else_label = node.label   # IfGoto jumps here when condition is TRUE
+
+        # Find the first Label(else_label) after position i.
+        else_pos: Optional[int] = None
+        for k in range(i + 1, len(result)):
+            if isinstance(result[k], Label) and result[k].name == else_label:
+                else_pos = k
+                break
+
+        if else_pos is None:
+            i += 1
+            continue
+
+        # Look for a GotoStatement between IfGoto and else_label.
+        # Take the LAST one — it is the end-of-then-body jump to the merge label.
+        goto_pos: Optional[int] = None
+        merge_label: Optional[str] = None
+        for k in range(i + 1, else_pos):
+            if isinstance(result[k], GotoStatement):
+                goto_pos = k
+                merge_label = result[k].label
+
+        if goto_pos is not None:
+            # ── Full diamond: IfGoto / then / goto(merge) / else_label / else / merge ──
+
+            # fall-through arm: between IfGoto and GotoStatement (exclusive)
+            fall_through = result[i + 1:goto_pos]
+
+            # Find Label(merge_label) at or after else_pos
+            merge_pos: Optional[int] = None
+            for k in range(else_pos, len(result)):
+                if isinstance(result[k], Label) and result[k].name == merge_label:
+                    merge_pos = k
+                    break
+
+            if merge_pos is None:
+                i += 1
+                continue
+
+            # jumped-to arm: after else_label Labels, up to merge_label
+            else_start = else_pos
+            while (else_start < merge_pos
+                   and isinstance(result[else_start], Label)
+                   and result[else_start].name == else_label):
+                else_start += 1
+            jumped_to = result[else_start:merge_pos]
+
+            # Convention: then_nodes = jumped-to (cond true), else_nodes = fall-through.
+            # Canonical swap: if then is empty and else isn't, invert and swap.
+            then_nodes = jumped_to
+            else_nodes = fall_through
+            eff_cond   = cond
+            then_nonempty = any(not isinstance(n, Label) for n in then_nodes)
+            else_nonempty = any(not isinstance(n, Label) for n in else_nodes)
+            if not then_nonempty and else_nonempty:
+                eff_cond   = _invert_condition(cond)
+                then_nodes = else_nodes
+                else_nodes = []
+
+            if not then_nonempty and not else_nonempty:
+                i += 1
+                continue
+
+            if_node = IfNode(node.ea, eff_cond, then_nodes, else_nodes)
+            if_node.ann = node.ann
+
+            # Keep one merge label (dead-label cleanup removes it if unreferenced)
+            merge_label_node = result[merge_pos]
+            next_pos = merge_pos + 1
+            while (next_pos < len(result)
+                   and isinstance(result[next_pos], Label)
+                   and result[next_pos].name == merge_label):
+                next_pos += 1
+
+            result = result[:i] + [if_node, merge_label_node] + result[next_pos:]
+            return result, True   # restart to find nested patterns
+
+        else:
+            # ── One-sided: IfGoto(cond, end) / body / Label(end) ──
+            body = result[i + 1:else_pos]
+            body_nonempty = any(not isinstance(n, Label) for n in body)
+            if body_nonempty:
+                # Invert: cond-true means skip body; so body runs when cond is false
+                inv_cond = _invert_condition(cond)
+                if_node  = IfNode(node.ea, inv_cond, body, [])
+                if_node.ann = node.ann
+                end_label_node = result[else_pos]
+                next_pos = else_pos + 1
+                while (next_pos < len(result)
+                       and isinstance(result[next_pos], Label)
+                       and result[next_pos].name == else_label):
+                    next_pos += 1
+                result = result[:i] + [if_node, end_label_node] + result[next_pos:]
+                return result, True
+
+        i += 1
+
+    return result, False
+
+
 def _remove_nop_gotos(nodes: List[HIRNode]) -> List[HIRNode]:
     """
     Remove IfGoto(cond, label_X) when Label(label_X) is the immediately following

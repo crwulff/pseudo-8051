@@ -4,7 +4,7 @@ ir/hir/while_node.py — WhileNode structured control-flow node.
 
 from typing import Callable, List, Tuple
 
-from pseudo8051.ir.hir._base import HIRNode, _render_cond, _ann_field, _Cond, _killed_by_seq
+from pseudo8051.ir.hir._base import HIRNode, _render_cond, _ann_field, _Cond, _killed_by_seq, _refs_from_expr
 
 
 class WhileNode(HIRNode):
@@ -44,7 +44,10 @@ class WhileNode(HIRNode):
         return lines
 
     def name_refs(self) -> frozenset:
-        return frozenset().union(*(n.name_refs() for n in self.body_nodes))
+        from pseudo8051.ir.expr import Expr
+        cond_refs = _refs_from_expr(self.condition) if isinstance(self.condition, Expr) else frozenset()
+        body_refs = frozenset().union(*(n.name_refs() for n in self.body_nodes))
+        return cond_refs | body_refs
 
     def ann_lines(self) -> List[str]:
         return (["WhileNode"] + _ann_field("cond", self.condition)

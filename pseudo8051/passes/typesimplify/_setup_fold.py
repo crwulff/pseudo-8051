@@ -12,7 +12,7 @@ from typing import Dict, List, Optional
 from pseudo8051.ir.hir import (HIRNode, Assign, CompoundAssign, ExprStmt,
                                 ReturnStmt, IfGoto, IfNode, WhileNode, ForNode,
                                 DoWhileNode, SwitchNode, TypedAssign,
-                                GotoStatement, Label)
+                                GotoStatement, Label, BreakStmt, ContinueStmt)
 from pseudo8051.ir.expr import (Expr, Const, Call, BinOp, Paren,
                                  Reg as RegExpr, Regs as RegsExpr,
                                  RegGroup as RegGroupExpr, Name as NameExpr)
@@ -84,11 +84,12 @@ def _first_kill_before_read(reg: str, nodes: List[HIRNode]) -> bool:
     for node in nodes:
         if isinstance(node, (IfNode, WhileNode, ForNode, DoWhileNode, SwitchNode)):
             return False
-        # GotoStatement and Label indicate control-flow boundaries: a goto jumps
-        # over subsequent flat code (so R6=kill after goto may not be on every
-        # path), and a label is a merge point where different predecessors may
-        # carry different values.  Return False (conservative) in both cases.
-        if isinstance(node, (GotoStatement, Label)):
+        # GotoStatement/BreakStmt/ContinueStmt/Label indicate control-flow
+        # boundaries: a goto/break/continue jumps over subsequent flat code (so
+        # a kill after one may not be on every path), and a label is a merge
+        # point where different predecessors may carry different values.
+        # Return False (conservative) in all cases.
+        if isinstance(node, (GotoStatement, Label, BreakStmt, ContinueStmt)):
             return False
         if (isinstance(node, CompoundAssign)
                 and node.lhs == RegExpr(reg)):

@@ -4,7 +4,7 @@ ir/hir/for_node.py — ForNode structured control-flow node.
 
 from typing import Callable, List, Tuple, Union
 
-from pseudo8051.ir.hir._base import HIRNode, _render_expr, _render_cond, _ann_field, _Cond, _killed_by_seq
+from pseudo8051.ir.hir._base import HIRNode, _render_expr, _render_cond, _ann_field, _Cond, _killed_by_seq, _refs_from_expr
 from pseudo8051.ir.hir.assign import Assign
 from pseudo8051.ir.expr import Expr
 
@@ -65,7 +65,10 @@ class ForNode(HIRNode):
         return lines
 
     def name_refs(self) -> frozenset:
-        return frozenset().union(*(n.name_refs() for n in self.body_nodes))
+        cond_refs = _refs_from_expr(self.condition) if isinstance(self.condition, Expr) else frozenset()
+        upd_refs  = _refs_from_expr(self.update)    if isinstance(self.update,    Expr) else frozenset()
+        body_refs = frozenset().union(*(n.name_refs() for n in self.body_nodes))
+        return cond_refs | upd_refs | body_refs
 
     def ann_lines(self) -> List[str]:
         return (["ForNode"] + _ann_field("init", self.init)

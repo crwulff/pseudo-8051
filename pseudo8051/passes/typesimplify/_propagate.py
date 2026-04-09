@@ -15,7 +15,7 @@ from typing import Dict, List, Optional, Tuple
 from pseudo8051.ir.hir import (HIRNode, Assign, TypedAssign, CompoundAssign,
                                 ExprStmt, ReturnStmt, IfGoto, IfNode,
                                 WhileNode, ForNode, DoWhileNode, NodeAnnotation,
-                                Label, GotoStatement)
+                                Label, GotoStatement, BreakStmt, ContinueStmt)
 from pseudo8051.ir.expr import (Expr, BinOp, Call, Const,
                                  Regs as RegExpr, Name as NameExpr)
 from pseudo8051.passes.patterns._utils import (
@@ -192,9 +192,9 @@ def _propagate_register_copies(live: List[HIRNode],
         for j in range(i + 1, len(live)):
             # Label nodes are control-flow merge points: different predecessors
             # may carry different register values, so we cannot propagate past them.
-            # GotoStatement is an unconditional jump: fall-through code after it is
-            # unreachable from this path, so we also stop scanning there.
-            if isinstance(live[j], (Label, GotoStatement)):
+            # GotoStatement/BreakStmt/ContinueStmt are unconditional jumps: fall-
+            # through code after them is unreachable from this path.
+            if isinstance(live[j], (Label, GotoStatement, BreakStmt, ContinueStmt)):
                 break
             written = live[j].written_regs
             uses_here = _count_reg_uses_in_node(r, live[j])

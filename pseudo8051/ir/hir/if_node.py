@@ -4,7 +4,7 @@ ir/hir/if_node.py — IfNode structured control-flow node.
 
 from typing import Callable, List, Optional, Tuple
 
-from pseudo8051.ir.hir._base import HIRNode, _render_cond, _ann_field, _Cond, _killed_by_seq
+from pseudo8051.ir.hir._base import HIRNode, _render_cond, _ann_field, _Cond, _killed_by_seq, _refs_from_expr
 
 
 class IfNode(HIRNode):
@@ -47,7 +47,10 @@ class IfNode(HIRNode):
         return lines
 
     def name_refs(self) -> frozenset:
-        return frozenset().union(*(n.name_refs() for n in self.then_nodes + self.else_nodes))
+        from pseudo8051.ir.expr import Expr
+        cond_refs = _refs_from_expr(self.condition) if isinstance(self.condition, Expr) else frozenset()
+        body_refs = frozenset().union(*(n.name_refs() for n in self.then_nodes + self.else_nodes))
+        return cond_refs | body_refs
 
     def replace_condition(self, new_cond) -> "IfNode":
         return IfNode(self.ea, new_cond, self.then_nodes, self.else_nodes)

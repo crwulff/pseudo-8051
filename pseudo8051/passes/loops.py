@@ -22,7 +22,8 @@ from typing import List, Set, Optional, Tuple
 
 from pseudo8051.ir.hir      import (HIRNode, Assign, CompoundAssign, ExprStmt,
                                     WhileNode, ForNode, DoWhileNode, Label,
-                                    IfGoto, GotoStatement, IfNode)
+                                    IfGoto, GotoStatement, IfNode,
+                                    BreakStmt, ContinueStmt)
 from pseudo8051.ir.expr     import Expr, Reg, Regs, Const, BinOp, UnaryOp
 from pseudo8051.passes      import OptimizationPass
 from pseudo8051.constants import dbg
@@ -185,6 +186,49 @@ def _extract_dowhile_cond(tail: "BasicBlock", header: "BasicBlock",
     return None
 
 
+def _replace_exits_and_continues(nodes: List[HIRNode],
+                                  exit_labels: Set[str],
+                                  continue_labels: Set[str]) -> List[HIRNode]:
+    """
+    Replace unconditional and conditional jumps to loop exits/headers with
+    structured break/continue nodes.
+
+    ``GotoStatement(exit_label)``   → ``BreakStmt``
+    ``GotoStatement(header_label)`` → ``ContinueStmt``
+    ``IfGoto(cond, exit_label)``    → ``IfNode(cond, [BreakStmt], [])``
+    ``IfGoto(cond, header_label)``  → ``IfNode(cond, [ContinueStmt], [])``
+
+    Only the flat top-level list is processed; the caller is responsible for
+    recursing into already-structured sub-bodies if needed.
+    """
+    result: List[HIRNode] = []
+    for node in nodes:
+        if isinstance(node, GotoStatement):
+            if node.label in exit_labels:
+                n = BreakStmt(node.ea)
+                n.ann = node.ann
+                result.append(n)
+                continue
+            if node.label in continue_labels:
+                n = ContinueStmt(node.ea)
+                n.ann = node.ann
+                result.append(n)
+                continue
+        elif isinstance(node, IfGoto):
+            if node.label in exit_labels:
+                bs = BreakStmt(node.ea)
+                bs.ann = node.ann
+                result.append(IfNode(node.ea, node.cond, [bs], []))
+                continue
+            if node.label in continue_labels:
+                cs = ContinueStmt(node.ea)
+                cs.ann = node.ann
+                result.append(IfNode(node.ea, node.cond, [cs], []))
+                continue
+        result.append(node)
+    return result
+
+
 class LoopStructurer(OptimizationPass):
     """
     Detect natural loops via back-edges and replace them with WhileNode /
@@ -293,6 +337,31 @@ class LoopStructurer(OptimizationPass):
         # ── Build body HIR ────────────────────────────────────────────────
         body_hir: List[HIRNode] = self._build_body_hir(
             body_blocks, header, primary_tail, secondary_tails)
+
+        # Replace GotoStatement/IfGoto to the loop exit with break/continue
+        # so that _structure_flat_ifelse can fold them into proper if-nodes.
+        exit_labels: Set[str] = set()
+        for exit_ea in header_exits:
+            exit_blk = func._block_map.get(exit_ea)
+            if exit_blk:
+                exit_labels.add(exit_blk.label or
+                                 f"label_{hex(exit_ea).removeprefix('0x')}")
+
+        continue_labels: Set[str] = set()
+        if header.label:
+            continue_labels.add(header.label)
+        # Also include the synthetic label form in case the block was
+        # referenced that way in any GotoStatement
+        continue_labels.add(f"label_{hex(header.start_ea).removeprefix('0x')}")
+
+        body_hir = _replace_exits_and_continues(body_hir, exit_labels, continue_labels)
+
+        # Apply flat if/else structuring to the assembled body.
+        # The IfElseStructurer runs at block-CFG level AFTER this pass and
+        # cannot see absorbed blocks; this handles diamond patterns within
+        # the loop body that are now flattened into IfGoto/GotoStatement/Label.
+        from pseudo8051.passes.ifelse import _structure_flat_ifelse
+        body_hir = _structure_flat_ifelse(body_hir)
 
         # ── Header HIR: keep non-branch statements (loop-entry init) ────
         header_stmts: List[HIRNode] = []

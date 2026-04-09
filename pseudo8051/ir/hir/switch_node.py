@@ -4,7 +4,7 @@ ir/hir/switch_node.py — SwitchNode structured control-flow node.
 
 from typing import Callable, List, Optional, Tuple, Union
 
-from pseudo8051.ir.hir._base import HIRNode, _render_expr, _ann_field, _killed_by_seq
+from pseudo8051.ir.hir._base import HIRNode, _render_expr, _ann_field, _killed_by_seq, _refs_from_expr
 from pseudo8051.ir.expr import Expr
 
 
@@ -100,6 +100,16 @@ class SwitchNode(HIRNode):
         if self.default_body is not None:
             result |= _killed_by_seq(self.default_body)
         return result
+
+    def name_refs(self) -> frozenset:
+        subject_refs = _refs_from_expr(self.subject)
+        body_refs: frozenset = frozenset()
+        for _, body in self.cases:
+            if isinstance(body, list):
+                body_refs = body_refs.union(*(n.name_refs() for n in body))
+        if self.default_body is not None:
+            body_refs = body_refs.union(*(n.name_refs() for n in self.default_body))
+        return subject_refs | body_refs
 
     def ann_lines(self) -> List[str]:
         out = (["SwitchNode"] + _ann_field("subject", self.subject)

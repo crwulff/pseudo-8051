@@ -17,6 +17,7 @@ from pseudo8051.ir.hir.if_goto        import IfGoto                       # noqa
 from pseudo8051.ir.hir.statement      import Statement                    # noqa: F401
 from pseudo8051.ir.hir.goto_statement import GotoStatement                # noqa: F401
 from pseudo8051.ir.hir.break_stmt     import BreakStmt                    # noqa: F401
+from pseudo8051.ir.hir.continue_stmt  import ContinueStmt                  # noqa: F401
 from pseudo8051.ir.hir.var_decl       import VarDecl                      # noqa: F401
 from pseudo8051.ir.hir.computed_jump  import ComputedJump                 # noqa: F401
 from pseudo8051.ir.hir.label          import Label                        # noqa: F401
