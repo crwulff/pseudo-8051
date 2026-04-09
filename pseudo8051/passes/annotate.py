@@ -509,6 +509,21 @@ class AnnotationPass(OptimizationPass):
                     elif r in ("DPH", "DPL"):
                         const_state.pop("DPTR", None)
 
+                # SUBB/ADDC pattern: CompoundAssign A-=... or A+=... whose RHS
+                # references C means this instruction writes the carry flag C as
+                # its output (borrow/carry result).  Kill any stale C=0 from a
+                # preceding CLR C so it doesn't propagate past the arithmetic.
+                if (isinstance(node, CompoundAssign)
+                        and node.op in ("-=", "+=")
+                        and "C" in const_state):
+                    from pseudo8051.ir.expr import Regs as _RegsExpr
+                    def _rhs_uses_carry(e) -> bool:
+                        if isinstance(e, _RegsExpr) and e.names == ('C',):
+                            return True
+                        return any(_rhs_uses_carry(c) for c in e.children())
+                    if _rhs_uses_carry(node.rhs):
+                        const_state.pop("C", None)
+
                 # (e) Forward-propagate new constant produced by this node
                 _propagate_const(node, const_state)
 

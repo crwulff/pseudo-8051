@@ -39,7 +39,8 @@ class AddcHandler(MnemonicHandler):
         return frozenset(u & PARAM_REGS)
 
     def defs(self, insn) -> frozenset:
-        return frozenset({"A"})
+        # ADDC writes A and also sets the carry flag C as output
+        return frozenset({"A", "C"})
 
     def lift(self, insn, state=None) -> List[HIRNode]:
         rhs = BinOp(_op_expr(insn, 1, state), "+", Reg("C"))
@@ -54,7 +55,8 @@ class SubbHandler(MnemonicHandler):
         return frozenset(u & PARAM_REGS)
 
     def defs(self, insn) -> frozenset:
-        return frozenset({"A"})
+        # SUBB writes A and also sets the carry flag C as borrow output
+        return frozenset({"A", "C"})
 
     def lift(self, insn, state=None) -> List[HIRNode]:
         rhs = BinOp(_op_expr(insn, 1, state), "+", Reg("C"))

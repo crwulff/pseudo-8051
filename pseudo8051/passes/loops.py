@@ -239,6 +239,28 @@ class LoopStructurer(OptimizationPass):
         for t in tails:
             body_eas |= _collect_loop_body(header, t)
 
+        # Forward extension: also include blocks whose all predecessors are
+        # already in the body but that exit the loop early (e.g. an early-break
+        # block that jumps to the loop exit via a GotoStatement).
+        # Only unlabeled blocks are eligible — labeled blocks are jump targets
+        # (goto/IfGoto destinations) which are either explicit loop exits or
+        # if-else branch targets; their placement is deliberate.
+        # Also exclude the loop header's exit targets explicitly.
+        header_exits: Set[int] = {s.start_ea for s in header.successors
+                                   if s.start_ea not in body_eas}
+        changed = True
+        while changed:
+            changed = False
+            for blk in func.blocks:
+                ea = blk.start_ea
+                if ea in body_eas or ea in header_exits or blk.label:
+                    continue
+                if blk.predecessors and all(p.start_ea in body_eas
+                                             for p in blk.predecessors):
+                    body_eas.add(ea)
+                    changed = True
+                    dbg("loops", f"  forward-extend body: +{hex(ea)}")
+
         # Body blocks sorted by EA (excluding header)
         body_blocks: List[BasicBlock] = sorted(
             (func._block_map[ea] for ea in body_eas
