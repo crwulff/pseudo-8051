@@ -63,8 +63,7 @@ def _simplify_bool_str(cond: str) -> str:
 def _tg_to_varinfo(tg: TypeGroup) -> VarInfo:
     """Convert a TypeGroup to a VarInfo for pattern compat (uses full_regs)."""
     return VarInfo(tg.name, tg.type, tg.full_regs,
-                   xram_sym=tg.xram_sym, is_param=tg.is_param,
-                   is_retval_field=False)
+                   xram_sym=tg.xram_sym, is_param=tg.is_param)
 
 
 def _varinfo_to_groups(reg_map: Dict) -> List[TypeGroup]:
@@ -118,14 +117,33 @@ def _absorb_eff_mutations(eff: Dict, pre_eff: Dict,
                            extra_groups: List[TypeGroup],
                            killed_regs: FrozenSet[str]
                            ) -> Tuple[List[TypeGroup], FrozenSet[str]]:
-    """Detect new/changed VarInfo entries in eff after a pattern ran.
+    """Detect new/changed/deleted VarInfo entries in eff after a pattern ran.
 
-    Converts each mutation to a TypeGroup and merges into extra_groups via
-    eviction of overlapping active_regs.  Newly installed registers are removed
-    from killed_regs so they can appear in subsequent reg_groups lookups.
+    New or changed entries → TypeGroup added to extra_groups (evicts overlapping).
+    Deleted entries (present in pre_eff but removed from eff by the pattern) → those
+    registers are killed from extra_groups so they cannot reappear as stale candidates.
+    Newly installed registers are removed from killed_regs.
     """
     result = list(extra_groups)
     new_killed = set(killed_regs)
+
+    # Deletions: regs that patterns explicitly removed from eff.
+    for k, v_before in pre_eff.items():
+        if k in eff:
+            continue
+        if not isinstance(v_before, VarInfo) or v_before.xram_sym or k == "__n__":
+            continue
+        if not v_before.regs or k not in v_before.regs:
+            continue
+        result2: List[TypeGroup] = []
+        for g in result:
+            ng = g.killed(k) if k in g.active_regs else g
+            if ng is not None:
+                result2.append(ng)
+        result = result2
+        new_killed.add(k)
+
+    # Additions/changes: new or mutated VarInfo entries.
     seen_vi_ids: set = set()
     for k, v in eff.items():
         if not isinstance(v, VarInfo) or v.xram_sym or k == "__n__":
@@ -162,7 +180,6 @@ def _build_node_eff(node: HIRNode,
       4. reg_groups (annotation snapshot) — setdefault, skip killed_regs
       5. call_arg_ann non-written regs — setdefault
       6. callee_args         — setdefault (lowest)
-    Stale is_retval_field entries for written regs are evicted at the end.
     """
     eff: Dict = dict(xram_map)
     if counter is not None:
@@ -224,15 +241,6 @@ def _build_node_eff(node: HIRNode,
                 eff.setdefault(r, vi)
             if len(tg.full_regs) > 1:
                 eff.setdefault(tg.pair_name, vi)
-
-    # Evict stale is_retval_field entries for written registers.
-    for r in written:
-        old_vi = eff.get(r)
-        if (old_vi is not None and isinstance(old_vi, VarInfo)
-                and old_vi.is_retval_field and old_vi.regs and not old_vi.xram_sym):
-            for old_r in old_vi.regs:
-                if eff.get(old_r) is old_vi:
-                    del eff[old_r]
 
     return eff
 

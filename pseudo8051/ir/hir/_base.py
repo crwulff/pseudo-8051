@@ -62,53 +62,6 @@ class NodeAnnotation:
                 return g
         return None
 
-    # ── Compat shim: reg_names dict built on demand from reg_groups ───────────
-
-    @property
-    def reg_names(self) -> "Dict[str, VarInfo]":
-        """Legacy dict view of reg_groups for code not yet migrated to TypeGroup."""
-        from pseudo8051.passes.patterns._utils import VarInfo as _VI
-        d: Dict[str, _VI] = {}
-        for g in self.reg_groups:
-            vi = _VI(g.name, g.type, g.full_regs,
-                     xram_sym=g.xram_sym, is_param=g.is_param,
-                     xram_addr=g.xram_addr,
-                     is_retval=False)
-            for r in g.active_regs:
-                d[r] = vi
-        return d
-
-    @property
-    def call_arg_names(self) -> "Dict[str, VarInfo]":
-        """Legacy dict view of call_arg_ann for code not yet migrated to TypeGroup."""
-        from pseudo8051.passes.patterns._utils import VarInfo as _VI
-        d: Dict[str, _VI] = {}
-        for g in self.call_arg_ann:
-            vi = _VI(g.name, g.type, g.full_regs,
-                     xram_sym=g.xram_sym, is_param=g.is_param,
-                     xram_addr=g.xram_addr, is_retval=False)
-            if g.xram_sym and not g.full_regs:
-                # XRAM-backed: index by xram_sym key
-                d[g.xram_sym] = vi
-            else:
-                for r in g.active_regs:
-                    d[r] = vi
-        return d
-
-    @property
-    def callee_args_dict(self) -> "Optional[Dict[str, VarInfo]]":
-        """Legacy dict view of callee_args for code not yet migrated to TypeGroup."""
-        if self.callee_args is None:
-            return None
-        from pseudo8051.passes.patterns._utils import VarInfo as _VI
-        d: Dict[str, _VI] = {}
-        for g in self.callee_args:
-            vi = _VI(g.name, g.type, g.full_regs,
-                     xram_sym=g.xram_sym, is_param=g.is_param,
-                     xram_addr=g.xram_addr, is_retval=False)
-            for r in g.active_regs:
-                d[r] = vi
-        return d
 
 
 class HIRNode(ABC):

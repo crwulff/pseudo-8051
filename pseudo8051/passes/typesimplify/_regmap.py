@@ -59,8 +59,7 @@ def _split_struct_groups(retval_name: str, struct_type: str,
 
 def _split_struct_regs(retval_name: str, struct_type: str,
                         return_regs: Tuple[str, ...],
-                        reg_map: Dict[str, VarInfo],
-                        is_retval: bool = False) -> None:
+                        reg_map: Dict[str, VarInfo]) -> None:
     """Split a struct return type into per-field VarInfo entries in reg_map.
 
     For each field of the struct, creates a VarInfo with name
@@ -77,8 +76,7 @@ def _split_struct_regs(retval_name: str, struct_type: str,
             break
         field_regs = return_regs[reg_idx:reg_idx + field_bytes]
         field_name = f"{retval_name}.{field.name}"
-        vinfo = VarInfo(field_name, field.type, field_regs, is_retval=is_retval,
-                        is_retval_field=True)
+        vinfo = VarInfo(field_name, field.type, field_regs)
         for r in field_regs:
             reg_map[r] = vinfo
         dbg("typesimp", f"  struct-split: {field_name} ({field.type}) = {field_regs}")

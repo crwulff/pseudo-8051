@@ -62,6 +62,10 @@ class RegCopyGroupPattern(Pattern):
         new_info = VarInfo(vinfo.name, vinfo.type, tuple(dsts))
         for d in dsts:
             reg_map[d] = new_info
+        # Evict source registers so the source TypeGroup is killed from extra_groups
+        # and cannot appear as a stale ConstGroupPattern candidate.
+        for r in vinfo.regs:
+            reg_map.pop(r, None)
 
         dbg("typesimp",
             f"  reg-copy-group: {vinfo.name} {vinfo.regs!r} → {tuple(dsts)!r}, "

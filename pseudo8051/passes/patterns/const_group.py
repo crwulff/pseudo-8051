@@ -98,27 +98,9 @@ class ConstGroupPattern(Pattern):
         candidates = sorted(
             {v for v in reg_map.values()
              if isinstance(v, VarInfo) and len(v.regs) >= 2
-             and not v.is_retval_field},
+             and "." not in v.name},
             key=lambda v: len(v.regs), reverse=True,
         )
-        if not candidates:
-            # No named candidates in reg_map (e.g. all covered by stale retval_field
-            # entries that were excluded above).  Peek into the upcoming nodes'
-            # call_arg_ann: backward annotation from the following call may have
-            # decorated the Rn=A relay nodes (but not the A=const lead-in node that
-            # ConstGroupPattern starts from).
-            forward_vi: Dict[int, VarInfo] = {}
-            for peek in nodes[i : min(i + 20, len(nodes))]:
-                ann = getattr(peek, 'ann', None)
-                if ann is None:
-                    continue
-                for vi in ann.call_arg_names.values():
-                    if (isinstance(vi, VarInfo) and len(vi.regs) >= 2
-                            and not vi.is_retval_field):
-                        forward_vi[id(vi)] = vi
-            if forward_vi:
-                candidates = sorted(forward_vi.values(),
-                                    key=lambda v: len(v.regs), reverse=True)
         for vinfo in candidates:
             result = _scan_const_group(nodes, i, vinfo)
             if result is None:

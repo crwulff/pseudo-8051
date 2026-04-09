@@ -119,8 +119,7 @@ class VarInfo:
 
     def __init__(self, name: str, type_str: str, regs: Tuple[str, ...],
                  xram_sym: str = "", is_byte_field: bool = False,
-                 xram_addr: int = 0, is_param: bool = False,
-                 is_retval: bool = False, is_retval_field: bool = False):
+                 xram_addr: int = 0, is_param: bool = False):
         self.name          = name
         self.type          = type_str
         self.regs          = regs              # high → low order, e.g. ('R6', 'R7'); () for XRAM locals
@@ -129,8 +128,6 @@ class VarInfo:
         self.is_byte_field = is_byte_field     # True for per-byte entries of multi-byte XRAM locals
         self.xram_addr     = xram_addr         # raw integer XRAM address (0 for register vars)
         self.is_param      = is_param          # True only for params from the current function's proto
-        self.is_retval     = is_retval         # True for retval VarInfos seeded by annotation pass
-        self.is_retval_field = is_retval_field # True for struct retval field VarInfos (_split_struct_regs)
 
     @property
     def hi(self) -> Optional[str]:

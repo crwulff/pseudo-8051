@@ -15,7 +15,7 @@ from pseudo8051.ir.hir import (HIRNode, Assign, CompoundAssign, ExprStmt,
 from pseudo8051.ir.expr import (Expr, Const, Call, BinOp, Paren,
                                  Reg as RegExpr, Regs as RegsExpr,
                                  RegGroup as RegGroupExpr, Name as NameExpr)
-from pseudo8051.passes.patterns._utils import VarInfo, _count_reg_uses_in_node, _subst_reg_in_node
+from pseudo8051.passes.patterns._utils import TypeGroup, VarInfo, _count_reg_uses_in_node, _subst_reg_in_node
 from pseudo8051.passes.typesimplify._dptr import _is_dptr_inc_node
 from pseudo8051.constants import dbg
 
@@ -199,12 +199,12 @@ def _fold_call_arg_pairs(nodes: List[HIRNode],
         ann = getattr(node, "ann", None)
         if ann is None:
             continue
-        for r, v in ann.call_arg_names.items():
-            if isinstance(v, VarInfo) and len(v.regs) > 1 and r in v.regs:
-                key = tuple(v.regs)
+        for g in ann.call_arg_ann:
+            if len(g.full_regs) > 1:
+                key = g.full_regs
                 if key not in pair_groups:
-                    pair_groups[key] = v
-                for pr in key:
+                    pair_groups[key] = g
+                for pr in g.full_regs:
                     reg_to_pair.setdefault(pr, key)
 
     if not reg_to_pair:
@@ -282,10 +282,9 @@ def _fold_call_arg_pairs(nodes: List[HIRNode],
             nd_check = nodes[idx_check]
             ann_check = getattr(nd_check, "ann", None)
             if ann_check is not None:
-                ca_vi = ann_check.call_arg_names.get(r_check)
-                if (ca_vi is not None and isinstance(ca_vi, VarInfo)
-                        and tuple(ca_vi.regs) == regs_key):
-                    naming_vinfo = ca_vi
+                ca_g = ann_check.call_arg_for(r_check)
+                if ca_g is not None and ca_g.full_regs == regs_key:
+                    naming_vinfo = ca_g
                     break
 
         if naming_vinfo.type and naming_vinfo.name:
