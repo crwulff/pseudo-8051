@@ -195,16 +195,12 @@ def _collect_goto_targets(nodes: List[HIRNode]) -> set:
 
 
 def _drop_dead_labels(nodes: List[HIRNode], live: set) -> List[HIRNode]:
-    """Remove Label nodes whose names are not in live, and their blank lines."""
+    """Remove Label nodes whose names are not in live, recursing into structured bodies."""
     result: List[HIRNode] = []
     for node in nodes:
         if isinstance(node, Label) and node.name not in live:
-            # Also drop the blank line that Label.render() emits before itself;
-            # that blank line is baked into render() so nothing to strip here —
-            # but if the previous item in result is a blank Statement we could
-            # remove it.  Keep it simple: just skip the Label node itself.
             continue
-        result.append(node)
+        result.append(node.map_bodies(lambda ns: _drop_dead_labels(ns, live)))
     return result
 
 
