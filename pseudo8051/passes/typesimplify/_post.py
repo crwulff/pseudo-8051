@@ -9,6 +9,7 @@ to work without change.
 from pseudo8051.passes.typesimplify._dptr import (           # noqa: F401
     _is_dptr_inc_node,
     _collapse_dpl_dph,
+    _collapse_dpl_dph_arithmetic,
     _dptr_live_after,
     _prune_orphaned_dptr_inc,
 )

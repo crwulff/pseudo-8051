@@ -16,6 +16,7 @@ from pseudo8051.passes.typesimplify._regmap   import (
 from pseudo8051.passes.typesimplify._simplify import _simplify, _simplify_once
 from pseudo8051.passes.typesimplify._post     import (
     _consolidate_xram_local_loads, _collapse_dpl_dph,
+    _collapse_dpl_dph_arithmetic,
     _fold_and_prune_setups, _fold_call_arg_pairs, _propagate_values,
     _simplify_carry_comparison, _simplify_cjne_jnc,
     _simplify_orl_zero_check,
@@ -74,6 +75,12 @@ class TypeAwareSimplifier(OptimizationPass):
         func.hir = _simplify_once(func.hir, reg_map)
         func.hir = _fold_call_arg_pairs(func.hir, reg_map)
         func.hir = _collapse_dpl_dph(func.hir, reg_map)
+        # Early arithmetic-DPTR collapse: catches register pairs (e.g. R6R7) before
+        # _propagate_values substitutes the hi-byte register (R6 = A → A) and breaks
+        # the standard-pair check.  The second call after _simplify_arithmetic handles
+        # named byte-field pairs (var.hi / var.lo) that only become visible after
+        # type substitution in _simplify.
+        func.hir = _collapse_dpl_dph_arithmetic(func.hir)
         func.hir = _fold_and_prune_setups(func.hir, reg_map)
         # Remove cross-block nop-gotos in the assembled HIR (IfGoto whose target label
         # is the immediately following node in the flat list).  Must run before
@@ -91,6 +98,7 @@ class TypeAwareSimplifier(OptimizationPass):
         func.hir = _simplify_cjne_jnc(func.hir)
         func.hir = _simplify_orl_zero_check(func.hir)
         func.hir = _simplify_arithmetic(func.hir)
+        func.hir = _collapse_dpl_dph_arithmetic(func.hir)
 
         func.hir = collapse_mb_assigns(func.hir)
 
