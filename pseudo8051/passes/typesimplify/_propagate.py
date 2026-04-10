@@ -80,6 +80,15 @@ def _collect_mid_writes(nodes: List[HIRNode], reg_map: Dict) -> frozenset:
                     for reg_key, info in reg_map.items():
                         if isinstance(info, VarInfo) and info.name == lhs.name:
                             result.add(reg_key)
+    # DPTR is composed of DPH+DPL.  A write to either component changes the
+    # effective DPTR address, so treat DPH/DPL writes as writing DPTR (and vice
+    # versa) so that expressions referencing DPTR are blocked from propagating
+    # past DPH/DPL writes and vice versa.
+    if 'DPH' in result or 'DPL' in result:
+        result.add('DPTR')
+    if 'DPTR' in result:
+        result.add('DPH')
+        result.add('DPL')
     return frozenset(result)
 
 
