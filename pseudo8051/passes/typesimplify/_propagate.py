@@ -213,6 +213,31 @@ def _propagate_register_copies(live: List[HIRNode],
             if r in written:
                 kill_idx = j
                 break
+            # 8051: ADD (A += expr without C in rhs) implicitly sets C as carry.
+            # SUBB and ADDC both have C in their rhs (uses_here > 0), so they are
+            # excluded here and handled normally as a use site.
+            if (r == 'C'
+                    and uses_here == 0
+                    and isinstance(live[j], CompoundAssign)
+                    and isinstance(live[j].lhs, RegExpr)
+                    and live[j].lhs.is_single
+                    and live[j].lhs.name == 'A'
+                    and live[j].op in ('+=', '-=')):
+                kill_idx = j
+                break
+            # AccumFoldPattern may have already consumed the ADD instruction, folding
+            # it into Assign(DPL/DPH/A, BinOp(x, +/-, y)).  The original ADD still set C
+            # as a hardware side effect, so treat these folded arithmetic assigns as C-kills.
+            if (r == 'C'
+                    and uses_here == 0
+                    and isinstance(live[j], Assign)
+                    and isinstance(live[j].lhs, RegExpr)
+                    and live[j].lhs.is_single
+                    and live[j].lhs.name in ('A', 'DPL', 'DPH')
+                    and isinstance(live[j].rhs, BinOp)
+                    and live[j].rhs.op in ('+', '-')):
+                kill_idx = j
+                break
 
         dbg("propagate", f"  sub-A: {r}={replacement.render()!r} "
             f"total_uses={total_uses} kill_idx={kill_idx} "

@@ -25,7 +25,8 @@ class AddHandler(MnemonicHandler):
         return frozenset(u & PARAM_REGS)
 
     def defs(self, insn) -> frozenset:
-        return frozenset({"A"})
+        # ADD sets the carry flag C as well as A.
+        return frozenset({"A", "C"})
 
     def lift(self, insn, state=None) -> List[HIRNode]:
         return [CompoundAssign(insn.ea, Reg("A"), "+=", _op_expr(insn, 1, state))]
