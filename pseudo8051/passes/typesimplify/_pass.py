@@ -22,6 +22,7 @@ from pseudo8051.passes.typesimplify._post     import (
     _prune_orphaned_dptr_inc,
     _fold_return_chains,
     _fold_xram_call_args,
+    _simplify_arithmetic,
 )
 from pseudo8051.passes.typesimplify._enum_resolve import _resolve_enum_consts
 from pseudo8051.constants import dbg
@@ -89,6 +90,7 @@ class TypeAwareSimplifier(OptimizationPass):
         # Collapse CJNE(nop-goto) + JNC/JC → typed comparison (e.g. expr >= const).
         func.hir = _simplify_cjne_jnc(func.hir)
         func.hir = _simplify_orl_zero_check(func.hir)
+        func.hir = _simplify_arithmetic(func.hir)
 
         func.hir = collapse_mb_assigns(func.hir)
 

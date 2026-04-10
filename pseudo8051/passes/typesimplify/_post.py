@@ -35,6 +35,7 @@ from pseudo8051.passes.typesimplify._carry import (          # noqa: F401
     _simplify_carry_comparison,
     _simplify_cjne_jnc,
     _simplify_orl_zero_check,
+    _simplify_arithmetic,
 )
 from pseudo8051.passes.typesimplify._xram_call_args import ( # noqa: F401
     _fold_xram_call_args,

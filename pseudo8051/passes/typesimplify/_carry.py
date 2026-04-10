@@ -5,14 +5,16 @@ Exports:
   _simplify_carry_comparison   collapse CLR C + SUBB16 sequence in while-loop conditions
   _simplify_cjne_jnc           fold CJNE(nop-goto) + JNC/JC into typed comparisons
   _simplify_orl_zero_check     fold ORL + JZ idiom into multi-byte zero test
+  _simplify_arithmetic         remove identity +0/-0 and fold Const OP Const
 """
 
 import re
 from typing import List, Optional
 
-from pseudo8051.ir.hir import (HIRNode, Assign, CompoundAssign, ExprStmt,
-                                IfNode, IfGoto, WhileNode, Label)
-from pseudo8051.ir.expr import (BinOp, Const, UnaryOp,
+from pseudo8051.ir.hir import (HIRNode, Assign, TypedAssign, CompoundAssign,
+                                ExprStmt, ReturnStmt, IfNode, IfGoto,
+                                WhileNode, ForNode, DoWhileNode, Label)
+from pseudo8051.ir.expr import (Expr, BinOp, Const, UnaryOp,
                                  Reg, Regs as RegExpr,
                                  Name as NameExpr)
 from pseudo8051.constants import dbg
@@ -212,4 +214,89 @@ def _simplify_orl_zero_check(nodes: List[HIRNode]) -> List[HIRNode]:
                     continue
         result.append(node)
         i += 1
+    return result
+
+
+# ── Constant arithmetic folding ───────────────────────────────────────────────
+
+def _fold_const_expr(expr: Expr) -> Expr:
+    """Fold identity-zero and Const-OP-Const patterns in an expression (post-order)."""
+    from pseudo8051.passes.patterns._utils import _walk_expr
+
+    def _fold(e: Expr) -> Expr:
+        if not isinstance(e, BinOp):
+            return e
+        l, r, op = e.lhs, e.rhs, e.op
+        # Fold two literal constants (no alias — preserves enum names).
+        if isinstance(l, Const) and isinstance(r, Const) and not l.alias and not r.alias:
+            v, w = l.value, r.value
+            if op == '+':  return Const(v + w)
+            if op == '-':  return Const(v - w)
+            if op == '|':  return Const(v | w)
+            if op == '&':  return Const(v & w)
+            if op == '^':  return Const(v ^ w)
+        # x + 0  or  x - 0  →  x
+        if isinstance(r, Const) and r.value == 0 and not r.alias and op in ('+', '-'):
+            return l
+        # 0 + x  →  x
+        if isinstance(l, Const) and l.value == 0 and not l.alias and op == '+':
+            return r
+        return e
+
+    return _walk_expr(expr, _fold)
+
+
+def _simplify_arithmetic(nodes: List[HIRNode]) -> List[HIRNode]:
+    """
+    Recursively simplify constant arithmetic across all HIR nodes.
+
+    Removes identity operations (+0, -0, 0+) and folds Const OP Const pairs
+    that arise from constant-propagated carry/register values.
+    """
+    result = []
+    for node in nodes:
+        # Apply to conditions of structured nodes.
+        if isinstance(node, (IfNode, WhileNode, ForNode, DoWhileNode)):
+            if isinstance(node.condition, Expr):
+                new_cond = _fold_const_expr(node.condition)
+                if new_cond is not node.condition:
+                    node = node.replace_condition(new_cond)
+        # Apply to expression fields of leaf nodes.
+        elif isinstance(node, (Assign, TypedAssign)):
+            new_rhs = _fold_const_expr(node.rhs)
+            new_lhs = node.lhs if isinstance(node.lhs, RegExpr) else _fold_const_expr(node.lhs)
+            if new_rhs is not node.rhs or new_lhs is not node.lhs:
+                if isinstance(node, TypedAssign):
+                    n2 = TypedAssign(node.ea, node.type_str, new_lhs, new_rhs)
+                else:
+                    n2 = Assign(node.ea, new_lhs, new_rhs)
+                n2.ann = node.ann
+                node = n2
+        elif isinstance(node, CompoundAssign):
+            new_rhs = _fold_const_expr(node.rhs)
+            if new_rhs is not node.rhs:
+                n2 = CompoundAssign(node.ea, node.lhs, node.op, new_rhs)
+                n2.ann = node.ann
+                node = n2
+        elif isinstance(node, ExprStmt):
+            new_expr = _fold_const_expr(node.expr)
+            if new_expr is not node.expr:
+                n2 = ExprStmt(node.ea, new_expr)
+                n2.ann = node.ann
+                node = n2
+        elif isinstance(node, ReturnStmt) and node.value is not None:
+            new_val = _fold_const_expr(node.value)
+            if new_val is not node.value:
+                n2 = ReturnStmt(node.ea, new_val)
+                n2.ann = node.ann
+                node = n2
+        elif isinstance(node, IfGoto):
+            new_cond = _fold_const_expr(node.cond)
+            if new_cond is not node.cond:
+                n2 = IfGoto(node.ea, new_cond, node.label)
+                n2.ann = node.ann
+                node = n2
+        # Recurse into structured bodies.
+        node = node.map_bodies(_simplify_arithmetic)
+        result.append(node)
     return result
