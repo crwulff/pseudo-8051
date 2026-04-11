@@ -20,7 +20,9 @@ class DoWhileNode(HIRNode):
         self.body_nodes = body_nodes
 
     def map_bodies(self, fn: Callable[[List[HIRNode]], List[HIRNode]]) -> "DoWhileNode":
-        return DoWhileNode(self.ea, self.condition, fn(self.body_nodes))
+        n = DoWhileNode(self.ea, self.condition, fn(self.body_nodes))
+        n.ann = self.ann
+        return n
 
     def definitely_killed(self) -> frozenset:
         """Body executes at least once, so all sequential writes are definite kills."""

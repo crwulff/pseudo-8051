@@ -39,7 +39,9 @@ class ForNode(HIRNode):
         return str(self.init)
 
     def map_bodies(self, fn: Callable[[List[HIRNode]], List[HIRNode]]) -> "ForNode":
-        return ForNode(self.ea, self.init, self.condition, self.update, fn(self.body_nodes))
+        n = ForNode(self.ea, self.init, self.condition, self.update, fn(self.body_nodes))
+        n.ann = self.ann
+        return n
 
     def definitely_killed(self) -> frozenset:
         """Body may execute zero times, so no register is guaranteed killed."""

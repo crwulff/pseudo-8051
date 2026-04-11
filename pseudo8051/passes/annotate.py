@@ -366,9 +366,14 @@ class AnnotationPass(OptimizationPass):
                 entry_groups.append(tg)
             dbg("annotate", f"{func.name}: no proto, inferred entry_groups={[g.name for g in entry_groups]}")
 
-        # Add XRAM local var info (indexed by xram_sym)
+        # Add XRAM local and param var info (indexed by xram_sym).
+        # Both locals and params may be loaded via MOVX A,@DPTR; if the sym is
+        # known, set a TypeGroup on the destination register so that subsequent
+        # ACC.N bit tests (jb/jnb) can be resolved to the variable name.
         xram_locals: Dict = {}
+        from pseudo8051.passes.typesimplify._regmap import _augment_with_xram_params
         augmented = _augment_with_local_vars(func.ea, {})
+        augmented = _augment_with_xram_params(func.ea, augmented)
         for k, v in augmented.items():
             if isinstance(v, VarInfo) and v.xram_sym:
                 xram_locals[v.xram_sym] = v

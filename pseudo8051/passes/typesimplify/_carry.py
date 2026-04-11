@@ -422,7 +422,7 @@ def _a_value_before(nodes: List[HIRNode], idx: int) -> Optional[Expr]:
 
 
 def _c_condition(cond: Expr):
-    """Return ('C', True) if cond is Reg('C'), ('C', False) if !Reg('C'), else None."""
+    """Return True if cond is Reg('C'), False if !Reg('C'), else None."""
     if cond == Reg("C"):
         return True
     if isinstance(cond, UnaryOp) and cond.op == "!" and cond.operand == Reg("C"):
@@ -430,16 +430,34 @@ def _c_condition(cond: Expr):
     return None
 
 
+def _acc_bit_condition(cond: Expr):
+    """Return (bit, polarity) if cond is Name('ACC.N') or !Name('ACC.N'), else None."""
+    if isinstance(cond, NameExpr):
+        m = _ACC_BIT_RE.match(cond.name)
+        if m:
+            return int(m.group(1)), True
+    if isinstance(cond, UnaryOp) and cond.op == "!" and isinstance(cond.operand, NameExpr):
+        m = _ACC_BIT_RE.match(cond.operand.name)
+        if m:
+            return int(m.group(1)), False
+    return None
+
+
 def _simplify_acc_bit_test(nodes: List[HIRNode]) -> List[HIRNode]:
     """
-    Fold the 8051 bit-test idiom into a direct mask expression:
+    Fold 8051 bit-test idioms into direct mask expressions:
 
+    Indirect (via carry):
       A = expr;
       C = ACC.N;          ← MOV C, ACC.N copies bit N of A into the carry flag
       if (C) { ... }      →  if (expr & (1 << N)) { ... }
       if (!C) { ... }     →  if (!(expr & (1 << N))) { ... }
-
     The C = ACC.N node is removed; the A = expr node is kept unchanged.
+
+    Direct (jb/jnb ACC.N):
+      A = expr;
+      if (ACC.N) { ... }  →  if (expr & (1 << N)) { ... }
+      if (!ACC.N) { ... } →  if (!(expr & (1 << N))) { ... }
 
     Also handles WhileNode and IfGoto conditions.
     Works at the current nesting level; recurses into structured bodies.
@@ -451,51 +469,88 @@ def _simplify_acc_bit_test(nodes: List[HIRNode]) -> List[HIRNode]:
     replace: dict = {}                       # index → new condition for if/while/goto
 
     for i, node in enumerate(nodes):
-        # Match: C = ACC.N
-        if not (isinstance(node, Assign)
+        # ── Indirect path: C = ACC.N ──────────────────────────────────────────
+        if (isinstance(node, Assign)
                 and node.lhs == Reg("C")
                 and isinstance(node.rhs, NameExpr)):
+            m = _ACC_BIT_RE.match(node.rhs.name)
+            if m:
+                bit  = int(m.group(1))
+                mask = 1 << bit
+
+                # Find the value A held when the bit was sampled.
+                a_expr = _a_value_before(nodes, i)
+                if a_expr is None:
+                    continue
+
+                # Scan forward for the next use of C — must be an if/while/goto condition.
+                for j in range(i + 1, len(nodes)):
+                    succ = nodes[j]
+                    if "C" in succ.written_regs:
+                        break                        # C overwritten before any branch
+                    cond = None
+                    if isinstance(succ, (IfNode, WhileNode, ForNode, DoWhileNode)):
+                        cond = succ.condition
+                    elif isinstance(succ, IfGoto):
+                        cond = succ.cond
+                    if cond is not None:
+                        polarity = _c_condition(cond)
+                        if polarity is None:
+                            break                    # C is the condition but in an unexpected form
+                        bit_test = BinOp(a_expr, "&", Const(mask))
+                        new_cond = bit_test if polarity else UnaryOp("!", bit_test)
+                        remove.add(i)
+                        replace[j] = new_cond
+                        dbg("typesimp",
+                            f"  [{hex(node.ea)}] acc-bit-test(indirect): "
+                            f"C=ACC.{bit} → {'!' if not polarity else ''}"
+                            f"({a_expr.render()} & {hex(mask)})")
+                        break
+                    # Non-C node: safe to skip over as long as it does not read C in an
+                    # opaque way (structured nodes can hide C reads — stop conservatively).
+                    if isinstance(succ, _STRUCTURED):
+                        break
+                    if "C" in succ.name_refs():
+                        break                        # C read in a non-condition context
             continue
-        m = _ACC_BIT_RE.match(node.rhs.name)
-        if not m:
+
+        # ── Direct path: if (ACC.N) / if (!ACC.N) ────────────────────────────
+        cond = None
+        if isinstance(node, (IfNode, WhileNode, ForNode, DoWhileNode)):
+            cond = node.condition
+        elif isinstance(node, IfGoto):
+            cond = node.cond
+        if cond is None:
             continue
-        bit  = int(m.group(1))
+
+        parsed = _acc_bit_condition(cond)
+        if parsed is None:
+            continue
+        bit, polarity = parsed
         mask = 1 << bit
 
-        # Find the value A held when the bit was sampled.
+        # Find the value A held just before this branch.
+        # Primary path: scan HIR backward for Assign(A, expr).
         a_expr = _a_value_before(nodes, i)
+        # Fallback: use the annotation snapshot — the AnnotationPass forward-propagates
+        # a TypeGroup for A when A is loaded from a known XRAM address.  This fires when
+        # AccumRelay has already consumed the A= node (e.g. A=XRAM[x]; R7=A → R7=x).
+        if a_expr is None:
+            ann = getattr(node, 'ann', None)
+            if ann is not None:
+                tg = ann.group_for("A")
+                if tg is not None and tg.name:
+                    a_expr = NameExpr(tg.name)
         if a_expr is None:
             continue
 
-        # Scan forward for the next use of C — must be an if/while/goto condition.
-        for j in range(i + 1, len(nodes)):
-            succ = nodes[j]
-            if "C" in succ.written_regs:
-                break                        # C overwritten before any branch
-            cond = None
-            if isinstance(succ, (IfNode, WhileNode, ForNode, DoWhileNode)):
-                cond = succ.condition
-            elif isinstance(succ, IfGoto):
-                cond = succ.cond
-            if cond is not None:
-                polarity = _c_condition(cond)
-                if polarity is None:
-                    break                    # C is the condition but in an unexpected form
-                bit_test = BinOp(a_expr, "&", Const(mask))
-                new_cond = bit_test if polarity else UnaryOp("!", bit_test)
-                remove.add(i)
-                replace[j] = new_cond
-                dbg("typesimp",
-                    f"  [{hex(node.ea)}] acc-bit-test: "
-                    f"C=ACC.{bit} → {'!' if not polarity else ''}"
-                    f"({a_expr.render()} & {hex(mask)})")
-                break
-            # Non-C node: safe to skip over as long as it does not read C in an
-            # opaque way (structured nodes can hide C reads — stop conservatively).
-            if isinstance(succ, _STRUCTURED):
-                break
-            if "C" in succ.name_refs():
-                break                        # C read in a non-condition context
+        bit_test = BinOp(a_expr, "&", Const(mask))
+        new_cond = bit_test if polarity else UnaryOp("!", bit_test)
+        replace[i] = new_cond
+        dbg("typesimp",
+            f"  [{hex(node.ea)}] acc-bit-test(direct): "
+            f"ACC.{bit} → {'!' if not polarity else ''}"
+            f"({a_expr.render()} & {hex(mask)})")
 
     result = []
     for i, node in enumerate(nodes):

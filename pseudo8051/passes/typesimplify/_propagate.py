@@ -176,20 +176,28 @@ def _fold_compound_assigns(live: List[HIRNode]) -> Tuple[List[HIRNode], bool]:
 def _propagate_register_copies(live: List[HIRNode],
                                 reg_map: Dict = {}) -> Tuple[List[HIRNode], bool]:
     """
-    A: For each Assign(Reg(r), expr) at index i with exactly one downstream use
-    before r is written again, substitute the replacement into that use and remove
-    the assignment.
+    A: For each Assign(Reg(r), expr) or TypedAssign(Name(n), expr) at index i with
+    exactly one downstream use before r/n is written again, substitute the replacement
+    into that use and remove the assignment.
 
     Multi-use propagation is limited to reg-free replacements (no Reg leaves) to
     avoid duplicating side-effecting expressions.  Single-use propagation allows
     any expression; the intermediate guard checks for register clobbers.
+
+    Name-lhs propagation folds typed variable assignments (e.g. ``arg1 = xarg1``)
+    into their single call-argument use (→ ``cmp32(xarg1, 0)``).
     """
     changed = False
     live = list(live)
     i = 0
     while i < len(live):
         node = live[i]
-        if not (isinstance(node, Assign) and isinstance(node.lhs, RegExpr) and node.lhs.is_single):
+        is_reg_lhs  = (isinstance(node, Assign)
+                       and isinstance(node.lhs, RegExpr)
+                       and node.lhs.is_single)
+        is_name_lhs = (isinstance(node, (Assign, TypedAssign))
+                       and isinstance(node.lhs, NameExpr))
+        if not (is_reg_lhs or is_name_lhs):
             i += 1
             continue
         r = node.lhs.name
@@ -205,39 +213,46 @@ def _propagate_register_copies(live: List[HIRNode],
             # through code after them is unreachable from this path.
             if isinstance(live[j], (Label, GotoStatement, BreakStmt, ContinueStmt)):
                 break
-            written = live[j].written_regs
             uses_here = _count_reg_uses_in_node(r, live[j])
             total_uses += uses_here
             if uses_here > 0 and use_idx is None:
                 use_idx = j
-            if r in written:
-                kill_idx = j
-                break
-            # 8051: ADD (A += expr without C in rhs) implicitly sets C as carry.
-            # SUBB and ADDC both have C in their rhs (uses_here > 0), so they are
-            # excluded here and handled normally as a use site.
-            if (r == 'C'
-                    and uses_here == 0
-                    and isinstance(live[j], CompoundAssign)
-                    and isinstance(live[j].lhs, RegExpr)
-                    and live[j].lhs.is_single
-                    and live[j].lhs.name == 'A'
-                    and live[j].op in ('+=', '-=')):
-                kill_idx = j
-                break
-            # AccumFoldPattern may have already consumed the ADD instruction, folding
-            # it into Assign(DPL/DPH/A, BinOp(x, +/-, y)).  The original ADD still set C
-            # as a hardware side effect, so treat these folded arithmetic assigns as C-kills.
-            if (r == 'C'
-                    and uses_here == 0
-                    and isinstance(live[j], Assign)
-                    and isinstance(live[j].lhs, RegExpr)
-                    and live[j].lhs.is_single
-                    and live[j].lhs.name in ('A', 'DPL', 'DPH')
-                    and isinstance(live[j].rhs, BinOp)
-                    and live[j].rhs.op in ('+', '-')):
-                kill_idx = j
-                break
+            if is_reg_lhs:
+                written = live[j].written_regs
+                if r in written:
+                    kill_idx = j
+                    break
+                # 8051: ADD (A += expr without C in rhs) implicitly sets C as carry.
+                # SUBB and ADDC both have C in their rhs (uses_here > 0), so they are
+                # excluded here and handled normally as a use site.
+                if (r == 'C'
+                        and uses_here == 0
+                        and isinstance(live[j], CompoundAssign)
+                        and isinstance(live[j].lhs, RegExpr)
+                        and live[j].lhs.is_single
+                        and live[j].lhs.name == 'A'
+                        and live[j].op in ('+=', '-=')):
+                    kill_idx = j
+                    break
+                # AccumFoldPattern may have already consumed the ADD instruction, folding
+                # it into Assign(DPL/DPH/A, BinOp(x, +/-, y)).  The original ADD still set C
+                # as a hardware side effect, so treat these folded arithmetic assigns as C-kills.
+                if (r == 'C'
+                        and uses_here == 0
+                        and isinstance(live[j], Assign)
+                        and isinstance(live[j].lhs, RegExpr)
+                        and live[j].lhs.is_single
+                        and live[j].lhs.name in ('A', 'DPL', 'DPH')
+                        and isinstance(live[j].rhs, BinOp)
+                        and live[j].rhs.op in ('+', '-')):
+                    kill_idx = j
+                    break
+            else:
+                # Name-lhs kill: another assign to the same Name (re-definition).
+                lhs_j = getattr(live[j], 'lhs', None)
+                if isinstance(lhs_j, NameExpr) and lhs_j.name == r:
+                    kill_idx = j
+                    break
 
         dbg("propagate", f"  sub-A: {r}={replacement.render()!r} "
             f"total_uses={total_uses} kill_idx={kill_idx} "
@@ -246,7 +261,7 @@ def _propagate_register_copies(live: List[HIRNode],
             _scan_end = (kill_idx + 1) if kill_idx is not None else min(len(live), i + 10)
             for _j in range(i + 1, _scan_end):
                 _u = _count_reg_uses_in_node(r, live[_j])
-                _wr = r in live[_j].written_regs
+                _wr = (r in live[_j].written_regs) if is_reg_lhs else False
                 dbg("propagate", f"    scan[{_j}]={_dbg_node(live[_j])} uses={_u} kill={_wr}")
 
         if total_uses == 1 and use_idx is not None:
@@ -267,7 +282,9 @@ def _propagate_register_copies(live: List[HIRNode],
                 live[i] = None
                 dbg("typesimp", f"  [{hex(node.ea)}] prop-values: folded {r} into node {use_idx}")
                 changed = True
-        elif total_uses > 1 and _is_reg_free(replacement) and use_idx is not None:
+        elif total_uses > 1 and is_reg_lhs and _is_reg_free(replacement) and use_idx is not None:
+            # Multi-use propagation only for Reg-lhs: Name-lhs replacements may be
+            # Call exprs or other side-effecting expressions that cannot be duplicated.
             end = kill_idx if kill_idx is not None else len(live)
             any_subst = False
             for j in range(i + 1, end):
@@ -322,6 +339,16 @@ def _subst_group_in_call_node(node: HIRNode, regs_tuple: tuple,
         new_call = _patch(node.expr)
         if new_call is not None:
             result = ExprStmt(node.ea, new_call)
+    elif isinstance(node, IfNode):
+        def _patch_in_expr(e: Expr) -> Expr:
+            if isinstance(e, Call):
+                new_call = _patch(e)
+                if new_call is not None:
+                    return new_call
+            return e
+        new_cond = _walk_expr(node.condition, _patch_in_expr)
+        if new_cond is not node.condition:
+            result = IfNode(node.ea, new_cond, node.then_nodes, node.else_nodes)
     if result is not None:
         result.ann = node.ann
     return result

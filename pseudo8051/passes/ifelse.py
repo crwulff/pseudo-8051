@@ -216,7 +216,9 @@ def _replace_goto_in_hir(nodes: List[HIRNode], label: str,
         if isinstance(node, GotoStatement) and node.label == label:
             result.extend(copy.deepcopy(replacement))
         elif isinstance(node, IfGoto) and node.label == label:
-            result.append(IfNode(node.ea, node.cond, copy.deepcopy(replacement)))
+            new_if = IfNode(node.ea, node.cond, copy.deepcopy(replacement))
+            new_if.ann = node.ann
+            result.append(new_if)
         elif isinstance(node, IfNode):
             node.then_nodes = _replace_goto_in_hir(node.then_nodes, label, replacement)
             node.else_nodes = _replace_goto_in_hir(node.else_nodes, label, replacement)
@@ -619,6 +621,7 @@ class IfElseStructurer(OptimizationPass):
             then_nodes = then_nodes,
             else_nodes = else_nodes,
         )
+        if_node.ann = block.hir[branch_idx].ann   # preserve annotation for downstream passes
 
         # Keep HIR before the branch, replace branch+tail with IfNode
         block.hir = block.hir[:branch_idx] + [if_node]

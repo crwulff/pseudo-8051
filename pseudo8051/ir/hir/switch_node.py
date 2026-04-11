@@ -42,8 +42,10 @@ class SwitchNode(HIRNode):
             for vals, body in self.cases
         ]
         new_default_body = fn(self.default_body) if isinstance(self.default_body, list) else self.default_body
-        return SwitchNode(self.ea, self.subject, new_cases, self.default_label, new_default_body,
-                          case_comments=list(self.case_comments))
+        n = SwitchNode(self.ea, self.subject, new_cases, self.default_label, new_default_body,
+                       case_comments=list(self.case_comments))
+        n.ann = self.ann
+        return n
 
     def render(self, indent: int = 0) -> List[Tuple[int, str]]:
         ind  = self._ind(indent)

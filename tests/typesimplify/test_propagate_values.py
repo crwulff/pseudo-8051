@@ -150,3 +150,69 @@ class TestPropagateValues:
         dpl_nodes = [n for n in result if isinstance(n, Assign) and n.lhs.render() == "DPL"]
         assert len(dpl_nodes) == 1
         assert "dest_type" in dpl_nodes[0].rhs.render()
+
+
+class TestNameLhsPropagation:
+    """Tests for Name-lhs (TypedAssign) single-use propagation into call args."""
+
+    def test_name_assign_folded_into_call(self):
+        """TypedAssign(Name('arg1'), Name('xarg1')) folded into cmp32(arg1, 0)."""
+        from pseudo8051.ir.hir import TypedAssign
+        nodes = [
+            TypedAssign(0, "uint8_t", Name("arg1"), Name("xarg1")),
+            ExprStmt(1, Call("cmp32", [Name("arg1"), Const(0)])),
+        ]
+        result = _propagate_values(nodes, {})
+        assert len(result) == 1
+        rendered = result[0].render()[0][1]
+        assert "arg1 =" not in rendered
+        assert "xarg1" in rendered
+
+    def test_name_assign_folded_into_return(self):
+        """TypedAssign(Name('n'), Name('val')) folded into ReturnStmt."""
+        from pseudo8051.ir.hir import TypedAssign
+        nodes = [
+            TypedAssign(0, "uint8_t", Name("n"), Name("val")),
+            ReturnStmt(1, Name("n")),
+        ]
+        result = _propagate_values(nodes, {})
+        assert len(result) == 1
+        assert "val" in result[0].value.render()
+
+    def test_name_assign_not_folded_when_blocked(self):
+        """Intermediate write to xarg1 blocks folding of arg1=xarg1."""
+        from pseudo8051.ir.hir import TypedAssign
+        clobber = Assign(1, Name("xarg1"), Const(99))
+        nodes = [
+            TypedAssign(0, "uint8_t", Name("arg1"), Name("xarg1")),
+            clobber,
+            ExprStmt(2, Call("cmp32", [Name("arg1"), Const(0)])),
+        ]
+        result = _propagate_values(nodes, {})
+        # xarg1 is written between arg1= and cmp32 → blocked
+        assert len(result) == 3
+
+    def test_name_assign_not_folded_when_two_uses(self):
+        """arg1 used twice → not folded (single-use only for Name-lhs)."""
+        from pseudo8051.ir.hir import TypedAssign
+        nodes = [
+            TypedAssign(0, "uint8_t", Name("arg1"), Name("xarg1")),
+            ExprStmt(1, Call("foo", [Name("arg1"), Const(0)])),
+            ExprStmt(2, Call("bar", [Name("arg1")])),
+        ]
+        result = _propagate_values(nodes, {})
+        assert len(result) == 3   # kept unchanged
+
+    def test_name_assign_with_intermediary_c_assign(self):
+        """arg1=xarg1; C=0; cmp32(arg1, 0) — C=0 doesn't block folding."""
+        from pseudo8051.ir.hir import TypedAssign
+        nodes = [
+            TypedAssign(0, "uint8_t", Name("arg1"), Name("xarg1")),
+            Assign(1, Reg("C"), Const(0)),
+            ExprStmt(2, Call("cmp32", [Name("arg1"), Const(0)])),
+        ]
+        result = _propagate_values(nodes, {})
+        assert len(result) == 2
+        rendered = result[1].render()[0][1]
+        assert "xarg1" in rendered
+        assert "arg1 =" not in rendered   # setup line gone; "xarg1" contains "arg1" as substring

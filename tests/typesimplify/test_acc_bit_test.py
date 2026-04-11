@@ -1,15 +1,21 @@
 """
 Tests for _simplify_acc_bit_test — ACC.N bit-test → bitmask condition.
 
-Pattern:
+Indirect pattern (via carry):
   A = expr;
   C = ACC.N;
   if (C) / if (!C) / while (C) / while (!C)
 →
   A = expr;
   if (expr & (1 << N)) / if (!(expr & (1 << N))) / ...
-
 The C = ACC.N node is removed; A = expr is kept.
+
+Direct pattern (jb/jnb ACC.N):
+  A = expr;
+  if (ACC.N) / if (!ACC.N)
+→
+  A = expr;
+  if (expr & (1 << N)) / if (!(expr & (1 << N)))
 """
 
 from pseudo8051.passes.typesimplify._carry import _simplify_acc_bit_test
@@ -155,3 +161,60 @@ class TestAccBitTestNegative:
         result = _simplify_acc_bit_test(nodes)
         # C=ACC.1 not removed (no C-conditioned successor found)
         assert len(result) == 3
+
+
+# ── Direct ACC.N condition (jb/jnb) ──────────────────────────────────────────
+
+def _if_acc(n: int, body=None, else_=None):
+    return IfNode(0x20, Name(f"ACC.{n}"), body or [], else_ or [])
+
+def _if_not_acc(n: int, body=None, else_=None):
+    return IfNode(0x20, UnaryOp("!", Name(f"ACC.{n}")), body or [], else_ or [])
+
+
+class TestAccBitTestDirect:
+
+    def test_if_acc0(self):
+        """A = val; if (ACC.0) → if (val & 0x1)."""
+        nodes = [_a_assign(Name("val")), _if_acc(0)]
+        result = _simplify_acc_bit_test(nodes)
+        assert len(result) == 2
+        cond = result[1].condition
+        assert isinstance(cond, BinOp) and cond.op == "&"
+        assert cond.lhs == Name("val")
+        assert cond.rhs == Const(1)
+
+    def test_if_not_acc1(self):
+        """A = xarg2; if (!ACC.1) → if (!(xarg2 & 0x2))."""
+        nodes = [_a_assign(Name("xarg2")), _if_not_acc(1)]
+        result = _simplify_acc_bit_test(nodes)
+        assert len(result) == 2
+        cond = result[1].condition
+        assert isinstance(cond, UnaryOp) and cond.op == "!"
+        inner = cond.operand
+        assert isinstance(inner, BinOp) and inner.op == "&"
+        assert inner.lhs == Name("xarg2")
+        assert inner.rhs == Const(2)
+
+    def test_if_acc7(self):
+        """Bit 7 → mask 0x80."""
+        nodes = [_a_assign(Const(0xFF)), _if_acc(7)]
+        result = _simplify_acc_bit_test(nodes)
+        assert len(result) == 2
+        cond = result[1].condition
+        assert isinstance(cond, BinOp) and cond.rhs == Const(0x80)
+
+    def test_direct_no_a_assign_before(self):
+        """Without a preceding A assignment, direct pattern is not applied."""
+        nodes = [_if_acc(0)]
+        result = _simplify_acc_bit_test(nodes)
+        assert len(result) == 1
+        assert result[0].condition == Name("ACC.0")
+
+    def test_direct_a_not_accessible(self):
+        """A structured node between A= and if(ACC.N) blocks the scan."""
+        inner_if = IfNode(0x18, Const(1), [])
+        nodes = [_a_assign(Name("x")), inner_if, _if_acc(0)]
+        result = _simplify_acc_bit_test(nodes)
+        # A= is before a structured node — _a_value_before stops, pattern not applied
+        assert result[2].condition == Name("ACC.0")

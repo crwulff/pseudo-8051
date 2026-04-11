@@ -21,7 +21,9 @@ class WhileNode(HIRNode):
         self.body_nodes = body_nodes
 
     def map_bodies(self, fn: Callable[[List[HIRNode]], List[HIRNode]]) -> "WhileNode":
-        return WhileNode(self.ea, self.condition, fn(self.body_nodes))
+        n = WhileNode(self.ea, self.condition, fn(self.body_nodes))
+        n.ann = self.ann
+        return n
 
     def definitely_killed(self) -> frozenset:
         """Body may execute zero times, so no register is guaranteed killed."""
