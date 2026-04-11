@@ -24,6 +24,7 @@ from pseudo8051.passes.typesimplify._post     import (
     _fold_return_chains,
     _fold_xram_call_args,
     _simplify_arithmetic,
+    _simplify_acc_bit_test,
     _subst_xram_in_hir,
 )
 from pseudo8051.passes.typesimplify._enum_resolve import _resolve_enum_consts
@@ -102,6 +103,7 @@ class TypeAwareSimplifier(OptimizationPass):
         func.hir = _simplify_arithmetic(func.hir)
         func.hir = _collapse_dpl_dph_arithmetic(func.hir)
         func.hir = _subst_xram_in_hir(func.hir, reg_map)
+        func.hir = _simplify_acc_bit_test(func.hir)
 
         func.hir = collapse_mb_assigns(func.hir)
 

@@ -6,6 +6,7 @@ Exports:
   _simplify_cjne_jnc           fold CJNE(nop-goto) + JNC/JC into typed comparisons
   _simplify_orl_zero_check     fold ORL + JZ idiom into multi-byte zero test
   _simplify_arithmetic         remove identity +0/-0 and fold Const OP Const
+  _simplify_acc_bit_test       fold A=expr; C=ACC.N; if(C/!C) → if(expr & mask)
 """
 
 import re
@@ -13,13 +14,15 @@ from typing import List, Optional
 
 from pseudo8051.ir.hir import (HIRNode, Assign, TypedAssign, CompoundAssign,
                                 ExprStmt, ReturnStmt, IfNode, IfGoto,
-                                WhileNode, ForNode, DoWhileNode, Label)
+                                WhileNode, ForNode, DoWhileNode, SwitchNode,
+                                Label)
 from pseudo8051.ir.expr import (Expr, BinOp, Const, UnaryOp,
                                  Reg, Regs as RegExpr,
                                  Name as NameExpr)
 from pseudo8051.constants import dbg
 
 _RE_BYTE_FIELD = re.compile(r'^(.+)\.(?:hi|lo|b\d+)$')
+_ACC_BIT_RE    = re.compile(r'^ACC\.([0-7])$')
 
 
 # ── 16-bit SUBB comparison collapsing ────────────────────────────────────────
@@ -392,5 +395,114 @@ def _simplify_arithmetic(nodes: List[HIRNode]) -> List[HIRNode]:
                 node = n2
         # Recurse into structured bodies.
         node = node.map_bodies(_simplify_arithmetic)
+        result.append(node)
+    return result
+
+
+# ── ACC bit-test simplification ───────────────────────────────────────────────
+
+_STRUCTURED = (IfNode, WhileNode, ForNode, DoWhileNode, SwitchNode)
+
+
+def _a_value_before(nodes: List[HIRNode], idx: int) -> Optional[Expr]:
+    """Scan backward from nodes[idx] for the most recent simple assignment to A.
+
+    Returns the RHS expression if found before any A-clobbering node, or None.
+    Stops conservatively at structured nodes.
+    """
+    for k in range(idx - 1, -1, -1):
+        node = nodes[k]
+        if isinstance(node, _STRUCTURED):
+            return None
+        if isinstance(node, Assign) and node.lhs == Reg("A"):
+            return node.rhs
+        if "A" in node.written_regs:
+            return None   # A overwritten (CompoundAssign, etc.) — value unknown
+    return None
+
+
+def _c_condition(cond: Expr):
+    """Return ('C', True) if cond is Reg('C'), ('C', False) if !Reg('C'), else None."""
+    if cond == Reg("C"):
+        return True
+    if isinstance(cond, UnaryOp) and cond.op == "!" and cond.operand == Reg("C"):
+        return False
+    return None
+
+
+def _simplify_acc_bit_test(nodes: List[HIRNode]) -> List[HIRNode]:
+    """
+    Fold the 8051 bit-test idiom into a direct mask expression:
+
+      A = expr;
+      C = ACC.N;          ← MOV C, ACC.N copies bit N of A into the carry flag
+      if (C) { ... }      →  if (expr & (1 << N)) { ... }
+      if (!C) { ... }     →  if (!(expr & (1 << N))) { ... }
+
+    The C = ACC.N node is removed; the A = expr node is kept unchanged.
+
+    Also handles WhileNode and IfGoto conditions.
+    Works at the current nesting level; recurses into structured bodies.
+    """
+    # Recurse first so inner patterns are resolved before the outer scan.
+    nodes = [n.map_bodies(_simplify_acc_bit_test) for n in nodes]
+
+    remove: set = set()                     # indices of C = ACC.N nodes to drop
+    replace: dict = {}                       # index → new condition for if/while/goto
+
+    for i, node in enumerate(nodes):
+        # Match: C = ACC.N
+        if not (isinstance(node, Assign)
+                and node.lhs == Reg("C")
+                and isinstance(node.rhs, NameExpr)):
+            continue
+        m = _ACC_BIT_RE.match(node.rhs.name)
+        if not m:
+            continue
+        bit  = int(m.group(1))
+        mask = 1 << bit
+
+        # Find the value A held when the bit was sampled.
+        a_expr = _a_value_before(nodes, i)
+        if a_expr is None:
+            continue
+
+        # Scan forward for the next use of C — must be an if/while/goto condition.
+        for j in range(i + 1, len(nodes)):
+            succ = nodes[j]
+            if "C" in succ.written_regs:
+                break                        # C overwritten before any branch
+            cond = None
+            if isinstance(succ, (IfNode, WhileNode, ForNode, DoWhileNode)):
+                cond = succ.condition
+            elif isinstance(succ, IfGoto):
+                cond = succ.cond
+            if cond is not None:
+                polarity = _c_condition(cond)
+                if polarity is None:
+                    break                    # C is the condition but in an unexpected form
+                bit_test = BinOp(a_expr, "&", Const(mask))
+                new_cond = bit_test if polarity else UnaryOp("!", bit_test)
+                remove.add(i)
+                replace[j] = new_cond
+                dbg("typesimp",
+                    f"  [{hex(node.ea)}] acc-bit-test: "
+                    f"C=ACC.{bit} → {'!' if not polarity else ''}"
+                    f"({a_expr.render()} & {hex(mask)})")
+                break
+            # Non-C node: safe to skip over as long as it does not read C in an
+            # opaque way (structured nodes can hide C reads — stop conservatively).
+            if isinstance(succ, _STRUCTURED):
+                break
+            if "C" in succ.name_refs():
+                break                        # C read in a non-condition context
+
+    result = []
+    for i, node in enumerate(nodes):
+        if i in remove:
+            continue
+        if i in replace:
+            node = node.replace_condition(replace[i])
+            node.ann = nodes[i].ann
         result.append(node)
     return result
