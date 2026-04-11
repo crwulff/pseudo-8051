@@ -2,7 +2,7 @@
 passes/typesimplify/_carry.py — Carry-flag and comparison simplification passes.
 
 Exports:
-  _simplify_carry_comparison   collapse CLR C + SUBB16 sequence in while-loop conditions
+  _simplify_carry_comparison   collapse CLR C + SUBB16/SUBB8 sequence in while-loop conditions
   _simplify_cjne_jnc           fold CJNE(nop-goto) + JNC/JC into typed comparisons
   _simplify_orl_zero_check     fold ORL + JZ idiom into multi-byte zero test
   _simplify_arithmetic         remove identity +0/-0 and fold Const OP Const
@@ -86,11 +86,104 @@ def _try_collapse_subb16(cond, body: List[HIRNode]):
     return None
 
 
+# ── 8-bit SUBB comparison collapsing ─────────────────────────────────────────
+
+def _get_a_var_name(node: HIRNode) -> Optional[str]:
+    """Return the named variable that A holds at this node (from annotation), or None.
+
+    Uses the TypeGroup annotation set by AnnotationPass.  Only returns a name when
+    A is the sole register in a TypeGroup that has a non-empty name, ensuring we
+    don't produce bogus conditions from raw/unnamed register groups.
+    """
+    ann = getattr(node, 'ann', None)
+    if ann is None:
+        return None
+    for g in ann.reg_groups:
+        if (hasattr(g, 'full_regs')
+                and len(g.full_regs) == 1
+                and g.full_regs[0] == 'A'
+                and g.name
+                and g.name != 'A'):
+            return g.name
+    return None
+
+
+def _c_is_used_after(body: List[HIRNode], start: int) -> bool:
+    """Return True if Reg('C') appears in a read position in body[start:]
+    before the next node that writes C.  A C-write stops the scan."""
+    for node in body[start:]:
+        if 'C' in node.name_refs():
+            return True
+        if 'C' in node.written_regs:
+            return False   # C is overwritten before being read
+    return False
+
+
+def _try_collapse_subb8(body: List[HIRNode]):
+    """
+    Scan body for the 8-bit CLR-C + SUBB (single-byte comparison) pattern that
+    forms the loop condition:
+
+      C = 0;              (CLR C — not present if already propagated away)
+      A -= operand + C;   (SUBB A, operand — rhs still contains Reg("C"))
+      OR
+      A -= operand;       (after _propagate_values substituted C=0)
+
+    The node is identified as a condition-setting SUBB when its annotation reports
+    that C was 0 immediately before the instruction (ann.reg_consts["C"] == 0)
+    and A holds a named typed variable (ann.reg_groups has a TypeGroup for A).
+
+    Returns (new_cond, new_body) or None.
+    If C is used by a subsequent node before the next C-write, the CompoundAssign
+    is kept in the body (its C side-effect is still needed); otherwise it is removed.
+    """
+    for k in range(len(body)):
+        node = body[k]
+        if not (isinstance(node, CompoundAssign)
+                and node.lhs == Reg("A")
+                and node.op == "-="):
+            continue
+
+        # Require that C was known to be 0 before this instruction (CLR C preceded
+        # it), distinguishing a deliberate comparison from a body computation with
+        # carry-in from a prior SUBB/ADDC.
+        ann = getattr(node, 'ann', None)
+        if ann is None or ann.reg_consts.get("C") != 0:
+            continue
+
+        a_name = _get_a_var_name(node)
+        if a_name is None:
+            continue
+
+        # Extract the operand: either rhs directly (Const/Name) or the lhs of
+        # BinOp(operand, "+", C/Const(0)) when C hasn't been fully folded yet.
+        rhs = node.rhs
+        if isinstance(rhs, BinOp) and rhs.op == '+':
+            operand = rhs.lhs   # strip the "+ C" or "+ 0" tail
+        else:
+            operand = rhs
+
+        new_cond = BinOp(NameExpr(a_name), "<", operand)
+
+        # Remove the SUBB from the body only when C is not used by subsequent
+        # nodes before the next C-write (i.e. no inner if(C) depends on it).
+        c_needed = _c_is_used_after(body, k + 1)
+        new_body = body if c_needed else (body[:k] + body[k + 1:])
+
+        dbg("typesimp",
+            f"  [{hex(node.ea)}] subb8-collapse: {a_name} < {operand.render()!r}"
+            f" (c_needed_after={c_needed})")
+        return (new_cond, new_body)
+
+    return None
+
+
 def _simplify_carry_comparison(nodes: List[HIRNode]) -> List[HIRNode]:
     """
-    For each WhileNode with condition Reg("C"), scan body_nodes for the 4-node
-    CLR C + SUBB lo + MOV A + SUBB hi sequence. If found and both operand names
-    can be resolved, replace the condition with BinOp(Name(minuend), "<", ...).
+    For each WhileNode with condition Reg("C"), scan body_nodes for:
+      1. The 4-node CLR C + SUBB16 sequence (16-bit comparison), or
+      2. A single CLR-C + SUBB8 node (8-bit comparison) identified via annotation.
+    If found, replace the condition with the appropriate typed BinOp comparison.
     Recurses into nested structured nodes.
     """
     result: List[HIRNode] = []
@@ -98,7 +191,8 @@ def _simplify_carry_comparison(nodes: List[HIRNode]) -> List[HIRNode]:
         if isinstance(node, WhileNode):
             new_body = _simplify_carry_comparison(node.body_nodes)
             if node.condition == Reg("C"):
-                transformed = _try_collapse_subb16(node.condition, new_body)
+                transformed = (_try_collapse_subb16(node.condition, new_body)
+                               or _try_collapse_subb8(new_body))
                 if transformed is not None:
                     new_cond, new_body = transformed
                     result.append(WhileNode(node.ea, new_cond, new_body))
