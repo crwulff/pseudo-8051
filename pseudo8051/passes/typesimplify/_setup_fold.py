@@ -67,10 +67,18 @@ def _subst_reg_in_call_node(node: HIRNode, reg: str, replacement: Expr) -> HIRNo
 
     if isinstance(node, ExprStmt) and isinstance(node.expr, Call):
         new_call = _patch(node.expr)
-        return ExprStmt(node.ea, new_call) if new_call is not node.expr else node
+        if new_call is not node.expr:
+            new_node = ExprStmt(node.ea, new_call)
+            new_node.ann = node.ann
+            return new_node
+        return node
     if isinstance(node, Assign) and isinstance(node.rhs, Call):
         new_call = _patch(node.rhs)
-        return Assign(node.ea, node.lhs, new_call) if new_call is not node.rhs else node
+        if new_call is not node.rhs:
+            new_node = Assign(node.ea, node.lhs, new_call)
+            new_node.ann = node.ann
+            return new_node
+        return node
     return node
 
 

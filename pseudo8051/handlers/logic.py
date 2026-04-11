@@ -4,6 +4,8 @@ handlers/logic.py — ANL / ORL / XRL / CLR / SETB / CPL / RL/RLC/RR/RRC / SWAP.
 
 from typing import List
 
+import ida_ua
+
 from pseudo8051.ir.instruction import MnemonicHandler
 from pseudo8051.ir.operand     import Operand
 from pseudo8051.ir.hir         import HIRNode, Assign, CompoundAssign, ExprStmt
@@ -80,6 +82,14 @@ class SetbHandler(MnemonicHandler):
         return frozenset()
 
     def defs(self, insn) -> frozenset:
+        r0 = Operand(insn, 0).reg_name()
+        if r0:
+            return frozenset({r0})
+        # C is not in PARAM_REGS so reg_name() returns None for SETB C.
+        # Only o_reg operands can be C; bit-address operands are o_mem.
+        if insn.ops[0].type == ida_ua.o_reg:
+            if Operand(insn, 0).render() == "C":
+                return frozenset({"C"})
         return frozenset()
 
     def lift(self, insn, state=None) -> List[HIRNode]:
@@ -113,10 +123,10 @@ class RlHandler(MnemonicHandler):
 
 class RlcHandler(MnemonicHandler):
     def use(self, insn) -> frozenset:
-        return frozenset({"A"})
+        return frozenset({"A", "C"})
 
     def defs(self, insn) -> frozenset:
-        return frozenset({"A"})
+        return frozenset({"A", "C"})
 
     def lift(self, insn, state=None) -> List[HIRNode]:
         return [Assign(insn.ea, Reg("A"), Call("rol9", [Reg("A"), Reg("C")]))]
@@ -135,10 +145,10 @@ class RrHandler(MnemonicHandler):
 
 class RrcHandler(MnemonicHandler):
     def use(self, insn) -> frozenset:
-        return frozenset({"A"})
+        return frozenset({"A", "C"})
 
     def defs(self, insn) -> frozenset:
-        return frozenset({"A"})
+        return frozenset({"A", "C"})
 
     def lift(self, insn, state=None) -> List[HIRNode]:
         return [Assign(insn.ea, Reg("A"), Call("ror9", [Reg("A"), Reg("C")]))]

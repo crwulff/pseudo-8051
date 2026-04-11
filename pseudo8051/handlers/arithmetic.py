@@ -34,7 +34,7 @@ class AddHandler(MnemonicHandler):
 
 class AddcHandler(MnemonicHandler):
     def use(self, insn) -> frozenset:
-        u = {"A"}
+        u = {"A", "C"}
         r1 = Operand(insn, 1).reg_name()
         if r1: u.add(r1)
         return frozenset(u & PARAM_REGS)
@@ -50,7 +50,7 @@ class AddcHandler(MnemonicHandler):
 
 class SubbHandler(MnemonicHandler):
     def use(self, insn) -> frozenset:
-        u = {"A"}
+        u = {"A", "C"}
         r1 = Operand(insn, 1).reg_name()
         if r1: u.add(r1)
         return frozenset(u & PARAM_REGS)

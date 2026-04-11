@@ -112,7 +112,7 @@ class JnzHandler(MnemonicHandler):
 
 class JcHandler(MnemonicHandler):
     def use(self, insn) -> frozenset:
-        return frozenset()
+        return frozenset({"C"})
 
     def defs(self, insn) -> frozenset:
         return frozenset()
@@ -124,7 +124,7 @@ class JcHandler(MnemonicHandler):
 
 class JncHandler(MnemonicHandler):
     def use(self, insn) -> frozenset:
-        return frozenset()
+        return frozenset({"C"})
 
     def defs(self, insn) -> frozenset:
         return frozenset()
