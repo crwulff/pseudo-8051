@@ -51,19 +51,33 @@ def recurse_bodies(nodes, fn):
 
 def _subst_xram_in_hir(nodes, reg_map):
     """
-    Walk the HIR and apply _subst_xram_in_expr to every read-position expression.
+    Walk the HIR and apply _subst_xram_in_expr to every expression.
 
     Called after _collapse_dpl_dph_arithmetic to convert newly-created
     XRAM[base + idx] nodes into array subscript expressions (e.g. foo[R6R7]).
+    Also applied to LHS write positions (XRAMRef indirect writes) so that
+    indexed writes like XRAM[base + idx] = ... become arr[idx] = ... .
     """
     from pseudo8051.passes.patterns._utils import _subst_xram_in_expr, _apply_expr_subst_to_node
+    from pseudo8051.ir.hir import Assign
+    from pseudo8051.ir.expr import XRAMRef
+
+    def _subst_fn(e):
+        return _subst_xram_in_expr(e, reg_map)
 
     def _visit(ns):
         return _subst_xram_in_hir(ns, reg_map)
 
     result = []
     for node in nodes:
-        patched = _apply_expr_subst_to_node(
-            node, lambda e: _subst_xram_in_expr(e, reg_map))
+        patched = _apply_expr_subst_to_node(node, _subst_fn)
+        # Also transform XRAMRef LHS (write destination) so indexed XRAM writes
+        # like XRAM[base + idx] = expr become arr[idx] = expr.
+        if isinstance(patched, Assign) and isinstance(patched.lhs, XRAMRef):
+            new_lhs = _subst_fn(patched.lhs)
+            if new_lhs is not patched.lhs:
+                new_node = Assign(patched.ea, new_lhs, patched.rhs)
+                new_node.ann = node.ann
+                patched = new_node
         result.append(patched.map_bodies(_visit))
     return result
