@@ -24,6 +24,7 @@ from pseudo8051.passes.typesimplify._post     import (
     _fold_return_chains,
     _fold_xram_call_args,
     _simplify_arithmetic,
+    _subst_xram_in_hir,
 )
 from pseudo8051.passes.typesimplify._enum_resolve import _resolve_enum_consts
 from pseudo8051.constants import dbg
@@ -81,6 +82,7 @@ class TypeAwareSimplifier(OptimizationPass):
         # named byte-field pairs (var.hi / var.lo) that only become visible after
         # type substitution in _simplify.
         func.hir = _collapse_dpl_dph_arithmetic(func.hir)
+        func.hir = _subst_xram_in_hir(func.hir, reg_map)
         func.hir = _fold_and_prune_setups(func.hir, reg_map)
         # Remove cross-block nop-gotos in the assembled HIR (IfGoto whose target label
         # is the immediately following node in the flat list).  Must run before
@@ -99,6 +101,7 @@ class TypeAwareSimplifier(OptimizationPass):
         func.hir = _simplify_orl_zero_check(func.hir)
         func.hir = _simplify_arithmetic(func.hir)
         func.hir = _collapse_dpl_dph_arithmetic(func.hir)
+        func.hir = _subst_xram_in_hir(func.hir, reg_map)
 
         func.hir = collapse_mb_assigns(func.hir)
 

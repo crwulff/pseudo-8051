@@ -46,3 +46,23 @@ from pseudo8051.passes.typesimplify._xram_call_args import ( # noqa: F401
 def recurse_bodies(nodes, fn):
     """Recurse fn into structured node bodies; pass other nodes through."""
     return [node.map_bodies(fn) for node in nodes]
+
+
+def _subst_xram_in_hir(nodes, reg_map):
+    """
+    Walk the HIR and apply _subst_xram_in_expr to every read-position expression.
+
+    Called after _collapse_dpl_dph_arithmetic to convert newly-created
+    XRAM[base + idx] nodes into array subscript expressions (e.g. foo[R6R7]).
+    """
+    from pseudo8051.passes.patterns._utils import _subst_xram_in_expr, _apply_expr_subst_to_node
+
+    def _visit(ns):
+        return _subst_xram_in_hir(ns, reg_map)
+
+    result = []
+    for node in nodes:
+        patched = _apply_expr_subst_to_node(
+            node, lambda e: _subst_xram_in_expr(e, reg_map))
+        result.append(patched.map_bodies(_visit))
+    return result

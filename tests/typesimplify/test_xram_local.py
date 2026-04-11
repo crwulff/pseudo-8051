@@ -28,6 +28,7 @@ class TestXramLocalDecl:
         assert rendered.startswith("uint16_t var1;")
         assert "EXT_DC8A" in rendered
         assert "0xdc8a" in rendered
+        assert "0xdc8b" in rendered  # end of range for uint16_t
 
     def test_local_decl_at_start(self):
         """Local variable declaration is the first node in hir."""

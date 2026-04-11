@@ -15,16 +15,32 @@ from typing import Callable, Dict, FrozenSet, List, Optional, Tuple
 from pseudo8051.ir.hir import (HIRNode, Assign, TypedAssign, CompoundAssign,  # noqa: F401
                                ExprStmt, ReturnStmt, IfGoto)
 from pseudo8051.ir.expr import (  # noqa: F401
-    Expr, Reg, Regs, Name, XRAMRef, RegGroup,
+    Expr, Reg, Regs, Name, XRAMRef, RegGroup, ArrayRef,
 )
 
 
 # ── Type helpers ──────────────────────────────────────────────────────────────
 
+_ARRAY_TYPE_RE = re.compile(r'^(\w+)\[(\d+)\]$')
+
+
+def _parse_array_type(type_str: str) -> Optional[Tuple[str, int]]:
+    """Parse an array type string: 'uint8_t[6]' → ('uint8_t', 6), or None."""
+    m = _ARRAY_TYPE_RE.match(type_str.strip())
+    if m:
+        return m.group(1), int(m.group(2))
+    return None
+
+
 def _type_bytes(t: str) -> int:
     if t in ("bool", "uint8_t",  "int8_t",  "char"):  return 1
     if t in ("uint16_t", "int16_t"):                   return 2
     if t in ("uint32_t", "int32_t"):                   return 4
+    arr = _parse_array_type(t)
+    if arr is not None:
+        elem_type, count = arr
+        eb = _type_bytes(elem_type)
+        return eb * count if eb > 0 else 0
     try:
         from pseudo8051.prototypes import struct_size as _ss
         n = _ss(t)
@@ -119,7 +135,8 @@ class VarInfo:
 
     def __init__(self, name: str, type_str: str, regs: Tuple[str, ...],
                  xram_sym: str = "", is_byte_field: bool = False,
-                 xram_addr: int = 0, is_param: bool = False):
+                 xram_addr: int = 0, is_param: bool = False,
+                 array_size: int = 0, elem_type: str = ""):
         self.name          = name
         self.type          = type_str
         self.regs          = regs              # high → low order, e.g. ('R6', 'R7'); () for XRAM locals
@@ -128,6 +145,8 @@ class VarInfo:
         self.is_byte_field = is_byte_field     # True for per-byte entries of multi-byte XRAM locals
         self.xram_addr     = xram_addr         # raw integer XRAM address (0 for register vars)
         self.is_param      = is_param          # True only for params from the current function's proto
+        self.array_size    = array_size        # >0 for array locals (e.g. uint8_t[6] → 6)
+        self.elem_type     = elem_type         # element type for arrays (e.g. 'uint8_t')
 
     @property
     def hi(self) -> Optional[str]:
@@ -362,24 +381,47 @@ def _subst_single_regs_in_expr(expr: Expr, reg_map: Dict[str, "VarInfo"]) -> Exp
 
 
 def _subst_xram_in_expr(expr: Expr, reg_map: Dict[str, "VarInfo"]) -> Expr:
-    """Replace XRAMRef(Name(sym)) → Name(local_var_name)."""
+    """Replace XRAMRef(Name(sym)) → Name(local_var_name) or ArrayRef(Name(arr), idx)."""
+    from pseudo8051.ir.expr import BinOp as _BinOp, Const as _Const
+
     sym_map: Dict[str, str] = {}
+    # Array base lookups for dynamic indexed access: XRAM[base + idx] → arr[idx]
+    arr_sym_map: Dict[str, "VarInfo"] = {}    # xram_sym  → array VarInfo
+    arr_addr_map: Dict[int, "VarInfo"] = {}   # xram_addr → array VarInfo
+
     for vinfo in reg_map.values():
         if not isinstance(vinfo, VarInfo) or not vinfo.xram_sym:
             continue
         if vinfo.is_byte_field:
             sym_map[vinfo.xram_sym] = vinfo.name
+        elif vinfo.array_size > 0:
+            # Static access to base addr maps to element [0] (also covered by elem entries)
+            if vinfo.xram_sym not in sym_map:
+                sym_map[vinfo.xram_sym] = f"{vinfo.name}[0]"
+            arr_sym_map[vinfo.xram_sym] = vinfo
+            arr_addr_map[vinfo.xram_addr] = vinfo
         elif vinfo.xram_sym not in sym_map:
             sym_map[vinfo.xram_sym] = vinfo.name
 
-    if not sym_map:
+    if not sym_map and not arr_addr_map:
         return expr
 
     def _fn(e: Expr) -> Expr:
         if isinstance(e, XRAMRef):
-            inner_text = e.inner.render()
+            inner = e.inner
+            inner_text = inner.render()
             if inner_text in sym_map:
                 return Name(sym_map[inner_text])
+            # Dynamic indexed access: XRAM[base_sym + idx] or XRAM[base_const + idx]
+            if isinstance(inner, _BinOp) and inner.op == '+':
+                lhs = inner.lhs
+                arr_vi = None
+                if isinstance(lhs, Name) and lhs.name in arr_sym_map:
+                    arr_vi = arr_sym_map[lhs.name]
+                elif isinstance(lhs, _Const) and lhs.value in arr_addr_map:
+                    arr_vi = arr_addr_map[lhs.value]
+                if arr_vi is not None and _type_bytes(arr_vi.elem_type) == 1:
+                    return ArrayRef(Name(arr_vi.name), inner.rhs)
         return e
 
     return _walk_expr(expr, _fn)

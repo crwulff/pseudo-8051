@@ -9,7 +9,7 @@ from pseudo8051.ir.hir    import (HIRNode, Assign, ExprStmt, ReturnStmt,
                                    IfNode, WhileNode, ForNode, DoWhileNode)
 from pseudo8051.constants import dbg
 from pseudo8051.passes.patterns._utils import (
-    VarInfo, _type_bytes, _byte_names,
+    VarInfo, _type_bytes, _byte_names, _parse_array_type,
 )
 from pseudo8051.ir.expr import UnaryOp, BinOp, Call
 from pseudo8051.ir.function import Function
@@ -231,6 +231,34 @@ def _augment_with_local_vars(func_ea: int,
     result = dict(reg_map)
     for lv in locals_list:
         base_sym = resolve_ext_addr(lv.addr)
+        arr = _parse_array_type(lv.type)
+        if arr is not None:
+            # Array local: uint8_t[6] foo — register base entry + per-element entries.
+            elem_type, count = arr
+            elem_bytes = _type_bytes(elem_type)
+            if elem_bytes > 0 and base_sym not in result:
+                result[base_sym] = VarInfo(lv.name, lv.type, (),
+                                           xram_sym=base_sym, xram_addr=lv.addr,
+                                           array_size=count, elem_type=elem_type)
+                dbg("typesimp", f"  local array: {lv.name} ({lv.type}) @ {base_sym}")
+                for k in range(count):
+                    elem_addr = lv.addr + k * elem_bytes
+                    elem_sym  = resolve_ext_addr(elem_addr)
+                    ekey      = f"_arr_{elem_sym}"
+                    if ekey not in result:
+                        result[ekey] = VarInfo(f"{lv.name}[{k}]", elem_type, (),
+                                               xram_sym=elem_sym, is_byte_field=True)
+                        dbg("typesimp", f"  local array elem: {lv.name}[{k}] @ {elem_sym}")
+                        if elem_bytes > 1:
+                            bnames = _byte_names(f"{lv.name}[{k}]", elem_bytes)
+                            for j, byte_name in enumerate(bnames):
+                                byte_sym = resolve_ext_addr(elem_addr + j)
+                                bkey2    = f"_arr_byte_{byte_sym}"
+                                if bkey2 not in result:
+                                    result[bkey2] = VarInfo(byte_name, "uint8_t", (),
+                                                            xram_sym=byte_sym,
+                                                            is_byte_field=True)
+            continue
         if base_sym not in result:
             result[base_sym] = VarInfo(lv.name, lv.type, (), xram_sym=base_sym,
                                        xram_addr=lv.addr)
