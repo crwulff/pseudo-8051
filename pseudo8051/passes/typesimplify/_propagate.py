@@ -63,10 +63,14 @@ def _collect_mid_writes(nodes: List[HIRNode], reg_map: Dict) -> frozenset:
     """
     result: set = set()
     for node in nodes:
-        result.update(node.written_regs)
+        # Use possibly_killed() so that structured nodes (IfNode, WhileNode, etc.)
+        # conservatively contribute all registers they might write in any branch/body.
+        # For leaf nodes possibly_killed() == written_regs, so there is no behaviour change.
+        node_writes = node.possibly_killed()
+        result.update(node_writes)
         # Expand register writes → variable names
         if reg_map:
-            for reg in node.written_regs:
+            for reg in node_writes:
                 info = reg_map.get(reg)
                 if isinstance(info, VarInfo) and info.name:
                     result.add(info.name)
@@ -218,15 +222,17 @@ def _propagate_register_copies(live: List[HIRNode],
             if uses_here > 0 and use_idx is None:
                 use_idx = j
             if is_reg_lhs:
-                written = live[j].written_regs
-                if r in written:
+                # Use possibly_killed() so that an IfNode whose body may write r
+                # is treated conservatively as a kill barrier.
+                if r in live[j].possibly_killed():
                     kill_idx = j
                     break
-                # 8051: ADD (A += expr without C in rhs) implicitly sets C as carry.
-                # SUBB and ADDC both have C in their rhs (uses_here > 0), so they are
-                # excluded here and handled normally as a use site.
+                # 8051: Any A += / A -= instruction (ADD, ADDC, SUBB) always writes C
+                # as a side-effect carry/borrow output, regardless of whether C also
+                # appears in the rhs as the borrow-in.  SUBB in particular reads C
+                # (borrow-in) AND writes C (borrow-out); the borrow-out kills the
+                # previous C value even though uses_here > 0.
                 if (r == 'C'
-                        and uses_here == 0
                         and isinstance(live[j], CompoundAssign)
                         and isinstance(live[j].lhs, RegExpr)
                         and live[j].lhs.is_single
@@ -285,21 +291,29 @@ def _propagate_register_copies(live: List[HIRNode],
         elif total_uses > 1 and is_reg_lhs and _is_reg_free(replacement) and use_idx is not None:
             # Multi-use propagation only for Reg-lhs: Name-lhs replacements may be
             # Call exprs or other side-effecting expressions that cannot be duplicated.
+            # All-or-nothing: every use site must accept the substitution; if any
+            # _subst_reg_in_node call returns None (e.g. because the register is
+            # embedded in a multi-reg group that cannot be split), skip entirely so
+            # that we never emit a partially-substituted inconsistent expression.
             end = kill_idx if kill_idx is not None else len(live)
-            any_subst = False
+            tentative: dict = {}
+            all_ok = True
             for j in range(i + 1, end):
                 if _count_reg_uses_in_node(r, live[j]) > 0:
                     new_node = _subst_reg_in_node(live[j], r, replacement)
-                    if new_node is not None:
-                        live[j] = new_node
-                        any_subst = True
-            if any_subst:
+                    if new_node is None:
+                        all_ok = False
+                        break
+                    tentative[j] = new_node
+            if all_ok and tentative:
+                for j, new_node in tentative.items():
+                    live[j] = new_node
                 remaining = _collect_hir_name_refs(live[i + 1:end])
                 if r not in remaining:
                     live[i] = None
                 dbg("typesimp",
                     f"  [{hex(node.ea)}] prop-values-multi: {r} = {replacement.render()!r}"
-                    f" into {total_uses} use(s)")
+                    f" into {len(tentative)} site(s)")
                 changed = True
 
         i += 1
@@ -391,7 +405,7 @@ def _inline_group_setups(live: List[HIRNode],
         for j in range(i + 1, len(live)):
             nd = live[j]
             uses = sum(_count_reg_uses_in_node(r, nd) for r in regs_tuple)
-            writes = nd.written_regs & regs_set
+            writes = nd.possibly_killed() & regs_set
             if uses > 0:
                 if use_idx is not None:
                     conflict = True
