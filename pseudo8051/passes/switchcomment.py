@@ -69,6 +69,46 @@ def _decompose_bitfield_subject(expr: Expr) -> Optional[List[Tuple[str, int]]]:
     return components
 
 
+# ── Direct parametric decomposition (new form) ───────────────────────────────
+
+def _decompose_named_subject(
+    expr: Expr,
+    name_type: Dict[str, str],
+) -> Optional[Tuple[List[Tuple[str, int]], Dict[str, Tuple[str, int, str]]]]:
+    """
+    Decompose a subject of the form  (param ± k) << shift | …  directly, without
+    needing to look up register assignments in the preceding context.
+
+    Returns (components, reg_info) in the same format as the register-based path
+    (so _case_comment is unchanged), using param_name as the dict key.
+    Returns None if any term doesn't match the expected pattern or the param name
+    is not in name_type.
+    """
+    terms = _parse_or_terms(expr)
+    components: List[Tuple[str, int]] = []
+    reg_info: Dict[str, Tuple[str, int, str]] = {}
+    for term in terms:
+        # Peel off optional left-shift
+        shift = 0
+        inner = term
+        if (isinstance(term, BinOp) and term.op == "<<"
+                and isinstance(term.rhs, Const)):
+            shift = term.rhs.value
+            inner = term.lhs
+        param_name, addend = _extract_linear(inner)
+        if param_name is None:
+            return None
+        type_str = name_type.get(param_name)
+        if type_str is None:
+            return None
+        components.append((param_name, shift))
+        reg_info[param_name] = (param_name, addend, type_str)
+    if not components:
+        return None
+    components.sort(key=lambda c: c[1], reverse=True)
+    return components, reg_info
+
+
 # ── Context scanning ──────────────────────────────────────────────────────────
 
 def _find_last_assign(nodes: List[HIRNode], reg_name: str) -> Optional[Assign]:
@@ -229,40 +269,45 @@ class SwitchCaseAnnotator(OptimizationPass):
         subj_str = sw.subject.render() if hasattr(sw.subject, "render") else repr(sw.subject)
         dbg("switch", f"SwitchCaseAnnotator: subject={subj_str!r}")
 
-        components = _decompose_bitfield_subject(sw.subject)
-        if not components:
-            dbg("switch", f"  → subject not a pure bitfield-OR of registers, skipping")
-            return
-        dbg("switch", f"  components={components}")
+        # ── Strategy 1: direct parametric form  (param ± k) << shift | … ──────
+        named = _decompose_named_subject(sw.subject, name_type)
+        if named is not None:
+            components, reg_info = named
+            dbg("switch", f"  components (named)={components}")
+        else:
+            # ── Strategy 2: register-based form  Reg << shift | … ────────────
+            components = _decompose_bitfield_subject(sw.subject)
+            if not components:
+                dbg("switch", f"  → subject not decomposable, skipping")
+                return
+            dbg("switch", f"  components (reg)={components}")
 
-        # For each (reg, shift) component, find its linear assignment in context
-        reg_info: Dict[str, Tuple[str, int, str]] = {}
-        for reg_name, _ in components:
-            asgn = _find_last_assign(context, reg_name)
-            if asgn is None:
-                dbg("switch", f"  → no assignment found for reg {reg_name!r} in context, skipping")
-                return
-            asgn_str = asgn.rhs.render() if hasattr(asgn.rhs, "render") else repr(asgn.rhs)
-            dbg("switch", f"  {reg_name} = {asgn_str}")
-            param_name, addend = _extract_linear(asgn.rhs)
-            if param_name is None:
-                # One-level register-copy trace: DPL = A and A = dest_type + 2
-                # → resolve A's assignment if _propagate_values was blocked by a Label.
-                if isinstance(asgn.rhs, Regs) and asgn.rhs.is_single:
-                    src_asgn = _find_last_assign(context, asgn.rhs.name)
-                    if src_asgn is not None:
-                        param_name, addend = _extract_linear(src_asgn.rhs)
-                        if param_name is not None:
-                            dbg("switch", f"  {reg_name} traced via {asgn.rhs.name!r}")
-            if param_name is None:
-                dbg("switch", f"  → rhs not linear (Name ± Const), skipping")
-                return
-            type_str = name_type.get(param_name)
-            if type_str is None:
-                dbg("switch", f"  → param {param_name!r} not in prototype, skipping")
-                return
-            dbg("switch", f"  {reg_name} → param={param_name!r} addend={addend} type={type_str!r}")
-            reg_info[reg_name] = (param_name, addend, type_str)
+            reg_info: Dict[str, Tuple[str, int, str]] = {}
+            for reg_name, _ in components:
+                asgn = _find_last_assign(context, reg_name)
+                if asgn is None:
+                    dbg("switch", f"  → no assignment for reg {reg_name!r}, skipping")
+                    return
+                asgn_str = asgn.rhs.render() if hasattr(asgn.rhs, "render") else repr(asgn.rhs)
+                dbg("switch", f"  {reg_name} = {asgn_str}")
+                param_name, addend = _extract_linear(asgn.rhs)
+                if param_name is None:
+                    # One-level register-copy trace: DPL = A, A = dest_type + 2
+                    if isinstance(asgn.rhs, Regs) and asgn.rhs.is_single:
+                        src_asgn = _find_last_assign(context, asgn.rhs.name)
+                        if src_asgn is not None:
+                            param_name, addend = _extract_linear(src_asgn.rhs)
+                            if param_name is not None:
+                                dbg("switch", f"  {reg_name} traced via {asgn.rhs.name!r}")
+                if param_name is None:
+                    dbg("switch", f"  → rhs not linear (Name ± Const), skipping")
+                    return
+                type_str = name_type.get(param_name)
+                if type_str is None:
+                    dbg("switch", f"  → param {param_name!r} not in prototype, skipping")
+                    return
+                dbg("switch", f"  {reg_name} → param={param_name!r} addend={addend} type={type_str!r}")
+                reg_info[reg_name] = (param_name, addend, type_str)
 
         comments: List[Optional[str]] = []
         for values, _ in sw.cases:

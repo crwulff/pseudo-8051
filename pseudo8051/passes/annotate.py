@@ -16,6 +16,7 @@ from pseudo8051.ir.hir     import (HIRNode, NodeAnnotation, Assign, CompoundAssi
 from pseudo8051.ir.expr    import Reg, Regs as RegExpr, XRAMRef, Name as NameExpr
 from pseudo8051.passes     import OptimizationPass
 from pseudo8051.constants  import PARAM_REG_ORDER, DEBUG, dbg
+from pseudo8051.passes.patterns._utils import _canonicalize_expr
 
 
 def _is_call_node(node: HIRNode):
@@ -547,6 +548,27 @@ class AnnotationPass(OptimizationPass):
                         groups.append(xram_tg)
                         xram_loaded_regs = dst_regs
 
+                # Capture pre-kill state for self-referential Assign/CompoundAssign (step f)
+                _compound_old_expr    = None
+                _compound_canon_rhs   = None
+                _assign_precanon_rhs  = None   # pre-kill canon for self-ref Assign
+                if (isinstance(node, CompoundAssign)
+                        and isinstance(node.lhs, RegExpr) and node.lhs.is_single):
+                    _compound_old_expr = expr_state.get(node.lhs.name)
+                    if _compound_old_expr is not None:
+                        _compound_canon_rhs = _canonicalize_expr(
+                            node.rhs, const_state, groups, expr_state)
+                elif (isinstance(node, Assign)
+                        and isinstance(node.lhs, RegExpr) and node.lhs.is_single):
+                    lhs_name = node.lhs.name
+                    if (expr_state.get(lhs_name) is not None
+                            and _expr_refs_reg(node.rhs, lhs_name)):
+                        # RHS reads the LHS reg — pre-canonicalize before kill so the
+                        # old value of the reg is substituted in (e.g. rl: A=A<<1|A>>7
+                        # with A=arg1 → A=(arg1<<1)|(arg1>>7) after the kill).
+                        _assign_precanon_rhs = _canonicalize_expr(
+                            node.rhs, const_state, groups, expr_state)
+
                 # (d) Kill defined regs (unless just loaded from XRAM above)
                 for r in node.written_regs:
                     if r not in xram_loaded_regs:
@@ -588,10 +610,23 @@ class AnnotationPass(OptimizationPass):
                 # (e) Forward-propagate new constant produced by this node
                 _propagate_const(node, const_state)
 
-                # (f) Track defining expression for simple single-register assigns
+                # (f) Track defining expression for single-register assigns/compound-assigns
                 if (isinstance(node, Assign)
                         and isinstance(node.lhs, RegExpr) and node.lhs.is_single):
-                    expr_state[node.lhs.name] = node.rhs
+                    if _assign_precanon_rhs is not None:
+                        expr_state[node.lhs.name] = _assign_precanon_rhs
+                    else:
+                        expr_state[node.lhs.name] = _canonicalize_expr(
+                            node.rhs, const_state, groups, expr_state)
+                elif (_compound_old_expr is not None
+                        and isinstance(node, CompoundAssign)
+                        and isinstance(node.lhs, RegExpr) and node.lhs.is_single):
+                    # Reconstruct: new_A = old_A op rhs  (both already canonical)
+                    from pseudo8051.ir.expr import BinOp as _BinOp
+                    stripped_op = node.op[:-1]   # "+=" → "+"
+                    new_expr = _BinOp(_compound_old_expr, stripped_op, _compound_canon_rhs)
+                    expr_state[node.lhs.name] = _canonicalize_expr(
+                        new_expr, const_state, groups, expr_state)
 
             block_exit_groups[block.start_ea] = list(groups)
             block_exit_exprs[block.start_ea]  = dict(expr_state)

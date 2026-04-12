@@ -15,7 +15,7 @@ from typing import Callable, Dict, FrozenSet, List, Optional, Tuple
 from pseudo8051.ir.hir import (HIRNode, Assign, TypedAssign, CompoundAssign,  # noqa: F401
                                ExprStmt, ReturnStmt, IfGoto, IfNode, SwitchNode)
 from pseudo8051.ir.expr import (  # noqa: F401
-    Expr, Reg, Regs, Name, XRAMRef, RegGroup, ArrayRef,
+    Expr, Reg, Regs, Const, Name, XRAMRef, RegGroup, ArrayRef, BinOp,
 )
 
 
@@ -297,6 +297,135 @@ def _walk_expr(expr: Expr, fn: Callable[[Expr], Expr]) -> Expr:
     return fn(expr)
 
 
+def _is_reg_free(expr: Expr) -> bool:
+    """True if expr contains no Regs leaf — safe to forward-substitute at multiple sites."""
+    found = [False]
+
+    def _fn(e: Expr) -> Expr:
+        if isinstance(e, Regs):
+            found[0] = True
+        return e
+
+    _walk_expr(expr, _fn)
+    return not found[0]
+
+
+def _canonicalize_expr(expr: Expr,
+                       const_state: Dict[str, int],
+                       groups: list,
+                       expr_state: Dict[str, Expr]) -> Expr:
+    """Canonicalize an expression by substituting known register values.
+
+    Performs a bottom-up walk.  At each single-register Regs leaf:
+    1. Const substitute:  const_state.get(r) → Const(v)
+    2. TypeGroup substitute: first group where full_regs == [r] and name set → Name(g.name)
+    3. expr_state substitute: expr_state.get(r) → that expr (then apply const+group only,
+       no recursive expr_state lookup to prevent cycles)
+
+    After leaf substitution, applies constant folding and identity elimination:
+    - BinOp(Const(a), op, Const(b)) → Const(result)
+    - Identity: x+0, x-0, x|0, x^0, x<<0, x>>0 → x; 0+x, 0|x → x; x*1, 1*x → x
+    """
+    _FOLD_OPS = {
+        '+': lambda a, b: a + b,
+        '-': lambda a, b: a - b,
+        '*': lambda a, b: a * b,
+        '/': lambda a, b: a // b if b != 0 else None,
+        '&': lambda a, b: a & b,
+        '|': lambda a, b: a | b,
+        '^': lambda a, b: a ^ b,
+        '>>': lambda a, b: a >> b,
+        '<<': lambda a, b: a << b,
+    }
+
+    def _subst_leaf(e: Expr) -> Expr:
+        """Substitute a single-register Regs leaf once."""
+        if not (isinstance(e, Regs) and e.is_single):
+            return e
+        r = e.name
+        # 1. Const
+        if r in const_state:
+            return Const(const_state[r])
+        # 2. TypeGroup name
+        for g in groups:
+            if (len(g.full_regs) == 1
+                    and g.full_regs[0] == r
+                    and g.name):
+                return Name(g.name)
+        # 3. expr_state (apply one more level of const+group, no expr_state)
+        if r in expr_state:
+            sub = expr_state[r]
+            def _const_group_only(e2: Expr) -> Expr:
+                if not (isinstance(e2, Regs) and e2.is_single):
+                    return e2
+                r2 = e2.name
+                if r2 in const_state:
+                    return Const(const_state[r2])
+                for g in groups:
+                    if (len(g.full_regs) == 1
+                            and g.full_regs[0] == r2
+                            and g.name):
+                        return Name(g.name)
+                return e2
+            return _walk_expr(sub, _const_group_only)
+        return e
+
+    def _mul_base_coeff(e: Expr):
+        """Return (base, coeff) if e is base*Const(k) or Const(k)*base, else (e, 1)."""
+        if isinstance(e, BinOp) and e.op == '*':
+            if isinstance(e.rhs, Const):
+                return e.lhs, e.rhs.value
+            if isinstance(e.lhs, Const):
+                return e.rhs, e.lhs.value
+        return e, 1
+
+    def _fold(e: Expr) -> Expr:
+        """Constant fold, identity-eliminate, and algebraically normalize."""
+        if not isinstance(e, BinOp):
+            return e
+        lhs, rhs = e.lhs, e.rhs
+        lc = isinstance(lhs, Const)
+        rc = isinstance(rhs, Const)
+        op = e.op
+        if lc and rc:
+            fn = _FOLD_OPS.get(op)
+            if fn is not None:
+                result = fn(lhs.value, rhs.value)
+                if result is not None:
+                    return Const(result & 0xFFFFFFFF)
+        # Identity eliminations
+        if rc and rhs.value == 0 and op in ('+', '-', '|', '^', '<<', '>>'):
+            return lhs
+        if lc and lhs.value == 0 and op in ('+', '|'):
+            return rhs
+        if rc and rhs.value == 1 and op == '*':
+            return lhs
+        if lc and lhs.value == 1 and op == '*':
+            return rhs
+        # Coefficient merging: e*k1 + e*k2 → e*(k1+k2)
+        # Handles: e+e → e*2, e*k+e → e*(k+1), e*k1+e*k2 → e*(k1+k2)
+        if op == '+':
+            lbase, lcoeff = _mul_base_coeff(lhs)
+            rbase, rcoeff = _mul_base_coeff(rhs)
+            if lbase == rbase and not isinstance(lbase, Const):
+                total = lcoeff + rcoeff
+                return BinOp(lbase, '*', Const(total))
+        # Division cancellation: (e * k1) / k2 → e * (k1//k2) when k2 divides k1
+        if op == '/' and rc and rhs.value != 0:
+            lbase, lcoeff = _mul_base_coeff(lhs)
+            if not isinstance(lbase, Const) and lcoeff % rhs.value == 0:
+                new_coeff = lcoeff // rhs.value
+                if new_coeff == 1:
+                    return lbase
+                return BinOp(lbase, '*', Const(new_coeff))
+        return e
+
+    def _fn(e: Expr) -> Expr:
+        return _fold(_subst_leaf(e))
+
+    return _walk_expr(expr, _fn)
+
+
 def _subst_pairs_in_expr(expr: Expr, reg_map: Dict[str, "VarInfo"]) -> Expr:
     """Attach alias to RegGroup/Reg nodes for multi-reg VarInfo entries.
 
@@ -455,6 +584,29 @@ def _apply_expr_subst_to_node(node: HIRNode,
         new_val = expr_fn(node.value)
         return ReturnStmt(node.ea, new_val) if new_val is not node.value else node
     return node
+
+
+def _fold_exprs_in_node(node: HIRNode) -> HIRNode:
+    """Apply algebraic constant folding to all expression positions in node.
+
+    Extends _apply_expr_subst_to_node to also handle SwitchNode.subject.
+    Useful after substituting a register value to simplify the result
+    (e.g. (arg1 * 3) / 3 → arg1).
+    """
+    fn = lambda e: _canonicalize_expr(e, {}, [], {})
+    if isinstance(node, SwitchNode):
+        new_subj = fn(node.subject)
+        if new_subj is node.subject:
+            return node
+        new_node = SwitchNode(node.ea, new_subj, node.cases,
+                              node.default_label, node.default_body,
+                              case_comments=list(node.case_comments))
+        new_node.ann = node.ann
+        return new_node
+    new_node = _apply_expr_subst_to_node(node, fn)
+    if new_node is not node:
+        new_node.ann = node.ann
+    return new_node
 
 
 def _replace_pairs_in_node(node: HIRNode,

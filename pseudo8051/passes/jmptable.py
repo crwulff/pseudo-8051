@@ -303,6 +303,7 @@ def _try_jmptable(func: Function, block: BasicBlock) -> bool:
 
     sw_ea = block.hir[jmp_idx].ea
     sw = SwitchNode(sw_ea, subject, cases)
+    sw.ann = block.hir[jmp_idx].ann  # carry forward annotation (reg_exprs, etc.)
 
     dbg("switch", f"JmpTableStructurer: block {hex(block.start_ea)} → "
                   f"SwitchNode subj={subject.render()!r} "

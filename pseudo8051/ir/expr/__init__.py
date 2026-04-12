@@ -16,6 +16,7 @@ from pseudo8051.ir.expr.bin_op      import BinOp                                
 from pseudo8051.ir.expr.unary_op    import UnaryOp                               # noqa: F401
 from pseudo8051.ir.expr.call        import Call                                   # noqa: F401
 from pseudo8051.ir.expr.rot9op      import Rot9Op                                # noqa: F401
+from pseudo8051.ir.expr.rot8op      import Rot8Op                                # noqa: F401
 from pseudo8051.ir.expr.array_ref   import ArrayRef                              # noqa: F401
 from pseudo8051.ir.expr.paren       import Paren                                 # noqa: F401
 from pseudo8051.ir.expr.cast        import Cast                                   # noqa: F401

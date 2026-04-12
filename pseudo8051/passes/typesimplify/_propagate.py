@@ -20,6 +20,7 @@ from pseudo8051.ir.expr import (Expr, BinOp, Call, Const,
                                  Regs as RegExpr, Name as NameExpr)
 from pseudo8051.passes.patterns._utils import (
     VarInfo, _count_reg_uses_in_node, _subst_reg_in_node, _walk_expr,
+    _canonicalize_expr, _fold_exprs_in_node, _is_reg_free,
 )
 from pseudo8051.constants import dbg
 
@@ -108,17 +109,6 @@ def _count_name_uses_in_nodes(name: str, nodes: List[HIRNode]) -> int:
     return sum(_count_reg_uses_in_node(name, n) for n in nodes)
 
 
-def _is_reg_free(expr: Expr) -> bool:
-    """True if expr contains no Reg() leaf — safe to forward-substitute."""
-    found_reg = [False]
-
-    def _fn(e: Expr) -> Expr:
-        if isinstance(e, RegExpr):
-            found_reg[0] = True
-        return e
-
-    _walk_expr(expr, _fn)
-    return not found_reg[0]
 
 
 def _collect_hir_name_refs(nodes: List[HIRNode]) -> frozenset:
@@ -206,6 +196,12 @@ def _propagate_register_copies(live: List[HIRNode],
             continue
         r = node.lhs.name
         replacement = node.rhs
+        if is_reg_lhs and node.ann is not None:
+            replacement = _canonicalize_expr(
+                replacement,
+                node.ann.reg_consts,
+                node.ann.reg_groups,
+                node.ann.reg_exprs)
 
         total_uses = 0
         use_idx = None
@@ -454,6 +450,42 @@ def _inline_group_setups(live: List[HIRNode],
     return [n for n in live if n is not None], changed
 
 
+# ── Sub-pass A1: reg_exprs annotation substitution ───────────────────────────
+
+
+def _subst_from_reg_exprs(live: List[HIRNode]) -> Tuple[List[HIRNode], bool]:
+    """Sub-pass A1: substitute reg_exprs annotations directly into node expressions.
+
+    For each node whose annotation records a reg-free expression for register r,
+    and where the node reads r, substitute r → expr then fold algebraically.
+
+    This handles accumulated CompoundAssign values that _propagate_register_copies
+    cannot reach (e.g. A = arg1*3 tracked via A+=R0; A+=R0 → switch(A/3) → switch(arg1)).
+
+    Returns (updated_list, changed).
+    """
+    result = list(live)
+    any_changed = False
+    for i, node in enumerate(result):
+        if node.ann is None or not node.ann.reg_exprs:
+            continue
+        current = node
+        for r, expr in current.ann.reg_exprs.items():
+            if not _is_reg_free(expr):
+                continue
+            if _count_reg_uses_in_node(r, current) == 0:
+                continue
+            new_node = _subst_reg_in_node(current, r, expr)
+            if new_node is None:
+                continue
+            new_node = _fold_exprs_in_node(new_node)
+            current = new_node
+            any_changed = True
+        if current is not node:
+            result[i] = current
+    return result, any_changed
+
+
 # ── Sub-pass B: retval inlining ───────────────────────────────────────────────
 
 def _inline_retvals(live: List[HIRNode],
@@ -545,10 +577,11 @@ def _propagate_values(nodes: List[HIRNode],
     changed = True
     while changed:
         changed = False
-        work, c0 = _fold_compound_assigns(work)
-        work, cA = _propagate_register_copies(work, reg_map)
-        work, cB = _inline_retvals(work, reg_map)
-        work, cC = _inline_group_setups(work, reg_map)
-        changed = c0 or cA or cB or cC
+        work, c0  = _fold_compound_assigns(work)
+        work, cA  = _propagate_register_copies(work, reg_map)
+        work, cA1 = _subst_from_reg_exprs(work)
+        work, cB  = _inline_retvals(work, reg_map)
+        work, cC  = _inline_group_setups(work, reg_map)
+        changed = c0 or cA or cA1 or cB or cC
 
     return work

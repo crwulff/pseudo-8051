@@ -9,7 +9,7 @@ import ida_ua
 from pseudo8051.ir.instruction import MnemonicHandler
 from pseudo8051.ir.operand     import Operand
 from pseudo8051.ir.hir         import HIRNode, Assign, CompoundAssign, ExprStmt
-from pseudo8051.ir.expr        import Reg, Const, UnaryOp, BinOp, Call, Rot9Op
+from pseudo8051.ir.expr        import Reg, Const, UnaryOp, BinOp, Call, Rot9Op, Rot8Op
 from pseudo8051.constants      import PARAM_REGS
 
 
@@ -118,9 +118,7 @@ class RlHandler(MnemonicHandler):
         return frozenset({"A"})
 
     def lift(self, insn, state=None) -> List[HIRNode]:
-        a = Reg("A")
-        return [Assign(insn.ea, a,
-                       BinOp(BinOp(a, "<<", Const(1)), "|", BinOp(a, ">>", Const(7))))]
+        return [Assign(insn.ea, Reg("A"), Rot8Op("rol8", Reg("A")))]
 
 
 class RlcHandler(MnemonicHandler):
@@ -142,9 +140,7 @@ class RrHandler(MnemonicHandler):
         return frozenset({"A"})
 
     def lift(self, insn, state=None) -> List[HIRNode]:
-        a = Reg("A")
-        return [Assign(insn.ea, a,
-                       BinOp(BinOp(a, ">>", Const(1)), "|", BinOp(a, "<<", Const(7))))]
+        return [Assign(insn.ea, Reg("A"), Rot8Op("ror8", Reg("A")))]
 
 
 class RrcHandler(MnemonicHandler):

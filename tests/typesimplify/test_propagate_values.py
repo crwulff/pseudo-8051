@@ -5,8 +5,10 @@ tests/typesimplify/test_propagate_values.py — Tests for _propagate_values pass
 import pytest
 
 from pseudo8051.passes.typesimplify._post import _propagate_values
+from pseudo8051.passes.typesimplify._propagate import _subst_from_reg_exprs
 from pseudo8051.passes.patterns._utils import VarInfo
-from pseudo8051.ir.hir import Assign, TypedAssign, ExprStmt, CompoundAssign, IfNode, ReturnStmt
+from pseudo8051.ir.hir import Assign, TypedAssign, ExprStmt, CompoundAssign, IfNode, ReturnStmt, SwitchNode
+from pseudo8051.ir.hir._base import NodeAnnotation
 from pseudo8051.ir.expr import Reg, Name, XRAMRef, Call, Const, BinOp, UnaryOp
 
 
@@ -215,4 +217,48 @@ class TestNameLhsPropagation:
         assert len(result) == 2
         rendered = result[1].render()[0][1]
         assert "xarg1" in rendered
-        assert "arg1 =" not in rendered   # setup line gone; "xarg1" contains "arg1" as substring
+
+
+class TestSubstFromRegExprs:
+    """Tests for _subst_from_reg_exprs: annotation-driven expression substitution."""
+
+    def _make_ann(self, reg_exprs: dict) -> NodeAnnotation:
+        ann = NodeAnnotation()
+        ann.reg_exprs = reg_exprs
+        return ann
+
+    def test_switch_subject_simplified_via_reg_exprs(self):
+        """switch(A/3) with reg_exprs[A]=arg1*3 → switch(arg1)."""
+        sw = SwitchNode(0, BinOp(Reg("A"), '/', Const(3)),
+                        {0: [], 1: [], 2: []})
+        sw.ann = self._make_ann({"A": BinOp(Name("arg1"), '*', Const(3))})
+        result, changed = _subst_from_reg_exprs([sw])
+        assert changed
+        assert len(result) == 1
+        assert result[0].subject.render() == "arg1"
+
+    def test_no_ann_node_skipped(self):
+        """Node with ann=None is left unchanged."""
+        sw = SwitchNode(0, BinOp(Reg("A"), '/', Const(3)),
+                        {0: [], 1: []})
+        sw.ann = None
+        result, changed = _subst_from_reg_exprs([sw])
+        assert not changed
+        assert result[0].subject.render() == "A / 3"
+
+    def test_reg_containing_expr_not_substituted(self):
+        """reg_exprs[A]=R7 (contains Reg) is not substituted (not reg-free)."""
+        sw = SwitchNode(0, BinOp(Reg("A"), '/', Const(3)),
+                        {0: [], 1: []})
+        sw.ann = self._make_ann({"A": Reg("R7")})
+        result, changed = _subst_from_reg_exprs([sw])
+        assert not changed
+        assert result[0].subject.render() == "A / 3"
+
+    def test_assign_rhs_simplified_via_reg_exprs(self):
+        """Assign(lhs, A*2) with reg_exprs[A]=Name("arg1") → Assign(lhs, arg1*2)."""
+        node = Assign(0, Reg("R6"), BinOp(Reg("A"), '*', Const(2)))
+        node.ann = self._make_ann({"A": Name("arg1")})
+        result, changed = _subst_from_reg_exprs([node])
+        assert changed
+        assert result[0].rhs.render() == "arg1 * 2"

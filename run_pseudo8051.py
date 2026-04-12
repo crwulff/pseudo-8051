@@ -35,6 +35,7 @@ _RELOAD_ORDER = [
     "pseudo8051.ir.expr.unary_op",
     "pseudo8051.ir.expr.call",
     "pseudo8051.ir.expr.rot9op",
+    "pseudo8051.ir.expr.rot8op",
     "pseudo8051.ir.expr.array_ref",
     "pseudo8051.ir.expr.paren",
     "pseudo8051.ir.expr.cast",

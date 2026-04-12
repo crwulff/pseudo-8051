@@ -23,10 +23,11 @@ Common 2-byte jump table (K=1):
 from typing import Dict, List, Optional, Tuple
 
 from pseudo8051.ir.hir import HIRNode, Assign, CompoundAssign, SwitchNode
-from pseudo8051.ir.expr import Expr, Reg, Const, BinOp
+from pseudo8051.ir.expr import Expr, Reg, Const, BinOp, Rot8Op
 from pseudo8051.constants import dbg
 from pseudo8051.passes.patterns.base   import Pattern, Match, Simplify
-from pseudo8051.passes.patterns._utils import VarInfo, _subst_all_expr
+from pseudo8051.passes.patterns._utils import (VarInfo, _subst_all_expr,
+                                                _canonicalize_expr, _is_reg_free)
 
 _OP_WITHOUT_EQ = {
     "+=": "+", "-=": "-", "*=": "*", "/=": "/",
@@ -36,16 +37,12 @@ _OP_WITHOUT_EQ = {
 
 
 def _is_rol_a(node: HIRNode) -> bool:
-    """True if node is Assign(Reg("A"), (A << 1) | (A >> 7))."""
-    if not (isinstance(node, Assign) and node.lhs == Reg("A")):
-        return False
-    rhs = node.rhs
-    # (A << 1) | (A >> 7)
-    return (isinstance(rhs, BinOp) and rhs.op == "|"
-            and isinstance(rhs.lhs, BinOp) and rhs.lhs.op == "<<"
-            and rhs.lhs.lhs == Reg("A") and rhs.lhs.rhs == Const(1)
-            and isinstance(rhs.rhs, BinOp) and rhs.rhs.op == ">>"
-            and rhs.rhs.lhs == Reg("A") and rhs.rhs.rhs == Const(7))
+    """True if node is Assign(Reg("A"), Rot8Op("rol8", Reg("A")))."""
+    return (isinstance(node, Assign)
+            and node.lhs == Reg("A")
+            and isinstance(node.rhs, Rot8Op)
+            and node.rhs.func_name == "rol8"
+            and node.rhs.a_arg == Reg("A"))
 
 
 class RolSwitchPattern(Pattern):
@@ -140,6 +137,18 @@ class RolSwitchPattern(Pattern):
         for bin_op, rhs in compounds:
             new_subj = BinOp(new_subj, bin_op, rhs)
         new_subj = _subst_all_expr(new_subj, reg_map)
+
+        # Substitute the pre-rol value of A (from the first rol node's annotation)
+        # so that the switch subject is expressed in terms of parameters rather than A.
+        # The first rol node's ann.reg_exprs["A"] is the value of A *before* any rols.
+        first_ann = nodes[i].ann
+        if first_ann is not None:
+            a_expr = first_ann.reg_exprs.get("A")
+            if a_expr is not None and _is_reg_free(a_expr):
+                new_subj = _canonicalize_expr(new_subj,
+                                              first_ann.reg_consts,
+                                              first_ann.reg_groups,
+                                              first_ann.reg_exprs)
 
         new_sw = SwitchNode(sw.ea, new_subj, sw.cases,
                             sw.default_label, sw.default_body)
