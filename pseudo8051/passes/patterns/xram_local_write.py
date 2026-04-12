@@ -9,7 +9,7 @@ import re
 from typing import Dict, List, Optional, Tuple
 
 from pseudo8051.ir.hir import HIRNode, Assign, ExprStmt
-from pseudo8051.ir.expr import Reg, Name, XRAMRef, UnaryOp
+from pseudo8051.ir.expr import Reg, Name, Const, XRAMRef, UnaryOp
 from pseudo8051.constants import dbg
 from pseudo8051.passes.patterns.base   import Pattern, Match, Simplify
 from pseudo8051.passes.patterns._utils import (
@@ -85,14 +85,15 @@ def _scan_xram_local_write(nodes: List[HIRNode], start: int,
     return (byte_exprs, i)
 
 
-def _build_value_str(byte_exprs: List[str], type_str: str) -> Optional[str]:
+def _build_value_str(byte_exprs: List[str], type_str: str) -> Optional[Tuple[int, str]]:
+    """Return (int_value, display_str) if all byte_exprs are constants, else None."""
     const_vals = [_parse_const(e) for e in byte_exprs]
     if any(v is None for v in const_vals):
         return None
     value = 0
     for v in const_vals:
         value = (value << 8) | (v & 0xFF)
-    return _const_str(value, type_str)
+    return (value, _const_str(value, type_str))
 
 
 class XRAMLocalWritePattern(Pattern):
@@ -112,13 +113,16 @@ class XRAMLocalWritePattern(Pattern):
             if result is None:
                 continue
             byte_exprs, end_i = result
-            value_str = _build_value_str(byte_exprs, vinfo.type)
-            if value_str is None:
-                if len(byte_exprs) == 1:
-                    value_str = byte_exprs[0]
-                else:
-                    continue
+            value_result = _build_value_str(byte_exprs, vinfo.type)
+            if value_result is not None:
+                int_val, value_str = value_result
+                rhs_expr = Const(int_val, alias=value_str)
+            elif len(byte_exprs) == 1:
+                value_str = byte_exprs[0]
+                rhs_expr = Name(value_str)
+            else:
+                continue
             dbg("typesimp", f"  [{hex(nodes[i].ea)}] xram-local-write: {vinfo.name} = {value_str}")
-            return ([Assign(nodes[i].ea, Name(vinfo.name), Name(value_str))], end_i)
+            return ([Assign(nodes[i].ea, Name(vinfo.name), rhs_expr)], end_i)
 
         return None

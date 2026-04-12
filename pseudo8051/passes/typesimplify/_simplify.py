@@ -441,6 +441,15 @@ def _simplify_once(nodes: List[HIRNode], reg_map: Dict[str, VarInfo],
 
     out: List[HIRNode] = []
     for node in nodes:
+        # Inject user annotations into extra_groups so they propagate forward
+        # regardless of killed_regs (user annotations override prior writes).
+        node_ann = node.ann
+        if node_ann is not None and node_ann.user_anns:
+            for tg in node_ann.user_anns:
+                extra_groups = [g for g in extra_groups
+                                if not (g.active_regs & tg.active_regs)]
+                extra_groups.append(tg)
+                killed_regs = killed_regs - tg.active_regs
         eff = _build_node_eff(node, extra_groups, killed_regs, xram_map, counter)
         pre_eff = dict(eff)
         written = node.written_regs | node.definitely_killed()
@@ -485,6 +494,15 @@ def _simplify(nodes: List[HIRNode], reg_map: Dict[str, VarInfo]) -> List[HIRNode
         return _simplify(ns, rm)
 
     while i < len(nodes):
+        # Inject user annotations into extra_groups so they propagate forward
+        # regardless of killed_regs (user annotations override prior writes).
+        node_ann = nodes[i].ann
+        if node_ann is not None and node_ann.user_anns:
+            for tg in node_ann.user_anns:
+                extra_groups = [g for g in extra_groups
+                                if not (g.active_regs & tg.active_regs)]
+                extra_groups.append(tg)
+                killed_regs = killed_regs - tg.active_regs
         eff = _build_node_eff(nodes[i], extra_groups, killed_regs, xram_map, counter)
         pre_eff = dict(eff)
 

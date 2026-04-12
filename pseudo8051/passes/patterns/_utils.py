@@ -495,8 +495,10 @@ def _count_reg_uses_in_node(r: str, node: HIRNode) -> int:
 
     if isinstance(node, Assign):
         _walk_expr(node.rhs, _fn)
-        # Also count in compound LHS (e.g. XRAMRef inner)
-        if not isinstance(node.lhs, Regs):
+        # Also count in compound LHS (e.g. XRAMRef inner), but NOT plain Name
+        # (Name LHS is a write destination, not a read; counting it causes
+        # _propagate_register_copies to treat the next var=... write as a "use").
+        if not isinstance(node.lhs, (Regs, Name)):
             _walk_expr(node.lhs, _fn)
     elif isinstance(node, CompoundAssign):
         _walk_expr(node.rhs, _fn)
@@ -531,7 +533,9 @@ def _subst_reg_in_node(node: HIRNode, r: str,
     if isinstance(node, Assign):
         new_rhs = _walk_expr(node.rhs, _fn)
         new_lhs = node.lhs
-        if not isinstance(node.lhs, Regs):
+        # Substitute in compound LHS (e.g. XRAMRef inner) but NOT plain Name
+        # (Name LHS is a write destination, not a read position).
+        if not isinstance(node.lhs, (Regs, Name)):
             new_lhs = _walk_expr(node.lhs, _fn)
         if new_rhs is node.rhs and new_lhs is node.lhs:
             return None

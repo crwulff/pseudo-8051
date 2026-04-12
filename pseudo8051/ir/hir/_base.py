@@ -13,13 +13,14 @@ if TYPE_CHECKING:
 
 class NodeAnnotation:
     """Per-node annotation: register names/types and constant values at this point."""
-    __slots__ = ("reg_groups", "reg_consts", "call_arg_ann", "callee_args")
+    __slots__ = ("reg_groups", "reg_consts", "call_arg_ann", "callee_args", "user_anns")
 
     def __init__(self):
         self.reg_groups:   "List[TypeGroup]"           = []   # forward-propagated TypeGroups
         self.reg_consts:   Dict[str, int]               = {}   # reg → known const
         self.call_arg_ann: "List[TypeGroup]"            = []   # backward-propagated callee params
         self.callee_args:  "Optional[List[TypeGroup]]"  = None # call node only
+        self.user_anns:    "List[TypeGroup]"            = []   # user register annotations (force-installed)
 
     @staticmethod
     def merge(first: "object", last: "object") -> "Optional[NodeAnnotation]":
@@ -44,6 +45,7 @@ class NodeAnnotation:
             ann.call_arg_ann = last_ann.call_arg_ann
             if ann.callee_args is None:
                 ann.callee_args = last_ann.callee_args
+            ann.user_anns = ann.user_anns + last_ann.user_anns
         return ann
 
     # ── New TypeGroup lookup helpers ──────────────────────────────────────────

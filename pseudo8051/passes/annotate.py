@@ -413,17 +413,20 @@ class AnnotationPass(OptimizationPass):
             nodes = block.hir
             for idx, node in enumerate(nodes):
                 # (a) Inject custom register annotations at this instruction EA
+                user_tgs = []
                 for ra in _reg_anns.get(getattr(node, 'ea', None) or 0, []):
                     tg = TypeGroup(ra.name, ra.type, tuple(ra.regs), is_param=False)
                     # Kill any existing groups covering those regs
                     for r in ra.regs:
                         groups = _kill_groups(groups, r)
                     groups.append(tg)
+                    user_tgs.append(tg)
 
                 # (b) Snapshot annotation
                 ann = NodeAnnotation()
                 ann.reg_groups = list(groups)
                 ann.reg_consts = dict(const_state)
+                ann.user_anns  = user_tgs   # user annotations force-install in _build_node_eff
                 node.ann = ann
 
                 # (c) Detect call
