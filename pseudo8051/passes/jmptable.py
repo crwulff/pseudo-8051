@@ -307,6 +307,63 @@ def _try_jmptable(func: Function, block: BasicBlock) -> bool:
     return True
 
 
+def fixup_jmptable_edges_early(func: Function) -> None:
+    """
+    Pre-ConstantPropagation variant of fixup_jmptable_edges.
+
+    Called before ConstantPropagation() and initial_hir() so that the
+    dataflow analysis sees the correct successor/predecessor sets for
+    JMP @A+DPTR dispatch blocks.  Uses instruction scanning only —
+    block.hir is not yet populated.
+
+    Detects JMP @A+DPTR by mnemonic scan, then threads a fresh CPState
+    through the block to recover DPTR (which the compiler always loads
+    in the same block as the dispatch jump).
+    """
+    from pseudo8051.ir.cpstate import CPState, propagate_insn as _prop
+
+    for block in func.blocks:
+        if block.successors:          # IDA already has edges — nothing to do
+            continue
+
+        # Find a JMP instruction in this block by mnemonic scan
+        jmp_ea = None
+        for insn in block.instructions:
+            if insn.mnemonic == "JMP":
+                jmp_ea = insn.ea
+                break
+        if jmp_ea is None:
+            continue
+
+        # Thread a fresh CPState up to (but not including) the JMP to find DPTR
+        state = CPState()
+        for insn in block.instructions:
+            if insn.ea >= jmp_ea:
+                break
+            raw = insn.insn
+            if raw is not None:
+                _prop(raw, state)
+
+        dptr_val = state.get("DPTR")
+        if dptr_val is None:
+            continue
+
+        page_base = block.start_ea & ~0xFFFF
+        table_ea  = page_base | (dptr_val & 0xFFFF)
+        cases, stride = _read_jump_table(table_ea, page_base, func)
+        if not cases:
+            continue
+
+        dbg("switch", f"fixup_jmptable_edges_early: block {hex(block.start_ea)} "
+                      f"table @ {hex(table_ea)} → {len(cases)} edges stride={stride}")
+        for i in range(len(cases)):
+            entry_ea = table_ea + i * stride
+            sjmp_blk = func._block_map.get(entry_ea)
+            if sjmp_blk is not None:
+                block._add_successor(sjmp_blk)
+                dbg("switch", f"  {hex(block.start_ea)} → {hex(sjmp_blk.start_ea)}")
+
+
 def fixup_jmptable_edges(func: Function) -> None:
     """
     For every JMP @A+DPTR block whose IDA successors are empty, read the

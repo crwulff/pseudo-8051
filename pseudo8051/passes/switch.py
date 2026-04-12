@@ -366,6 +366,175 @@ def _needs_break(body_nodes: List[HIRNode]) -> bool:
     return True
 
 
+# ── HIR-tree embedded switch absorption ──────────────────────────────────────
+#
+# When IfElseStructurer absorbs a switch block into an if-arm, it inlines the
+# switch node and all case arm blocks as siblings in the arm's HIR body list.
+# _build_arm_hir now preserves Label nodes that are switch case targets, so the
+# body looks like:
+#   [SwitchNode(goto labels), Label("A"), arm_A_nodes..., Label("B"), arm_B_nodes...]
+#
+# The functions below find such patterns in any HIR body list and absorb the
+# label-delimited arm nodes into the SwitchNode's cases, mirroring _absorb().
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _partition_by_switch_labels(sibling_nodes: List[HIRNode],
+                                 case_labels: set):
+    """
+    Partition *sibling_nodes* (nodes that follow a SwitchNode in a body list)
+    into:
+      - outer_nodes: nodes before the first case label (stay in the outer body)
+      - arm_groups: dict mapping case label → list of HIR nodes in that arm
+    """
+    outer_nodes: List[HIRNode] = []
+    arm_groups: dict = {}
+    current_label = None
+    for sn in sibling_nodes:
+        if isinstance(sn, Label) and sn.name in case_labels:
+            current_label = sn.name
+            arm_groups[current_label] = []
+        elif current_label is None:
+            outer_nodes.append(sn)
+        else:
+            arm_groups[current_label].append(sn)
+    return outer_nodes, arm_groups
+
+
+def _absorb_switch_in_body_list(nodes: List[HIRNode]) -> tuple:
+    """
+    Scan *nodes* for a SwitchNode whose case arms appear as Label-delimited
+    sibling nodes (the signature left by IfElseStructurer when it absorbed the
+    switch block together with its case arm blocks).  When found, absorb the
+    arms into the SwitchNode and remove them from the body list.
+    Returns (new_nodes, changed).
+    """
+    result: List[HIRNode] = []
+    i = 0
+    changed = False
+    while i < len(nodes):
+        node = nodes[i]
+        if isinstance(node, SwitchNode):
+            # Collect unresolved (string-label) case labels
+            case_labels = {body for _, body in node.cases if isinstance(body, str)}
+            if node.default_label and isinstance(node.default_label, str):
+                case_labels.add(node.default_label)
+
+            if case_labels:
+                sibling_nodes = nodes[i + 1:]
+                sibling_label_names = {
+                    sn.name for sn in sibling_nodes if isinstance(sn, Label)
+                }
+                if case_labels & sibling_label_names:
+                    outer_nodes, arm_groups = _partition_by_switch_labels(
+                        sibling_nodes, case_labels)
+
+                    # Build case bodies
+                    new_cases: List = []
+                    for values, body in node.cases:
+                        if isinstance(body, str) and body in arm_groups:
+                            arm_hir = list(arm_groups[body])
+                            if _needs_break(arm_hir):
+                                arm_hir.append(BreakStmt(node.ea))
+                            new_cases.append((values, arm_hir))
+                        else:
+                            new_cases.append((values, body))
+                    node.cases = new_cases
+
+                    # Dedup cases with identical bodies
+                    deduped: List = []
+                    for values, body in new_cases:
+                        if isinstance(body, list):
+                            for ev, eb in deduped:
+                                if isinstance(eb, list) and (
+                                        eb is body
+                                        or _body_text(eb) == _body_text(body)):
+                                    ev.extend(values)
+                                    break
+                            else:
+                                deduped.append((list(values), body))
+                        else:
+                            deduped.append((list(values), body))
+                    node.cases = deduped
+
+                    # Handle default body
+                    if (node.default_label
+                            and isinstance(node.default_label, str)
+                            and node.default_label in arm_groups):
+                        dbody = list(arm_groups[node.default_label])
+                        if _needs_break(dbody):
+                            dbody.append(BreakStmt(node.ea))
+                        node.default_body = dbody
+                        node.default_label = None
+
+                    dbg("switch",
+                        f"  _absorb_switch_in_body_list: switch @ {hex(node.ea)} "
+                        f"absorbed {len(arm_groups)} arm(s) from HIR siblings")
+                    result.append(node)
+                    result.extend(outer_nodes)
+                    i = len(nodes)   # skip all consumed siblings
+                    changed = True
+                    continue
+
+        result.append(node)
+        i += 1
+
+    return result, changed
+
+
+def _absorb_switches_in_node(node: HIRNode):
+    """Recursively apply HIR-tree switch absorption to a node's bodies.
+    Returns (modified_node, changed)."""
+    changed = False
+    if isinstance(node, IfNode):
+        new_then, ch1 = _absorb_switches_in_list(node.then_nodes)
+        new_else, ch2 = _absorb_switches_in_list(node.else_nodes)
+        if ch1:
+            node.then_nodes = new_then
+            changed = True
+        if ch2:
+            node.else_nodes = new_else
+            changed = True
+    elif isinstance(node, (WhileNode, ForNode, DoWhileNode)):
+        new_body, ch = _absorb_switches_in_list(node.body_nodes)
+        if ch:
+            node.body_nodes = new_body
+            changed = True
+    elif isinstance(node, SwitchNode):
+        new_cases = []
+        for vals, body in node.cases:
+            if isinstance(body, list):
+                new_body, ch = _absorb_switches_in_list(body)
+                if ch:
+                    changed = True
+                new_cases.append((vals, new_body))
+            else:
+                new_cases.append((vals, body))
+        node.cases = new_cases
+        if isinstance(node.default_body, list):
+            new_dbody, ch = _absorb_switches_in_list(node.default_body)
+            if ch:
+                node.default_body = new_dbody
+                changed = True
+    return node, changed
+
+
+def _absorb_switches_in_list(nodes: List[HIRNode]) -> tuple:
+    """
+    Recursively absorb embedded SwitchNodes with Label-delimited sibling arms
+    in a HIR body list.  Recurses depth-first into structured node bodies first,
+    then handles the current list level.
+    Returns (new_nodes, changed).
+    """
+    new_nodes: List[HIRNode] = []
+    any_changed = False
+    for node in nodes:
+        node, ch = _absorb_switches_in_node(node)
+        any_changed = any_changed or ch
+        new_nodes.append(node)
+    result, ch2 = _absorb_switch_in_body_list(new_nodes)
+    return result, (any_changed or ch2)
+
+
 class SwitchBodyAbsorber(OptimizationPass):
     """
     Absorb case body blocks directly into their SwitchNode.
@@ -383,6 +552,7 @@ class SwitchBodyAbsorber(OptimizationPass):
         label_to_block = {_label_for(b): b for b in func.blocks}
         changed = False
 
+        # ── CFG-based pass: SwitchNodes in non-absorbed blocks ────────────────
         for block in func.blocks:
             if getattr(block, "_absorbed", False):
                 continue
@@ -395,7 +565,20 @@ class SwitchBodyAbsorber(OptimizationPass):
                              _build_arm_hir, _collect_goto_targets)
                 changed = True
 
-        if changed:
+        # ── HIR-tree pass: SwitchNodes embedded inside IfNode/loop bodies ─────
+        # Occurs when IfElseStructurer absorbed the switch block together with
+        # its case arm blocks.  The case arm Label nodes were preserved by
+        # _build_arm_hir (keep_labels), so they appear as labeled siblings.
+        hir_changed = False
+        for block in func.blocks:
+            if getattr(block, "_absorbed", False):
+                continue
+            new_hir, ch = _absorb_switches_in_list(block.hir)
+            if ch:
+                block.hir = new_hir
+                hir_changed = True
+
+        if changed or hir_changed:
             self._dead_label_cleanup(func, _collect_goto_targets, _drop_dead_labels)
 
     def _absorb(self, func: Function, block, switch_node: SwitchNode,

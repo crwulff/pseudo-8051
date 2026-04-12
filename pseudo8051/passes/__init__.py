@@ -25,9 +25,16 @@ def run_all_passes(func: Function) -> None:
     from pseudo8051.analysis.liveness   import LivenessAnalysis
     from pseudo8051.passes.rmw          import RMWCollapser
     from pseudo8051.passes.loops        import LoopStructurer
-    from pseudo8051.passes.jmptable     import JmpTableStructurer, fixup_jmptable_edges
+    from pseudo8051.passes.jmptable     import (JmpTableStructurer,
+                                                fixup_jmptable_edges,
+                                                fixup_jmptable_edges_early)
     from pseudo8051.passes.switch       import SwitchStructurer, SwitchBodyAbsorber
     from pseudo8051.passes.ifelse       import IfElseStructurer
+
+    # Add synthetic CFG edges for JMP @A+DPTR blocks before dataflow so that
+    # ConstantPropagation sees case-handler blocks as predecessors of the
+    # merge block (e.g. prevents wrong constant propagation into merge point).
+    fixup_jmptable_edges_early(func)
 
     ConstantPropagation().run(func)
     LivenessAnalysis().run(func)

@@ -144,18 +144,25 @@ def _arm_blocks(start: BasicBlock, merge_ea: int) -> List[BasicBlock]:
     return sorted(result, key=lambda b: b.start_ea)
 
 
-def _build_arm_hir(blocks: List[BasicBlock], merge_label: str) -> List[HIRNode]:
+def _build_arm_hir(blocks: List[BasicBlock], merge_label: str,
+                   keep_labels: Optional[set] = None) -> List[HIRNode]:
     """
     Concatenate HIR from all arm blocks, stripping:
       • the block's own Label node (it becomes internal to the IfNode)
       • any 'goto merge_label;' statement or GotoStatement to merge
       • any conditional branch whose target is the merge label
+
+    If *keep_labels* is provided, Label nodes whose name is in that set are
+    preserved (used to keep switch case entry labels alive when a switch block
+    is absorbed into an if-arm, so SwitchBodyAbsorber can still find the arms).
     """
     nodes: List[HIRNode] = []
 
     for blk in blocks:
         for node in blk.hir:
             if isinstance(node, Label):
+                if keep_labels and node.name in keep_labels:
+                    nodes.append(node)
                 continue
             if isinstance(node, GotoStatement) and node.label == merge_label:
                 continue
@@ -589,8 +596,23 @@ class IfElseStructurer(OptimizationPass):
                         dbg("ifelse", f"  → done, new HIR: "
                                       f"{[type(n).__name__ for n in ref_blk.hir]}")
 
-        then_nodes = _build_arm_hir(true_arm,  merge_label)
-        else_nodes = _build_arm_hir(false_arm, merge_label)
+        # Collect switch case labels from arm blocks so they survive _build_arm_hir.
+        # When a SwitchNode is inlined into the arm HIR its case labels must remain as
+        # Label nodes so SwitchBodyAbsorber can later match and absorb the arms.
+        switch_labels: set = set()
+        for blk in true_arm + false_arm:
+            for _n in blk.hir:
+                if isinstance(_n, SwitchNode):
+                    for _, _body in _n.cases:
+                        if isinstance(_body, str):
+                            switch_labels.add(_body)
+                    if isinstance(_n.default_label, str):
+                        switch_labels.add(_n.default_label)
+
+        then_nodes = _build_arm_hir(true_arm,  merge_label,
+                                    keep_labels=switch_labels or None)
+        else_nodes = _build_arm_hir(false_arm, merge_label,
+                                    keep_labels=switch_labels or None)
 
         # ── Canonical form: then-body should be non-empty ─────────────────
         # When the true arm jumps straight to the merge (empty then), swap

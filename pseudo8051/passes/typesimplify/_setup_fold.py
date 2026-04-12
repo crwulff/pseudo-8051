@@ -129,8 +129,24 @@ def _fold_and_prune_setups(nodes: List[HIRNode],
     result: List[HIRNode] = []
     for k, node in enumerate(nodes):
         succ_refs = frozenset(_collect_hir_name_refs(nodes[k + 1:])) | _outer_refs
-        result.append(node.map_bodies(
-            lambda ns: _fold_and_prune_setups(ns, reg_map, succ_refs)))
+        if isinstance(node, SwitchNode):
+            # Be conservative for switch case bodies: any register written in any
+            # case body is a potential output that might be read after the switch.
+            # Add these to outer_refs so they're not pruned as dead.
+            case_writes: set = set()
+            for _, body in node.cases:
+                if isinstance(body, list):
+                    for bn in body:
+                        case_writes |= bn.written_regs
+            if isinstance(node.default_body, list):
+                for bn in node.default_body:
+                    case_writes |= bn.written_regs
+            extended = succ_refs | frozenset(case_writes)
+            result.append(node.map_bodies(
+                lambda ns, refs=extended: _fold_and_prune_setups(ns, reg_map, refs)))
+        else:
+            result.append(node.map_bodies(
+                lambda ns, refs=succ_refs: _fold_and_prune_setups(ns, reg_map, refs)))
 
     work: List[HIRNode] = result
 
