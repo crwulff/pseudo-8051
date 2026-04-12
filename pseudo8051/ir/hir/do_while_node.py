@@ -4,7 +4,7 @@ ir/hir/do_while_node.py — DoWhileNode structured control-flow node.
 
 from typing import Callable, List, Tuple
 
-from pseudo8051.ir.hir._base import HIRNode, _render_cond, _ann_field, _Cond, _killed_by_seq, _refs_from_expr
+from pseudo8051.ir.hir._base import HIRNode, _render_cond, _ann_field, _Cond, _killed_by_seq, _possibly_killed_by_seq, _refs_from_expr
 
 
 class DoWhileNode(HIRNode):
@@ -29,7 +29,7 @@ class DoWhileNode(HIRNode):
         return _killed_by_seq(self.body_nodes)
 
     def possibly_killed(self) -> frozenset:
-        return _killed_by_seq(self.body_nodes)
+        return _possibly_killed_by_seq(self.body_nodes)
 
     def replace_condition(self, new_cond) -> "DoWhileNode":
         return DoWhileNode(self.ea, new_cond, self.body_nodes)

@@ -4,7 +4,7 @@ ir/hir/switch_node.py — SwitchNode structured control-flow node.
 
 from typing import Callable, List, Optional, Tuple, Union
 
-from pseudo8051.ir.hir._base import HIRNode, _render_expr, _ann_field, _killed_by_seq, _refs_from_expr
+from pseudo8051.ir.hir._base import HIRNode, _render_expr, _ann_field, _killed_by_seq, _possibly_killed_by_seq, _refs_from_expr
 from pseudo8051.ir.expr import Expr
 
 
@@ -98,9 +98,9 @@ class SwitchNode(HIRNode):
         result: frozenset = frozenset()
         for _, body in self.cases:
             if isinstance(body, list):
-                result |= _killed_by_seq(body)
+                result |= _possibly_killed_by_seq(body)
         if self.default_body is not None:
-            result |= _killed_by_seq(self.default_body)
+            result |= _possibly_killed_by_seq(self.default_body)
         return result
 
     def name_refs(self) -> frozenset:

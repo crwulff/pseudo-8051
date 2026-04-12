@@ -2,7 +2,7 @@
 handlers/mov.py — MOV / MOVX / MOVC / PUSH / POP / XCH / XCHD handlers.
 """
 
-from typing import List, Optional
+from typing import List
 
 import ida_ua
 import idc
@@ -10,16 +10,11 @@ import idc
 from pseudo8051.ir.instruction import MnemonicHandler
 from pseudo8051.ir.operand     import Operand
 from pseudo8051.ir.hir         import HIRNode, Assign, ExprStmt
-from pseudo8051.ir.expr        import Reg, Const, Name, XRAMRef, CROMRef, Call
+from pseudo8051.ir.expr        import Reg, Name, XRAMRef, CROMRef, Call
 from pseudo8051.constants      import (
     REG_DPTR, PHRASE_AT_DPTR,
     PARAM_REGS, resolve_ext_addr,
 )
-
-# Registers whose constant values we can inline as immediates
-_TRACKED_REGS = frozenset(["A", "R0", "R1", "R2", "R3", "R4", "R5", "R6", "R7"])
-
-from pseudo8051.ir.cpstate import CPState
 
 
 def _op_expr(insn, n: int, state=None):
@@ -63,14 +58,6 @@ class MovHandler(MnemonicHandler):
             sym = resolve_ext_addr(imm)
             if sym != hex(imm):
                 return [Assign(ea, Reg("DPTR"), Name(sym))]
-        # When the source register has a known constant value, inline it.
-        if state is not None and op1.type == ida_ua.o_reg:
-            src_name = idc.print_operand(insn.ea, 1)
-            if src_name in _TRACKED_REGS:
-                val = state.get(src_name)
-                if val is not None:
-                    dst = _op_expr(insn, 0, state)
-                    return [Assign(ea, dst, Const(val))]
         dst = _op_expr(insn, 0, state)
         src = _op_expr(insn, 1, state)
         return [Assign(ea, dst, src)]
@@ -109,13 +96,6 @@ class MovxHandler(MnemonicHandler):
                 xram_ref = XRAMRef(Name(mem_name))
             else:
                 xram_ref = XRAMRef(Reg("DPTR"))
-            # Substitute a known constant source register
-            if state is not None and op1.type == ida_ua.o_reg:
-                src_name = idc.print_operand(insn.ea, 1)
-                if src_name in _TRACKED_REGS:
-                    val = state.get(src_name)
-                    if val is not None:
-                        return [Assign(ea, xram_ref, Const(val))]
             src = _op_expr(insn, 1, state)
             return [Assign(ea, xram_ref, src)]
 

@@ -13,7 +13,7 @@ import sys
 from typing import Callable, Dict, FrozenSet, List, Optional, Tuple
 
 from pseudo8051.ir.hir import (HIRNode, Assign, TypedAssign, CompoundAssign,  # noqa: F401
-                               ExprStmt, ReturnStmt, IfGoto, IfNode)
+                               ExprStmt, ReturnStmt, IfGoto, IfNode, SwitchNode)
 from pseudo8051.ir.expr import (  # noqa: F401
     Expr, Reg, Regs, Name, XRAMRef, RegGroup, ArrayRef,
 )
@@ -510,6 +510,8 @@ def _count_reg_uses_in_node(r: str, node: HIRNode) -> int:
         _walk_expr(node.cond, _fn)
     elif isinstance(node, IfNode):
         _walk_expr(node.condition, _fn)
+    elif isinstance(node, SwitchNode):
+        _walk_expr(node.subject, _fn)
     return count[0]
 
 
@@ -572,6 +574,16 @@ def _subst_reg_in_node(node: HIRNode, r: str,
         if new_cond is node.condition:
             return None
         new_node = IfNode(node.ea, new_cond, node.then_nodes, node.else_nodes)
+        new_node.ann = node.ann
+        return new_node
+
+    if isinstance(node, SwitchNode):
+        new_subject = _walk_expr(node.subject, _fn)
+        if new_subject is node.subject:
+            return None
+        new_node = SwitchNode(node.ea, new_subject, node.cases,
+                              node.default_label, node.default_body,
+                              case_comments=list(node.case_comments))
         new_node.ann = node.ann
         return new_node
 

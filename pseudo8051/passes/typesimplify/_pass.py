@@ -91,7 +91,10 @@ class TypeAwareSimplifier(OptimizationPass):
         # any register in the condition, enabling multi-use forward propagation below.
         from pseudo8051.passes.ifelse import _remove_nop_gotos
         func.hir = _remove_nop_gotos(func.hir)
+        from pseudo8051.passes.debug_dump import dump_pass_hir
+        dump_pass_hir("09.pre_propagate", func.hir, func.name)
         func.hir = _propagate_values(func.hir, reg_map)
+        dump_pass_hir("10.propagate", func.hir, func.name)
         func.hir = _prune_orphaned_dptr_inc(func.hir)
         func.hir = _fold_xram_call_args(func.hir)
         func.hir = _fold_and_prune_setups(func.hir, reg_map)
@@ -141,5 +144,5 @@ class TypeAwareSimplifier(OptimizationPass):
         _live_labels = _collect_goto_targets(func.hir)
         func.hir = _drop_dead_labels(func.hir, _live_labels)
 
-        from pseudo8051.passes.debug_dump import dump_pass_hir
-        dump_pass_hir("typesimp", func.hir, func.name)
+        from pseudo8051.passes.debug_dump import dump_pass_hir as _dump
+        _dump("11.typesimp", func.hir, func.name)

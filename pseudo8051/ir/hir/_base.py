@@ -13,11 +13,12 @@ if TYPE_CHECKING:
 
 class NodeAnnotation:
     """Per-node annotation: register names/types and constant values at this point."""
-    __slots__ = ("reg_groups", "reg_consts", "call_arg_ann", "callee_args", "user_anns")
+    __slots__ = ("reg_groups", "reg_consts", "reg_exprs", "call_arg_ann", "callee_args", "user_anns")
 
     def __init__(self):
         self.reg_groups:   "List[TypeGroup]"           = []   # forward-propagated TypeGroups
         self.reg_consts:   Dict[str, int]               = {}   # reg → known const
+        self.reg_exprs:    "Dict[str, Expr]"            = {}   # reg → defining Expr (met across preds)
         self.call_arg_ann: "List[TypeGroup]"            = []   # backward-propagated callee params
         self.callee_args:  "Optional[List[TypeGroup]]"  = None # call node only
         self.user_anns:    "List[TypeGroup]"            = []   # user register annotations (force-installed)
@@ -40,6 +41,7 @@ class NodeAnnotation:
         if first_ann is not None:
             ann.reg_groups  = first_ann.reg_groups
             ann.reg_consts  = first_ann.reg_consts
+            ann.reg_exprs   = first_ann.reg_exprs
             ann.callee_args = first_ann.callee_args
         if last_ann is not None:
             ann.call_arg_ann = last_ann.call_arg_ann
@@ -155,7 +157,10 @@ class HIRNode(ABC):
                 out.append(f"    {label}{g.name}: {g.type} [{regs}]{xram}")
         if ann.reg_consts:
             out.append("  ann.reg_consts: " +
-                       ", ".join(f"{k}={v:#x}" for k, v in ann.reg_consts.items()))
+                       ", ".join(f"{k}={v:#x}" for k, v in sorted(ann.reg_consts.items())))
+        if ann.reg_exprs:
+            out.append("  ann.reg_exprs: " +
+                       ", ".join(f"{k}={v.render()}" for k, v in sorted(ann.reg_exprs.items())))
         if ann.call_arg_ann:
             out.append("  ann.call_arg_ann:")
             for g in ann.call_arg_ann:
@@ -274,6 +279,20 @@ def _killed_by_seq(nodes: "List[HIRNode]") -> frozenset:
     result: frozenset = frozenset()
     for n in nodes:
         result |= n.def_regs | n.definitely_killed()
+    return result
+
+
+def _possibly_killed_by_seq(nodes: "List[HIRNode]") -> frozenset:
+    """Union of registers possibly killed by a sequential list of nodes.
+
+    A register is possibly killed by a sequence if ANY node in the sequence
+    possibly kills it.  For structured nodes this recurses through their bodies
+    (via possibly_killed()), unlike _killed_by_seq which uses definitely_killed().
+    Used by structured-node possibly_killed() overrides.
+    """
+    result: frozenset = frozenset()
+    for n in nodes:
+        result |= n.possibly_killed()
     return result
 
 

@@ -189,12 +189,10 @@ def _read_jump_table(table_ea: int, page_base: int, func: Function,
         return [], 0
 
     stride = expected_stride or 1
-    is_pow2 = stride > 1 and (stride & (stride - 1)) == 0
 
     cases: List[Tuple[List[int], str]] = []
     for i, (_entry_ea, lbl) in enumerate(entries):
-        case_val = i if is_pow2 else i * stride
-        cases.append(([case_val], lbl))
+        cases.append(([i], lbl))
 
     return cases, stride
 
@@ -214,7 +212,6 @@ def _cases_from_cfg(block: BasicBlock) -> Tuple[Optional[List], Optional[int]]:
 
     succs_sorted = sorted(succs, key=lambda b: b.start_ea)
     stride = succs_sorted[1].start_ea - succs_sorted[0].start_ea
-    is_pow2 = stride > 1 and (stride & (stride - 1)) == 0
 
     cases: List[Tuple[List[int], str]] = []
     for i, sjmp_blk in enumerate(succs_sorted):
@@ -226,8 +223,7 @@ def _cases_from_cfg(block: BasicBlock) -> Tuple[Optional[List], Optional[int]]:
                           f"inner successors — aborting CFG path")
             return None, None
         lbl = _label_for(inner[0])
-        case_val = i if is_pow2 else i * stride
-        cases.append(([case_val], lbl))
+        cases.append(([i], lbl))
 
     return cases, stride
 
@@ -287,11 +283,20 @@ def _try_jmptable(func: Function, block: BasicBlock) -> bool:
             sjmp_blk._absorbed = True
 
     # ── Build SwitchNode ──────────────────────────────────────────────────
-    is_pow2 = stride > 1 and (stride & (stride - 1)) == 0
+    # Case values are always 0, 1, 2, … (the logical switch index).
+    # The subject expression divides A by the stride to recover the index:
+    #   stride=1 → A           (no division needed)
+    #   stride=2 → A >> 1      (power-of-2: shift is cheaper than divide)
+    #   stride=4 → A >> 2
+    #   stride=3 → A / 3       (non-power-of-2: explicit divide)
     subject: Expr = Reg("A")
-    if is_pow2:
-        shift = int(math.log2(stride))
-        subject = BinOp(Reg("A"), ">>", Const(shift))
+    if stride > 1:
+        is_pow2 = (stride & (stride - 1)) == 0
+        if is_pow2:
+            shift = int(math.log2(stride))
+            subject = BinOp(Reg("A"), ">>", Const(shift))
+        else:
+            subject = BinOp(Reg("A"), "/", Const(stride))
 
     dptr_idx = _find_preceding_dptr_assign(block.hir, jmp_idx)
     start = dptr_idx if dptr_idx is not None else jmp_idx
@@ -305,63 +310,6 @@ def _try_jmptable(func: Function, block: BasicBlock) -> bool:
 
     block.hir[start : jmp_idx + 1] = [sw]
     return True
-
-
-def fixup_jmptable_edges_early(func: Function) -> None:
-    """
-    Pre-ConstantPropagation variant of fixup_jmptable_edges.
-
-    Called before ConstantPropagation() and initial_hir() so that the
-    dataflow analysis sees the correct successor/predecessor sets for
-    JMP @A+DPTR dispatch blocks.  Uses instruction scanning only —
-    block.hir is not yet populated.
-
-    Detects JMP @A+DPTR by mnemonic scan, then threads a fresh CPState
-    through the block to recover DPTR (which the compiler always loads
-    in the same block as the dispatch jump).
-    """
-    from pseudo8051.ir.cpstate import CPState, propagate_insn as _prop
-
-    for block in func.blocks:
-        if block.successors:          # IDA already has edges — nothing to do
-            continue
-
-        # Find a JMP instruction in this block by mnemonic scan
-        jmp_ea = None
-        for insn in block.instructions:
-            if insn.mnemonic == "JMP":
-                jmp_ea = insn.ea
-                break
-        if jmp_ea is None:
-            continue
-
-        # Thread a fresh CPState up to (but not including) the JMP to find DPTR
-        state = CPState()
-        for insn in block.instructions:
-            if insn.ea >= jmp_ea:
-                break
-            raw = insn.insn
-            if raw is not None:
-                _prop(raw, state)
-
-        dptr_val = state.get("DPTR")
-        if dptr_val is None:
-            continue
-
-        page_base = block.start_ea & ~0xFFFF
-        table_ea  = page_base | (dptr_val & 0xFFFF)
-        cases, stride = _read_jump_table(table_ea, page_base, func)
-        if not cases:
-            continue
-
-        dbg("switch", f"fixup_jmptable_edges_early: block {hex(block.start_ea)} "
-                      f"table @ {hex(table_ea)} → {len(cases)} edges stride={stride}")
-        for i in range(len(cases)):
-            entry_ea = table_ea + i * stride
-            sjmp_blk = func._block_map.get(entry_ea)
-            if sjmp_blk is not None:
-                block._add_successor(sjmp_blk)
-                dbg("switch", f"  {hex(block.start_ea)} → {hex(sjmp_blk.start_ea)}")
 
 
 def fixup_jmptable_edges(func: Function) -> None:
@@ -411,3 +359,7 @@ class JmpTableStructurer(OptimizationPass):
                 if _try_jmptable(func, block):
                     changed = True
                     break  # restart — absorbed-set has changed
+        from pseudo8051.passes.debug_dump import dump_pass_hir
+        all_nodes = [n for b in func.blocks
+                     if not getattr(b, "_absorbed", False) for n in b.hir]
+        dump_pass_hir("05.jmptable", all_nodes, func.name)

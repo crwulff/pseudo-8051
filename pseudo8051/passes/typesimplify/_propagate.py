@@ -215,7 +215,15 @@ def _propagate_register_copies(live: List[HIRNode],
             # may carry different register values, so we cannot propagate past them.
             # GotoStatement/BreakStmt/ContinueStmt are unconditional jumps: fall-
             # through code after them is unreachable from this path.
-            if isinstance(live[j], (Label, GotoStatement, BreakStmt, ContinueStmt)):
+            if isinstance(live[j], (GotoStatement, BreakStmt, ContinueStmt)):
+                break   # unreachable fall-through; hard stop
+            if isinstance(live[j], Label):
+                # Label = CFG merge point.  Continue only if ALL predecessor paths
+                # agree on the same expression for r (checked via ann.reg_exprs).
+                if (is_reg_lhs
+                        and live[j].ann is not None
+                        and live[j].ann.reg_exprs.get(r) == replacement):
+                    continue
                 break
             uses_here = _count_reg_uses_in_node(r, live[j])
             total_uses += uses_here

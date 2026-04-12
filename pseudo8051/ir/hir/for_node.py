@@ -4,7 +4,7 @@ ir/hir/for_node.py — ForNode structured control-flow node.
 
 from typing import Callable, List, Tuple, Union
 
-from pseudo8051.ir.hir._base import HIRNode, _render_expr, _render_cond, _ann_field, _Cond, _killed_by_seq, _refs_from_expr
+from pseudo8051.ir.hir._base import HIRNode, _render_expr, _render_cond, _ann_field, _Cond, _killed_by_seq, _possibly_killed_by_seq, _refs_from_expr
 from pseudo8051.ir.hir.assign import Assign
 from pseudo8051.ir.expr import Expr
 
@@ -49,7 +49,7 @@ class ForNode(HIRNode):
 
     def possibly_killed(self) -> frozenset:
         """Registers possibly killed if the body executes at least once."""
-        return _killed_by_seq(self.body_nodes)
+        return _possibly_killed_by_seq(self.body_nodes)
 
     def replace_condition(self, new_cond) -> "ForNode":
         return ForNode(self.ea, self.init, new_cond, self.update, self.body_nodes)

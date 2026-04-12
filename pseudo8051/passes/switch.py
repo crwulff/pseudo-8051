@@ -218,6 +218,10 @@ class SwitchStructurer(OptimizationPass):
                 if _try_switch(func, block):
                     changed = True
                     break   # restart — absorbed-set has changed
+        from pseudo8051.passes.debug_dump import dump_pass_hir
+        all_nodes = [n for b in func.blocks
+                     if not getattr(b, "_absorbed", False) for n in b.hir]
+        dump_pass_hir("06.switch", all_nodes, func.name)
 
 
 # ── SwitchBodyAbsorber helpers ────────────────────────────────────────────────
@@ -580,6 +584,10 @@ class SwitchBodyAbsorber(OptimizationPass):
 
         if changed or hir_changed:
             self._dead_label_cleanup(func, _collect_goto_targets, _drop_dead_labels)
+        from pseudo8051.passes.debug_dump import dump_pass_hir
+        all_nodes = [n for b in func.blocks
+                     if not getattr(b, "_absorbed", False) for n in b.hir]
+        dump_pass_hir("08.switchabsorb", all_nodes, func.name)
 
     def _absorb(self, func: Function, block, switch_node: SwitchNode,
                 label_to_block: dict,

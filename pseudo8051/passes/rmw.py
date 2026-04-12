@@ -129,4 +129,4 @@ class RMWCollapser(OptimizationPass):
         from pseudo8051.passes.debug_dump import dump_pass_hir
         all_nodes = [n for b in func.blocks
                      if not getattr(b, "_absorbed", False) for n in b.hir]
-        dump_pass_hir("rmw", all_nodes, func.name)
+        dump_pass_hir("03.rmw", all_nodes, func.name)

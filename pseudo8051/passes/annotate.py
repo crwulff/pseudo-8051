@@ -87,6 +87,35 @@ def _meet_groups(pred_exits: List[list]) -> list:
     return result
 
 
+def _expr_refs_reg(expr, reg: str) -> bool:
+    """Return True if expr contains Reg(reg) anywhere in its tree."""
+    from pseudo8051.ir.expr import Expr as _Expr
+    if not isinstance(expr, _Expr):
+        return False
+    from pseudo8051.ir.expr import Regs as _Regs
+    if isinstance(expr, _Regs) and reg in expr.reg_set():
+        return True
+    for child in expr.children():
+        if _expr_refs_reg(child, reg):
+            return True
+    return False
+
+
+def _meet_exprs(pred_exits: List[dict]) -> dict:
+    """Intersect predecessor expr states: keep r→expr only when all preds agree."""
+    if not pred_exits:
+        return {}
+    result = {}
+    all_keys = set().union(*(set(d) for d in pred_exits))
+    for k in all_keys:
+        if any(k not in d for d in pred_exits):
+            continue
+        exprs = [d[k] for d in pred_exits]
+        if all(e == exprs[0] for e in exprs[1:]):
+            result[k] = exprs[0]
+    return result
+
+
 def _varinfo_map_to_groups(reg_map: dict) -> list:
     """Convert a Dict[str, VarInfo] to a deduplicated List[TypeGroup].
 
@@ -389,6 +418,7 @@ class AnnotationPass(OptimizationPass):
 
         # ── Forward walk ───────────────────────────────────────────────────
         block_exit_groups: Dict[int, list] = {}   # start_ea → exit groups
+        block_exit_exprs:  Dict[int, dict] = {}   # start_ea → exit expr_state
         call_sites: List[Tuple] = []              # (block, nodes, idx, callee_groups)
         xram_call_sites: List[Tuple] = []         # (nodes, idx, xp_map)
         retval_count = 0                          # number of seeded return values so far
@@ -410,6 +440,16 @@ class AnnotationPass(OptimizationPass):
             cp = getattr(block, "cp_entry", None)
             const_state: Dict[str, int] = dict(cp._d) if cp is not None else {}
 
+            # expr_state: meet of predecessor exit expression states
+            pred_expr_exits = [block_exit_exprs[p.start_ea]
+                                for p in preds if p.start_ea in block_exit_exprs]
+            if block.start_ea == func.entry_block.start_ea:
+                expr_state: dict = {}
+            elif pred_expr_exits:
+                expr_state = _meet_exprs(pred_expr_exits)
+            else:
+                expr_state = {}
+
             nodes = block.hir
             for idx, node in enumerate(nodes):
                 # (a) Inject custom register annotations at this instruction EA
@@ -426,6 +466,7 @@ class AnnotationPass(OptimizationPass):
                 ann = NodeAnnotation()
                 ann.reg_groups = list(groups)
                 ann.reg_consts = dict(const_state)
+                ann.reg_exprs  = dict(expr_state)
                 ann.user_anns  = user_tgs   # user annotations force-install in _build_node_eff
                 node.ann = ann
 
@@ -461,9 +502,10 @@ class AnnotationPass(OptimizationPass):
                     except Exception:
                         pass
 
-                    # Calls clobber all tracked groups
+                    # Calls clobber all tracked groups and expression state
                     groups = []
                     const_state.clear()
+                    expr_state.clear()
                     # Seed return value TypeGroup(s) for forward propagation
                     if callee_proto is not None and callee_proto.return_regs:
                         retval_count += 1
@@ -510,12 +552,23 @@ class AnnotationPass(OptimizationPass):
                     if r not in xram_loaded_regs:
                         groups = _kill_groups(groups, r)
                     const_state.pop(r, None)
+                    expr_state.pop(r, None)
+                    # Also evict any expr_state entry whose value references r,
+                    # since that expression is now stale (e.g. R6=A becomes
+                    # invalid once A is overwritten).
+                    stale = [k for k, v in expr_state.items()
+                             if _expr_refs_reg(v, r)]
+                    for k in stale:
+                        expr_state.pop(k)
                     # DPTR write implicitly invalidates DPH/DPL and vice-versa
                     if r == "DPTR":
                         const_state.pop("DPH", None)
                         const_state.pop("DPL", None)
+                        expr_state.pop("DPH", None)
+                        expr_state.pop("DPL", None)
                     elif r in ("DPH", "DPL"):
                         const_state.pop("DPTR", None)
+                        expr_state.pop("DPTR", None)
 
                 # SUBB/ADDC pattern: CompoundAssign A-=... or A+=... whose RHS
                 # references C means this instruction writes the carry flag C as
@@ -535,7 +588,13 @@ class AnnotationPass(OptimizationPass):
                 # (e) Forward-propagate new constant produced by this node
                 _propagate_const(node, const_state)
 
+                # (f) Track defining expression for simple single-register assigns
+                if (isinstance(node, Assign)
+                        and isinstance(node.lhs, RegExpr) and node.lhs.is_single):
+                    expr_state[node.lhs.name] = node.rhs
+
             block_exit_groups[block.start_ea] = list(groups)
+            block_exit_exprs[block.start_ea]  = dict(expr_state)
 
         # ── Backward pass: annotate pre-call assignments with callee param names ──
         for block, nodes, call_idx, callee_groups in call_sites:
@@ -548,4 +607,4 @@ class AnnotationPass(OptimizationPass):
         if DEBUG:
             from pseudo8051.passes.debug_dump import dump_pass_hir
             all_nodes = [n for block in _rpo(func) for n in block.hir]
-            dump_pass_hir("annotate", all_nodes, func.name)
+            dump_pass_hir("02.annotate", all_nodes, func.name)

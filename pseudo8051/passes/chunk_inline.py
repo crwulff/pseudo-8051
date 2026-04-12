@@ -70,7 +70,7 @@ class ChunkInliner(OptimizationPass):
         from pseudo8051.passes.debug_dump import dump_pass_hir
         all_nodes = [n for b in func.blocks
                      if not getattr(b, "_absorbed", False) for n in b.hir]
-        dump_pass_hir("chunk_inline", all_nodes, func.name)
+        dump_pass_hir("01.chunk_inline", all_nodes, func.name)
 
 
 def _chunk_target(insn, func_ea: int) -> Optional[int]:
