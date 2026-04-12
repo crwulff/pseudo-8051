@@ -246,6 +246,15 @@ class SwitchCaseAnnotator(OptimizationPass):
             dbg("switch", f"  {reg_name} = {asgn_str}")
             param_name, addend = _extract_linear(asgn.rhs)
             if param_name is None:
+                # One-level register-copy trace: DPL = A and A = dest_type + 2
+                # → resolve A's assignment if _propagate_values was blocked by a Label.
+                if isinstance(asgn.rhs, Regs) and asgn.rhs.is_single:
+                    src_asgn = _find_last_assign(context, asgn.rhs.name)
+                    if src_asgn is not None:
+                        param_name, addend = _extract_linear(src_asgn.rhs)
+                        if param_name is not None:
+                            dbg("switch", f"  {reg_name} traced via {asgn.rhs.name!r}")
+            if param_name is None:
                 dbg("switch", f"  → rhs not linear (Name ± Const), skipping")
                 return
             type_str = name_type.get(param_name)

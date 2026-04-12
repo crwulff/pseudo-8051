@@ -9,7 +9,7 @@ import ida_ua
 from pseudo8051.ir.instruction import MnemonicHandler
 from pseudo8051.ir.operand     import Operand
 from pseudo8051.ir.hir         import HIRNode, Assign, CompoundAssign, ExprStmt
-from pseudo8051.ir.expr        import Reg, Const, UnaryOp, BinOp, Call
+from pseudo8051.ir.expr        import Reg, Const, UnaryOp, BinOp, Call, Rot9Op
 from pseudo8051.constants      import PARAM_REGS
 
 
@@ -118,7 +118,9 @@ class RlHandler(MnemonicHandler):
         return frozenset({"A"})
 
     def lift(self, insn, state=None) -> List[HIRNode]:
-        return [Assign(insn.ea, Reg("A"), Call("rol8", [Reg("A")]))]
+        a = Reg("A")
+        return [Assign(insn.ea, a,
+                       BinOp(BinOp(a, "<<", Const(1)), "|", BinOp(a, ">>", Const(7))))]
 
 
 class RlcHandler(MnemonicHandler):
@@ -129,7 +131,7 @@ class RlcHandler(MnemonicHandler):
         return frozenset({"A", "C"})
 
     def lift(self, insn, state=None) -> List[HIRNode]:
-        return [Assign(insn.ea, Reg("A"), Call("rol9", [Reg("A"), Reg("C")]))]
+        return [Assign(insn.ea, Reg("A"), Rot9Op("rol9", Reg("A"), Reg("C")))]
 
 
 class RrHandler(MnemonicHandler):
@@ -140,7 +142,9 @@ class RrHandler(MnemonicHandler):
         return frozenset({"A"})
 
     def lift(self, insn, state=None) -> List[HIRNode]:
-        return [Assign(insn.ea, Reg("A"), Call("ror8", [Reg("A")]))]
+        a = Reg("A")
+        return [Assign(insn.ea, a,
+                       BinOp(BinOp(a, ">>", Const(1)), "|", BinOp(a, "<<", Const(7))))]
 
 
 class RrcHandler(MnemonicHandler):
@@ -151,7 +155,7 @@ class RrcHandler(MnemonicHandler):
         return frozenset({"A", "C"})
 
     def lift(self, insn, state=None) -> List[HIRNode]:
-        return [Assign(insn.ea, Reg("A"), Call("ror9", [Reg("A"), Reg("C")]))]
+        return [Assign(insn.ea, Reg("A"), Rot9Op("ror9", Reg("A"), Reg("C")))]
 
 
 class SwapHandler(MnemonicHandler):

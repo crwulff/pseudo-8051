@@ -23,7 +23,7 @@ Common 2-byte jump table (K=1):
 from typing import Dict, List, Optional, Tuple
 
 from pseudo8051.ir.hir import HIRNode, Assign, CompoundAssign, SwitchNode
-from pseudo8051.ir.expr import Expr, Reg, Const, BinOp, Call
+from pseudo8051.ir.expr import Expr, Reg, Const, BinOp
 from pseudo8051.constants import dbg
 from pseudo8051.passes.patterns.base   import Pattern, Match, Simplify
 from pseudo8051.passes.patterns._utils import VarInfo, _subst_all_expr
@@ -36,13 +36,16 @@ _OP_WITHOUT_EQ = {
 
 
 def _is_rol_a(node: HIRNode) -> bool:
-    """True if node is Assign(Reg("A"), Call("rol8", [Reg("A")]))."""
-    return (isinstance(node, Assign)
-            and node.lhs == Reg("A")
-            and isinstance(node.rhs, Call)
-            and node.rhs.func_name == "rol8"
-            and len(node.rhs.args) == 1
-            and node.rhs.args[0] == Reg("A"))
+    """True if node is Assign(Reg("A"), (A << 1) | (A >> 7))."""
+    if not (isinstance(node, Assign) and node.lhs == Reg("A")):
+        return False
+    rhs = node.rhs
+    # (A << 1) | (A >> 7)
+    return (isinstance(rhs, BinOp) and rhs.op == "|"
+            and isinstance(rhs.lhs, BinOp) and rhs.lhs.op == "<<"
+            and rhs.lhs.lhs == Reg("A") and rhs.lhs.rhs == Const(1)
+            and isinstance(rhs.rhs, BinOp) and rhs.rhs.op == ">>"
+            and rhs.rhs.lhs == Reg("A") and rhs.rhs.rhs == Const(7))
 
 
 class RolSwitchPattern(Pattern):

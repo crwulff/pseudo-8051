@@ -8,14 +8,15 @@ Verifies collapsing of the 8051 indirect-jump preamble:
 """
 
 from pseudo8051.ir.hir import Assign, CompoundAssign, SwitchNode
-from pseudo8051.ir.expr import Reg, Const, BinOp, Call
+from pseudo8051.ir.expr import Reg, Const, BinOp
 from pseudo8051.passes.patterns.rol_switch import RolSwitchPattern, _is_rol_a
 
 _noop = lambda nodes, reg_map: nodes
 
 
 def _rol_a(ea: int) -> Assign:
-    return Assign(ea, Reg("A"), Call("rol8", [Reg("A")]))
+    a = Reg("A")
+    return Assign(ea, a, BinOp(BinOp(a, "<<", Const(1)), "|", BinOp(a, ">>", Const(7))))
 
 
 def _sw(ea: int, k: int, cases=None) -> SwitchNode:
@@ -34,11 +35,15 @@ class TestIsRolA:
         assert _is_rol_a(_rol_a(0))
 
     def test_rejects_ror(self):
-        node = Assign(0, Reg("A"), Call("ror8", [Reg("A")]))
+        # right-rotate: (A >> 1) | (A << 7) — different shifts
+        a = Reg("A")
+        node = Assign(0, a, BinOp(BinOp(a, ">>", Const(1)), "|", BinOp(a, "<<", Const(7))))
         assert not _is_rol_a(node)
 
-    def test_rejects_rol8_other_reg(self):
-        node = Assign(0, Reg("A"), Call("rol8", [Reg("R1")]))
+    def test_rejects_wrong_shift_amount(self):
+        # (A << 2) | (A >> 6) — not a single-bit rotate
+        a = Reg("A")
+        node = Assign(0, a, BinOp(BinOp(a, "<<", Const(2)), "|", BinOp(a, ">>", Const(6))))
         assert not _is_rol_a(node)
 
     def test_rejects_non_assign(self):
