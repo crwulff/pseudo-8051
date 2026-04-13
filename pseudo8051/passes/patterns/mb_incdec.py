@@ -65,18 +65,26 @@ def _try_unit(nodes: List[HIRNode], j: int,
     xram_j = j
     if xram_j < n_total:
         n = nodes[xram_j]
-        if (isinstance(n, Assign)
-                and n.lhs == Reg("DPTR")
-                and isinstance(n.rhs, Name)):
-            dptr_sym = n.rhs.name
-            # Only consume if the very next node is A = XRAM[dptr_sym]
-            if (xram_j + 1 < n_total
-                    and isinstance(nodes[xram_j + 1], Assign)
-                    and nodes[xram_j + 1].lhs == Reg("A")
-                    and isinstance(nodes[xram_j + 1].rhs, XRAMRef)
-                    and isinstance(nodes[xram_j + 1].rhs.inner, Name)
-                    and nodes[xram_j + 1].rhs.inner.name == dptr_sym):
-                xram_j += 1  # skip the DPTR prefix
+        if isinstance(n, Assign) and n.lhs == Reg("DPTR"):
+            if isinstance(n.rhs, Name):
+                dptr_sym: Optional[str] = n.rhs.name
+            elif isinstance(n.rhs, Const):
+                dptr_sym = n.rhs.alias
+            else:
+                dptr_sym = None
+            if dptr_sym is not None:
+                # Only consume if the very next node is A = XRAM[dptr_sym]
+                nxt = nodes[xram_j + 1] if xram_j + 1 < n_total else None
+                if (nxt is not None
+                        and isinstance(nxt, Assign)
+                        and nxt.lhs == Reg("A")
+                        and isinstance(nxt.rhs, XRAMRef)):
+                    inner = nxt.rhs.inner
+                    inner_sym = (inner.name if isinstance(inner, Name)
+                                 else inner.alias if isinstance(inner, Const)
+                                 else None)
+                    if inner_sym == dptr_sym:
+                        xram_j += 1  # skip the DPTR prefix
 
     if xram_j + 2 < n_total:
         n0, n1, n2 = nodes[xram_j], nodes[xram_j + 1], nodes[xram_j + 2]

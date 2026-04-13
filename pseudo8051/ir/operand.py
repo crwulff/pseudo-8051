@@ -157,7 +157,8 @@ class Operand:
                     dptr_val = cp_state.get("DPTR")
                     if dptr_val is not None:
                         sym = resolve_ext_addr(dptr_val)
-                        return XRAMRef(Name(sym))
+                        alias = sym if sym != hex(dptr_val) else None
+                        return XRAMRef(Const(dptr_val, alias=alias))
                 return XRAMRef(Reg("DPTR"))
             if phrase == PHRASE_AT_A_DPTR:
                 return CROMRef(BinOp(Reg("A"), "+", Reg("DPTR")))

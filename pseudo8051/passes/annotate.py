@@ -552,6 +552,9 @@ class AnnotationPass(OptimizationPass):
                 _compound_old_expr    = None
                 _compound_canon_rhs   = None
                 _assign_precanon_rhs  = None   # pre-kill canon for self-ref Assign
+                _unary_reg            = None   # register modified by ExprStmt(UnaryOp)
+                _unary_old_expr       = None
+                _unary_delta          = None
                 if (isinstance(node, CompoundAssign)
                         and isinstance(node.lhs, RegExpr) and node.lhs.is_single):
                     _compound_old_expr = expr_state.get(node.lhs.name)
@@ -564,10 +567,30 @@ class AnnotationPass(OptimizationPass):
                     if (expr_state.get(lhs_name) is not None
                             and _expr_refs_reg(node.rhs, lhs_name)):
                         # RHS reads the LHS reg — pre-canonicalize before kill so the
-                        # old value of the reg is substituted in (e.g. rl: A=A<<1|A>>7
-                        # with A=arg1 → A=(arg1<<1)|(arg1>>7) after the kill).
+                        # old value of the reg is substituted in (e.g. rl: A=rol8(A)
+                        # with A=arg1 → A=rol8(arg1) after the kill).
                         _assign_precanon_rhs = _canonicalize_expr(
                             node.rhs, const_state, groups, expr_state)
+                elif (isinstance(node, ExprStmt)):
+                    from pseudo8051.ir.expr import UnaryOp as _UnaryOp
+                    if (isinstance(node.expr, _UnaryOp)
+                            and node.expr.op in ('++', '--')
+                            and isinstance(node.expr.operand, RegExpr)
+                            and node.expr.operand.is_single):
+                        r = node.expr.operand.name
+                        old = expr_state.get(r)
+                        if old is not None:
+                            _unary_reg      = r
+                            _unary_old_expr = old
+                            _unary_delta    = +1 if node.expr.op == '++' else -1
+                        # Explicitly kill expr_state for r and stale references —
+                        # written_regs returns empty for ExprStmt so step (d)
+                        # won't do this; step (f) will rebuild the canonical value.
+                        expr_state.pop(r, None)
+                        stale = [k for k, v in expr_state.items()
+                                 if _expr_refs_reg(v, r)]
+                        for k in stale:
+                            expr_state.pop(k)
 
                 # (d) Kill defined regs (unless just loaded from XRAM above)
                 for r in node.written_regs:
@@ -626,6 +649,13 @@ class AnnotationPass(OptimizationPass):
                     stripped_op = node.op[:-1]   # "+=" → "+"
                     new_expr = _BinOp(_compound_old_expr, stripped_op, _compound_canon_rhs)
                     expr_state[node.lhs.name] = _canonicalize_expr(
+                        new_expr, const_state, groups, expr_state)
+                elif _unary_old_expr is not None:
+                    # ExprStmt(A++ / A--): rebuild as old_A ± 1
+                    from pseudo8051.ir.expr import BinOp as _BinOp, Const as _Const
+                    op = '+' if _unary_delta == 1 else '-'
+                    new_expr = _BinOp(_unary_old_expr, op, _Const(1))
+                    expr_state[_unary_reg] = _canonicalize_expr(
                         new_expr, const_state, groups, expr_state)
 
             block_exit_groups[block.start_ea] = list(groups)

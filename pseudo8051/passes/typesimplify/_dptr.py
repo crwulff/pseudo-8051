@@ -382,6 +382,10 @@ def _prune_orphaned_dptr_inc(nodes: List[HIRNode]) -> List[HIRNode]:
     """
     Remove DPTR++ nodes that have no downstream DPTR reference.
 
+    Also removes ExprStmt(Const(...)) nodes — pure constant statements with no
+    side effects that arise when a DPTR++ (or similar increment) is substituted
+    with a known constant value and then folded by _canonicalize_expr.
+
     Must run after _propagate_values so that XRAM[DPTR] expressions have
     been resolved to XRAM[name] before we check for surviving references.
     Recurses into bodies first so nested orphans are eliminated before outer
@@ -392,6 +396,9 @@ def _prune_orphaned_dptr_inc(nodes: List[HIRNode]) -> List[HIRNode]:
     for i, node in enumerate(nodes):
         if _is_dptr_inc_node(node) and not _dptr_live_after(nodes[i + 1:]):
             dbg("typesimp", f"  [{hex(node.ea)}] prune-orphaned-dptr++")
+            continue
+        if isinstance(node, ExprStmt) and isinstance(node.expr, Const):
+            dbg("typesimp", f"  [{hex(node.ea)}] prune-const-exprstmt ({node.expr.render()})")
             continue
         result.append(node)
     return result

@@ -15,7 +15,7 @@ from typing import Callable, Dict, FrozenSet, List, Optional, Tuple
 from pseudo8051.ir.hir import (HIRNode, Assign, TypedAssign, CompoundAssign,  # noqa: F401
                                ExprStmt, ReturnStmt, IfGoto, IfNode, SwitchNode)
 from pseudo8051.ir.expr import (  # noqa: F401
-    Expr, Reg, Regs, Const, Name, XRAMRef, RegGroup, ArrayRef, BinOp,
+    Expr, Reg, Regs, Const, Name, XRAMRef, RegGroup, ArrayRef, BinOp, UnaryOp,
 )
 
 
@@ -297,6 +297,7 @@ def _walk_expr(expr: Expr, fn: Callable[[Expr], Expr]) -> Expr:
     return fn(expr)
 
 
+
 def _is_reg_free(expr: Expr) -> bool:
     """True if expr contains no Regs leaf — safe to forward-substitute at multiple sites."""
     found = [False]
@@ -308,6 +309,21 @@ def _is_reg_free(expr: Expr) -> bool:
 
     _walk_expr(expr, _fn)
     return not found[0]
+
+
+def _fold_unary_const(e: Expr) -> Expr:
+    """Fold UnaryOp(++/--, Const) → Const (alias always removed).
+
+    Post-increment: returns the original value (side effect discarded).
+    Pre-increment:  returns value ± 1.
+    """
+    if isinstance(e, UnaryOp) and e.op in ('++', '--') and isinstance(e.operand, Const):
+        v = e.operand.value
+        if e.post:
+            return Const(v)                      # Const(v, alias)++ → Const(v)
+        delta = +1 if e.op == '++' else -1
+        return Const((v + delta) & 0xFFFF)       # ++Const(v) → Const(v+1)
+    return e
 
 
 def _canonicalize_expr(expr: Expr,
@@ -418,10 +434,24 @@ def _canonicalize_expr(expr: Expr,
                 if new_coeff == 1:
                     return lbase
                 return BinOp(lbase, '*', Const(new_coeff))
+        # Additive chain collapse: (base +/- Const(a)) +/- Const(b) → base +/- Const_combined
+        # Applied with 8-bit wrapping since all tracked registers are 8-bit.
+        if (op in ('+', '-') and rc
+                and isinstance(lhs, BinOp) and lhs.op in ('+', '-')
+                and isinstance(lhs.rhs, Const)):
+            s1 = +1 if lhs.op == '+' else -1
+            s2 = +1 if op == '+' else -1
+            combined = (s1 * lhs.rhs.value + s2 * rhs.value) & 0xFF
+            if combined == 0:
+                return lhs.lhs
+            if combined <= 0x7F:
+                return BinOp(lhs.lhs, '+', Const(combined))
+            return BinOp(lhs.lhs, '-', Const(0x100 - combined))
         return e
 
     def _fn(e: Expr) -> Expr:
-        return _fold(_subst_leaf(e))
+        e = _fold(_subst_leaf(e))
+        return _fold_unary_const(e)
 
     return _walk_expr(expr, _fn)
 
@@ -568,7 +598,8 @@ def _apply_expr_subst_to_node(node: HIRNode,
                                expr_fn: Callable[[Expr], Expr]) -> HIRNode:
     """Apply expr_fn to every read-position Expr in node.
 
-    Handles Assign/CompoundAssign (rhs), ExprStmt (expr), ReturnStmt (value).
+    Handles Assign/CompoundAssign (rhs), ExprStmt (expr), ReturnStmt (value),
+    IfGoto/IfNode (condition).
     LHS is never transformed. Returns node unchanged if nothing changed.
     """
     if isinstance(node, Assign):
@@ -583,6 +614,16 @@ def _apply_expr_subst_to_node(node: HIRNode,
     if isinstance(node, ReturnStmt) and node.value is not None:
         new_val = expr_fn(node.value)
         return ReturnStmt(node.ea, new_val) if new_val is not node.value else node
+    if isinstance(node, IfGoto):
+        new_cond = expr_fn(node.cond)
+        return IfGoto(node.ea, new_cond, node.label) if new_cond is not node.cond else node
+    if isinstance(node, IfNode):
+        new_cond = expr_fn(node.condition)
+        if new_cond is node.condition:
+            return node
+        new_node = IfNode(node.ea, new_cond, node.then_nodes, node.else_nodes)
+        new_node.ann = node.ann
+        return new_node
     return node
 
 
@@ -678,7 +719,7 @@ def _subst_reg_in_node(node: HIRNode, r: str,
             return replacement
         if isinstance(e, Name) and e.name == r:
             return replacement
-        return e
+        return _fold_unary_const(e)
 
     def _out(new_node: HIRNode) -> HIRNode:
         new_node.ann = node.ann

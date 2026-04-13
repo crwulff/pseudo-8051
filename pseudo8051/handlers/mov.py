@@ -10,7 +10,7 @@ import idc
 from pseudo8051.ir.instruction import MnemonicHandler
 from pseudo8051.ir.operand     import Operand
 from pseudo8051.ir.hir         import HIRNode, Assign, ExprStmt
-from pseudo8051.ir.expr        import Reg, Name, XRAMRef, CROMRef, Call
+from pseudo8051.ir.expr        import Reg, Name, Const, XRAMRef, CROMRef, Call
 from pseudo8051.constants      import (
     REG_DPTR, PHRASE_AT_DPTR,
     PARAM_REGS, resolve_ext_addr,
@@ -57,7 +57,7 @@ class MovHandler(MnemonicHandler):
             imm = op1.value & 0xFFFF
             sym = resolve_ext_addr(imm)
             if sym != hex(imm):
-                return [Assign(ea, Reg("DPTR"), Name(sym))]
+                return [Assign(ea, Reg("DPTR"), Const(imm, alias=sym))]
         dst = _op_expr(insn, 0, state)
         src = _op_expr(insn, 1, state)
         return [Assign(ea, dst, src)]
@@ -93,7 +93,8 @@ class MovxHandler(MnemonicHandler):
         if op0.type == ida_ua.o_phrase and op0.phrase == PHRASE_AT_DPTR:
             if dptr_val is not None:
                 mem_name = resolve_ext_addr(dptr_val)
-                xram_ref = XRAMRef(Name(mem_name))
+                alias = mem_name if mem_name != hex(dptr_val) else None
+                xram_ref = XRAMRef(Const(dptr_val, alias=alias))
             else:
                 xram_ref = XRAMRef(Reg("DPTR"))
             src = _op_expr(insn, 1, state)
@@ -102,7 +103,8 @@ class MovxHandler(MnemonicHandler):
         if op1.type == ida_ua.o_phrase and op1.phrase == PHRASE_AT_DPTR:
             if dptr_val is not None:
                 mem_name = resolve_ext_addr(dptr_val)
-                xram_ref = XRAMRef(Name(mem_name))
+                alias = mem_name if mem_name != hex(dptr_val) else None
+                xram_ref = XRAMRef(Const(dptr_val, alias=alias))
             else:
                 xram_ref = XRAMRef(Reg("DPTR"))
             dst = _op_expr(insn, 0, state)

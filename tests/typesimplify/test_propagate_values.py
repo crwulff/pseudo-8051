@@ -6,10 +6,74 @@ import pytest
 
 from pseudo8051.passes.typesimplify._post import _propagate_values
 from pseudo8051.passes.typesimplify._propagate import _subst_from_reg_exprs
-from pseudo8051.passes.patterns._utils import VarInfo
+from pseudo8051.passes.patterns._utils import VarInfo, _canonicalize_expr
 from pseudo8051.ir.hir import Assign, TypedAssign, ExprStmt, CompoundAssign, IfNode, ReturnStmt, SwitchNode
 from pseudo8051.ir.hir._base import NodeAnnotation
 from pseudo8051.ir.expr import Reg, Name, XRAMRef, Call, Const, BinOp, UnaryOp
+
+
+class TestAdditiveFold:
+    """Verify _canonicalize_expr collapses additive chains."""
+
+    def test_dec_folds(self):
+        """(R6 + 0x61) - 1 → R6 + 0x60"""
+        e = BinOp(BinOp(Reg("R6"), '+', Const(0x61)), '-', Const(1))
+        result = _canonicalize_expr(e, {}, [], {})
+        assert result.render() == "R6 + 0x60", result.render()
+
+    def test_add_const_folds(self):
+        """(R6 + 0x60) + 0xfe → R6 + 0x5e  (with 8-bit wrap)"""
+        e = BinOp(BinOp(Reg("R6"), '+', Const(0x60)), '+', Const(0xfe))
+        result = _canonicalize_expr(e, {}, [], {})
+        assert result.render() == "R6 + 0x5e", result.render()
+
+    def test_chain_folds(self):
+        """((R6 + 0x61) - 1) + 0xfe → R6 + 0x5e in one pass"""
+        e = BinOp(BinOp(BinOp(Reg("R6"), '+', Const(0x61)), '-', Const(1)), '+', Const(0xfe))
+        result = _canonicalize_expr(e, {}, [], {})
+        assert result.render() == "R6 + 0x5e", result.render()
+
+    def test_cancel_to_zero(self):
+        """(R6 + 5) - 5 → R6"""
+        e = BinOp(BinOp(Reg("R6"), '+', Const(5)), '-', Const(5))
+        result = _canonicalize_expr(e, {}, [], {})
+        assert result.render() == "R6", result.render()
+
+    def test_post_inc_const_folds(self):
+        """Const(0xe17c)++ → Const(0xe17c)  (post-increment: use original value)"""
+        e = UnaryOp('++', Const(0xe17c), post=True)
+        result = _canonicalize_expr(e, {}, [], {})
+        assert isinstance(result, Const)
+        assert result.value == 0xe17c
+
+    def test_pre_inc_const_folds(self):
+        """++Const(0x28) → Const(0x29)  (pre-increment: use incremented value)"""
+        e = UnaryOp('++', Const(0x28), post=False)
+        result = _canonicalize_expr(e, {}, [], {})
+        assert isinstance(result, Const)
+        assert result.value == 0x29
+
+    def test_post_dec_const_folds(self):
+        """Const(0x27)-- → Const(0x27)  (post-decrement: use original value)"""
+        e = UnaryOp('--', Const(0x27), post=True)
+        result = _canonicalize_expr(e, {}, [], {})
+        assert isinstance(result, Const)
+        assert result.value == 0x27
+
+    def test_pre_dec_const_folds(self):
+        """--Const(0x28) → Const(0x27)  (pre-decrement: use decremented value)"""
+        e = UnaryOp('--', Const(0x28), post=False)
+        result = _canonicalize_expr(e, {}, [], {})
+        assert isinstance(result, Const)
+        assert result.value == 0x27
+
+    def test_post_inc_const_with_alias_drops_alias(self):
+        """Const(0xe179, alias='EXT_E179')++ → Const(0xe179) (alias removed)"""
+        e = UnaryOp('++', Const(0xe179, alias='EXT_E179'), post=True)
+        result = _canonicalize_expr(e, {}, [], {})
+        assert isinstance(result, Const)
+        assert result.value == 0xe179
+        assert result.alias is None
 
 
 class TestPropagateValues:
@@ -246,11 +310,23 @@ class TestSubstFromRegExprs:
         assert not changed
         assert result[0].subject.render() == "A / 3"
 
-    def test_reg_containing_expr_not_substituted(self):
-        """reg_exprs[A]=R7 (contains Reg) is not substituted (not reg-free)."""
+    def test_reg_non_typegroup_expr_substituted(self):
+        """reg_exprs[A]=R6+1 where R6 is not a TypeGroup member → safe to substitute."""
         sw = SwitchNode(0, BinOp(Reg("A"), '/', Const(3)),
                         {0: [], 1: []})
-        sw.ann = self._make_ann({"A": Reg("R7")})
+        sw.ann = self._make_ann({"A": BinOp(Reg("R6"), '+', Const(1))})
+        result, changed = _subst_from_reg_exprs([sw])
+        assert changed
+        assert result[0].subject.render() == "(R6 + 1) / 3"
+
+    def test_typegroup_reg_expr_not_substituted(self):
+        """reg_exprs[A]=R7+1 where R7 IS a TypeGroup member → not substituted."""
+        from pseudo8051.passes.patterns._utils import TypeGroup
+        sw = SwitchNode(0, BinOp(Reg("A"), '/', Const(3)),
+                        {0: [], 1: []})
+        ann = self._make_ann({"A": BinOp(Reg("R7"), '+', Const(1))})
+        ann.reg_groups = [TypeGroup("arg1", "int8_t", ("R7",))]
+        sw.ann = ann
         result, changed = _subst_from_reg_exprs([sw])
         assert not changed
         assert result[0].subject.render() == "A / 3"

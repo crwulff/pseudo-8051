@@ -453,11 +453,39 @@ def _inline_group_setups(live: List[HIRNode],
 # ── Sub-pass A1: reg_exprs annotation substitution ───────────────────────────
 
 
+def _expr_safe_to_subst(expr: Expr, ann) -> bool:
+    """True if expr is safe to substitute at ann's node.
+
+    An expression is safe when it is reg-free (no Regs leaves at all), OR when
+    every Regs leaf it contains is NOT an active TypeGroup member at this node.
+    TypeGroup members have already been renamed to Name nodes by _simplify, so
+    re-introducing their raw Reg forms would be incorrect.  Non-TypeGroup
+    registers were not renamed and remain valid in the HIR.
+    """
+    if _is_reg_free(expr):
+        return True
+    if ann is None:
+        return False
+    typegroup_regs: set = set()
+    for g in (ann.reg_groups or []):
+        typegroup_regs.update(g.active_regs)
+    found = [False]
+    def _fn(e: Expr) -> Expr:
+        if isinstance(e, RegExpr) and e.is_single and e.name in typegroup_regs:
+            found[0] = True
+        return e
+    _walk_expr(expr, _fn)
+    return not found[0]
+
+
 def _subst_from_reg_exprs(live: List[HIRNode]) -> Tuple[List[HIRNode], bool]:
     """Sub-pass A1: substitute reg_exprs annotations directly into node expressions.
 
-    For each node whose annotation records a reg-free expression for register r,
+    For each node whose annotation records a safe expression for register r,
     and where the node reads r, substitute r → expr then fold algebraically.
+
+    "Safe" means reg-free OR containing only non-TypeGroup registers — the latter
+    were not renamed by _simplify and are still valid in the HIR at this point.
 
     This handles accumulated CompoundAssign values that _propagate_register_copies
     cannot reach (e.g. A = arg1*3 tracked via A+=R0; A+=R0 → switch(A/3) → switch(arg1)).
@@ -471,8 +499,10 @@ def _subst_from_reg_exprs(live: List[HIRNode]) -> Tuple[List[HIRNode], bool]:
             continue
         current = node
         for r, expr in current.ann.reg_exprs.items():
-            if not _is_reg_free(expr):
+            if not _expr_safe_to_subst(expr, current.ann):
                 continue
+            if r in _expr_name_refs(expr):
+                continue  # circular: expr references r itself (e.g. R4 → rol9(R4, C))
             if _count_reg_uses_in_node(r, current) == 0:
                 continue
             new_node = _subst_reg_in_node(current, r, expr)
