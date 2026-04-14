@@ -46,6 +46,13 @@ def _resolve_in_expr(expr: Expr, type_str: str) -> Expr:
 def _get_var_type(name: str, reg_map: dict) -> Optional[str]:
     """Return the type string for a named variable in reg_map, or None if not an enum type."""
     info = reg_map.get(name)
+    if info is None:
+        # XRAM locals are keyed by xram_sym (e.g. "EXT_DC68"), not by variable name;
+        # fall back to scanning values by VarInfo.name.
+        for v in reg_map.values():
+            if isinstance(v, VarInfo) and v.name == name:
+                info = v
+                break
     if isinstance(info, VarInfo):
         if is_enum_type(info.type):
             return info.type
