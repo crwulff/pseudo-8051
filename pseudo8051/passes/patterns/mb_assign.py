@@ -29,7 +29,7 @@ raw XRAM-write nodes into named Assign nodes).
 import re
 from typing import List, Optional, Tuple
 
-from pseudo8051.ir.hir   import HIRNode, Assign, ExprStmt, IfNode, WhileNode, ForNode, DoWhileNode, SwitchNode
+from pseudo8051.ir.hir   import HIRNode, Assign, ExprStmt
 from pseudo8051.ir.expr  import Reg, Regs, UnaryOp, Name, Const
 from pseudo8051.constants import dbg
 
@@ -198,38 +198,20 @@ def collapse_mb_assigns(nodes: List[HIRNode]) -> List[HIRNode]:
     """
     Second-pass collapse of byte-field assignment sequences.
 
-    Recurses into IfNode / WhileNode / ForNode bodies so nested byte-field
-    sequences inside control structures are also collapsed.
+    Recurses into all structured node bodies (IfNode, WhileNode, ForNode,
+    DoWhileNode, SwitchNode) via map_bodies so nested byte-field sequences
+    inside any control structure are also collapsed.
     """
     out: List[HIRNode] = []
     i = 0
     while i < len(nodes):
         node = nodes[i]
 
-        # Recurse into structured nodes
-        if isinstance(node, IfNode):
-            node.then_nodes = collapse_mb_assigns(node.then_nodes)
-            node.else_nodes = collapse_mb_assigns(node.else_nodes)
-            out.append(node)
-            i += 1
-            continue
-        if isinstance(node, WhileNode):
-            node.body_nodes = collapse_mb_assigns(node.body_nodes)
-            out.append(node)
-            i += 1
-            continue
-        if isinstance(node, ForNode):
-            node.body_nodes = collapse_mb_assigns(node.body_nodes)
-            out.append(node)
-            i += 1
-            continue
-        if isinstance(node, DoWhileNode):
-            node.body_nodes = collapse_mb_assigns(node.body_nodes)
-            out.append(node)
-            i += 1
-            continue
-        if isinstance(node, SwitchNode):
-            out.append(node.map_bodies(collapse_mb_assigns))
+        # Recurse into structured nodes via map_bodies (returns new node for
+        # structured types, self for leaf types).
+        mapped = node.map_bodies(collapse_mb_assigns)
+        if mapped is not node:
+            out.append(mapped)
             i += 1
             continue
 

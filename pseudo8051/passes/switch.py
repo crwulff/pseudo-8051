@@ -19,7 +19,7 @@ from typing import Dict, List, Optional, Tuple, Union
 
 from pseudo8051.ir.hir import (
     HIRNode, Label, Assign, CompoundAssign, ExprStmt, IfGoto, SwitchNode,
-    GotoStatement, BreakStmt, IfNode, WhileNode, ForNode, DoWhileNode, ReturnStmt)
+    GotoStatement, BreakStmt, IfNode, ReturnStmt)
 from pseudo8051.ir.expr import Reg, Regs, Const, BinOp, Expr, UnaryOp
 from pseudo8051.ir.function   import Function
 from pseudo8051.ir.basicblock import BasicBlock
@@ -516,37 +516,16 @@ def _absorb_switches_in_node(node: HIRNode):
     """Recursively apply HIR-tree switch absorption to a node's bodies.
     Returns (modified_node, changed)."""
     changed = False
-    if isinstance(node, IfNode):
-        new_then, ch1 = _absorb_switches_in_list(node.then_nodes)
-        new_else, ch2 = _absorb_switches_in_list(node.else_nodes)
-        if ch1:
-            node.then_nodes = new_then
-            changed = True
-        if ch2:
-            node.else_nodes = new_else
-            changed = True
-    elif isinstance(node, (WhileNode, ForNode, DoWhileNode)):
-        new_body, ch = _absorb_switches_in_list(node.body_nodes)
+
+    def _fn(ns):
+        nonlocal changed
+        new_ns, ch = _absorb_switches_in_list(ns)
         if ch:
-            node.body_nodes = new_body
             changed = True
-    elif isinstance(node, SwitchNode):
-        new_cases = []
-        for vals, body in node.cases:
-            if isinstance(body, list):
-                new_body, ch = _absorb_switches_in_list(body)
-                if ch:
-                    changed = True
-                new_cases.append((vals, new_body))
-            else:
-                new_cases.append((vals, body))
-        node.cases = new_cases
-        if isinstance(node.default_body, list):
-            new_dbody, ch = _absorb_switches_in_list(node.default_body)
-            if ch:
-                node.default_body = new_dbody
-                changed = True
-    return node, changed
+        return new_ns
+
+    new_node = node.map_bodies(_fn)
+    return new_node, changed
 
 
 def _absorb_switches_in_list(nodes: List[HIRNode]) -> tuple:

@@ -232,22 +232,16 @@ class Function:
         self._walk_fix_returns(self.hir, ret_expr)
 
     def _walk_fix_returns(self, nodes: List[HIRNode], ret_expr) -> None:
-        from pseudo8051.ir.hir import (ReturnStmt,
-                                       IfNode, WhileNode, ForNode, DoWhileNode, SwitchNode)
+        from pseudo8051.ir.hir import ReturnStmt
+
+        def _recurse(ns: List[HIRNode]) -> List[HIRNode]:
+            self._walk_fix_returns(ns, ret_expr)
+            return ns   # bodies mutated in-place; return same list
+
         for node in nodes:
             if isinstance(node, ReturnStmt) and node.value is None:
                 node.value = ret_expr
-            elif isinstance(node, IfNode):
-                self._walk_fix_returns(node.then_nodes, ret_expr)
-                self._walk_fix_returns(node.else_nodes, ret_expr)
-            elif isinstance(node, (WhileNode, ForNode, DoWhileNode)):
-                self._walk_fix_returns(node.body_nodes, ret_expr)
-            elif isinstance(node, SwitchNode):
-                for _vals, body in node.cases:
-                    if isinstance(body, list):
-                        self._walk_fix_returns(body, ret_expr)
-                if isinstance(node.default_body, list):
-                    self._walk_fix_returns(node.default_body, ret_expr)
+            node.map_bodies(_recurse)  # no-op for leaves; recurses for structured nodes
 
     # ── Rendering ─────────────────────────────────────────────────────────
 

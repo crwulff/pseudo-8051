@@ -411,16 +411,7 @@ def _remove_nop_gotos(nodes: List[HIRNode]) -> List[HIRNode]:
     """
     result: List[HIRNode] = []
     for i, node in enumerate(nodes):
-        if isinstance(node, IfNode):
-            node.then_nodes = _remove_nop_gotos(node.then_nodes)
-            node.else_nodes = _remove_nop_gotos(node.else_nodes)
-        elif isinstance(node, (WhileNode, ForNode, DoWhileNode)):
-            node.body_nodes = _remove_nop_gotos(node.body_nodes)
-        elif isinstance(node, SwitchNode):
-            node.cases = [(vals, _remove_nop_gotos(body) if isinstance(body, list) else body)
-                          for vals, body in node.cases]
-            if isinstance(node.default_body, list):
-                node.default_body = _remove_nop_gotos(node.default_body)
+        node = node.map_bodies(_remove_nop_gotos)
         if (isinstance(node, IfGoto)
                 and i + 1 < len(nodes)
                 and isinstance(nodes[i + 1], Label)
