@@ -20,6 +20,14 @@ class Expr(ABC):
         """
         ...
 
+    def side_effect_regs(self) -> frozenset:
+        """Register names written as a side effect of evaluating this expression.
+
+        Most expressions are pure (return frozenset()).  Increment/decrement
+        operations on a register operand are the primary exception.
+        """
+        return frozenset()
+
     def children(self) -> List["Expr"]:
         """Return direct child Expr nodes.  Leaf nodes return []."""
         return []

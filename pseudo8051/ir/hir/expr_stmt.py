@@ -5,7 +5,7 @@ ir/hir/expr_stmt.py — ExprStmt node.
 from typing import List, Tuple
 
 from pseudo8051.ir.hir._base import HIRNode, _render_expr, _ann_field, _refs_from_expr
-from pseudo8051.ir.expr import Expr, UnaryOp, Regs
+from pseudo8051.ir.expr import Expr
 
 
 class ExprStmt(HIRNode):
@@ -23,16 +23,8 @@ class ExprStmt(HIRNode):
         return frozenset()
 
     def possibly_killed(self) -> frozenset:
-        """For ExprStmt(reg++/--), the register is modified as a side effect."""
-        if (isinstance(self.expr, UnaryOp)
-                and self.expr.op in ('++', '--')
-                and isinstance(self.expr.operand, Regs)
-                and self.expr.operand.is_single):
-            r = self.expr.operand.name
-            if r == 'DPTR':
-                return frozenset({'DPTR', 'DPH', 'DPL'})
-            return frozenset({r})
-        return frozenset()
+        """Delegate to the expression's side-effect register set."""
+        return self.expr.side_effect_regs()
 
     def name_refs(self) -> frozenset:
         return _refs_from_expr(self.expr)

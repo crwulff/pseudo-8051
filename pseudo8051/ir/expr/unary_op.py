@@ -6,6 +6,7 @@ from typing import List
 
 from pseudo8051.ir.expr._base import Expr
 from pseudo8051.ir.expr._prec import _UNARY_PREC
+from pseudo8051.ir.expr.regs import Regs
 
 
 class UnaryOp(Expr):
@@ -32,6 +33,17 @@ class UnaryOp(Expr):
         if self.post:
             return f"{inner}{self.op}"
         return f"{self.op}{inner}"
+
+    def side_effect_regs(self) -> frozenset:
+        """++/-- on a single register modifies that register as a side effect."""
+        if (self.op in ('++', '--')
+                and isinstance(self.operand, Regs)
+                and self.operand.is_single):
+            r = self.operand.name
+            if r == 'DPTR':
+                return frozenset({'DPTR', 'DPH', 'DPL'})
+            return frozenset({r})
+        return frozenset()
 
     def children(self) -> List[Expr]:
         return [self.operand]
