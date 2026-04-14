@@ -118,5 +118,28 @@ class RegPreIncPattern(Pattern):
         new_node = _embed_op(n1, rn, op, post=False)
         if new_node is None:
             return None
+        # Fix annotation: XRAM[++rn] was created from (inc_node; n1).
+        # new_node inherits n1.ann which has rn = POST-increment value.
+        # We need rn = PRE-increment value (from inc_node.ann) so that
+        # _subst_from_reg_exprs resolves ++rn to the correct address.
+        inc_node = nodes[i]
+        if new_node.ann is not None and inc_node.ann is not None:
+            from pseudo8051.ir.hir._base import NodeAnnotation
+            patched = NodeAnnotation()
+            patched.reg_groups   = new_node.ann.reg_groups
+            patched.call_arg_ann = new_node.ann.call_arg_ann
+            patched.callee_args  = new_node.ann.callee_args
+            patched.user_anns    = new_node.ann.user_anns
+            patched.reg_consts   = dict(new_node.ann.reg_consts)
+            patched.reg_exprs    = dict(new_node.ann.reg_exprs)
+            if rn in inc_node.ann.reg_consts:
+                patched.reg_consts[rn] = inc_node.ann.reg_consts[rn]
+            else:
+                patched.reg_consts.pop(rn, None)
+            if rn in inc_node.ann.reg_exprs:
+                patched.reg_exprs[rn] = inc_node.ann.reg_exprs[rn]
+            else:
+                patched.reg_exprs.pop(rn, None)
+            new_node.ann = patched
         dbg("typesimp", f"  [{hex(n1.ea)}] reg_pre_inc: embedded {op}{rn} into node")
         return ([new_node], i + 2)

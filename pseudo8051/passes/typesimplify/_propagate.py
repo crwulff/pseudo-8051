@@ -48,13 +48,16 @@ def _expr_name_refs(expr: Expr) -> frozenset:
 
 
 def _xram_pre_incr_delta(node: HIRNode, r: str) -> Optional[int]:
-    """If node is Assign(XRAMRef(pre ++/-- r), ...), return +1 or -1.
+    """If node is Assign(XRAMRef(++/-- r or r++/r--), ...), return +1 or -1.
 
     Detects whether substituting `r` into `node` will consume a side-effecting
-    pre-increment/decrement in the XRAMRef LHS (e.g. XRAM[++DPTR]).  When it
-    does, the effective value of `r` after evaluation is `old_val + delta`, and
-    the caller can inject a synthetic Assign(r, old_val + delta) to keep the
-    chain propagating.
+    pre- or post-increment/decrement in the XRAMRef LHS (e.g. XRAM[++DPTR] or
+    XRAM[DPTR++]).  After the node executes, `r` has changed by delta regardless
+    of pre/post form:
+      - XRAM[++DPTR]: address is old+1, DPTR becomes old+1  → delta +1
+      - XRAM[DPTR++]: address is old,   DPTR becomes old+1  → delta +1
+    The caller injects a synthetic Assign(r, old_val + delta) to keep the chain
+    propagating to subsequent XRAM[++r] nodes.
     """
     if not isinstance(node, Assign):
         return None
@@ -63,7 +66,6 @@ def _xram_pre_incr_delta(node: HIRNode, r: str) -> Optional[int]:
         return None
     inner = lhs.inner
     if not (isinstance(inner, UnaryOp)
-            and not inner.post
             and isinstance(inner.operand, RegExpr)
             and inner.operand.is_single
             and inner.operand.name == r):

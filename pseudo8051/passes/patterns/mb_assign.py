@@ -29,7 +29,7 @@ raw XRAM-write nodes into named Assign nodes).
 import re
 from typing import List, Optional, Tuple
 
-from pseudo8051.ir.hir   import HIRNode, Assign, ExprStmt, IfNode, WhileNode, ForNode, DoWhileNode
+from pseudo8051.ir.hir   import HIRNode, Assign, ExprStmt, IfNode, WhileNode, ForNode, DoWhileNode, SwitchNode
 from pseudo8051.ir.expr  import Reg, Regs, UnaryOp, Name, Const
 from pseudo8051.constants import dbg
 
@@ -226,6 +226,10 @@ def collapse_mb_assigns(nodes: List[HIRNode]) -> List[HIRNode]:
         if isinstance(node, DoWhileNode):
             node.body_nodes = collapse_mb_assigns(node.body_nodes)
             out.append(node)
+            i += 1
+            continue
+        if isinstance(node, SwitchNode):
+            out.append(node.map_bodies(collapse_mb_assigns))
             i += 1
             continue
 

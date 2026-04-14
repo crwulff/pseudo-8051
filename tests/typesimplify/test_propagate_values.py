@@ -254,6 +254,34 @@ class TestPropagateValues:
             f"XRAM[0xe17c] not found: {texts}"
 
 
+    def test_dptr_chain_xram_post_incr_then_pre_incr(self):
+        """DPTR=K; XRAM[DPTR++]=v0; XRAM[DPTR++]=v1; XRAM[DPTR]=v2
+        → all XRAM addresses resolved sequentially without gaps.
+
+        Regression for the post-increment XRAM form: the RMW collapser folds
+        'XRAM[DPTR]=A; DPTR++;' → 'XRAM[DPTR++]=A'.  Without the fix,
+        _xram_pre_incr_delta only detected XRAM[++DPTR] (pre-increment) and
+        skipped XRAM[DPTR++] (post-increment), so no synthetic DPTR=K+1 was
+        injected, causing downstream XRAM[++DPTR] nodes to use stale annotations.
+        """
+        from pseudo8051.ir.hir import BreakStmt
+        K = 0xdc68
+        nodes = [
+            Assign(0x100, Reg("DPTR"), Const(K)),
+            Assign(0x102, XRAMRef(UnaryOp('++', Reg("DPTR"), post=True)), Const(0xff)),  # XRAM[DPTR++]
+            Assign(0x104, XRAMRef(UnaryOp('++', Reg("DPTR"), post=True)), Const(0x22)),  # XRAM[DPTR++]
+            Assign(0x106, XRAMRef(Reg("DPTR")), Const(0x9f)),                             # XRAM[DPTR]
+            BreakStmt(0x108),
+        ]
+        result = _propagate_values(nodes, {})
+
+        texts = [n.render(0)[0][1] for n in result]
+        assert not any("DPTR" in t for t in texts), \
+            f"DPTR still present in output: {texts}"
+        assert any(f"XRAM[0x{K:x}]"   in t for t in texts), f"XRAM[0xdc68] not found: {texts}"
+        assert any(f"XRAM[0x{K+1:x}]" in t for t in texts), f"XRAM[0xdc69] not found: {texts}"
+        assert any(f"XRAM[0x{K+2:x}]" in t for t in texts), f"XRAM[0xdc6a] not found: {texts}"
+
     def test_dptr_chain_post_incr_then_pre_incr(self):
         """DPTR=K; XRAM[K]=v0; DPTR++; XRAM[K+1]=v1; XRAM[++DPTR]=v2; XRAM[++DPTR]=v3
         → all XRAM addresses resolved sequentially without gaps.

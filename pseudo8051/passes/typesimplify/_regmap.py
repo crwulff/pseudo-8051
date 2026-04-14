@@ -247,7 +247,8 @@ def _augment_with_local_vars(func_ea: int,
                     ekey      = f"_arr_{elem_sym}"
                     if ekey not in result:
                         result[ekey] = VarInfo(f"{lv.name}[{k}]", elem_type, (),
-                                               xram_sym=elem_sym, is_byte_field=True)
+                                               xram_sym=elem_sym, is_byte_field=True,
+                                               xram_addr=elem_addr)
                         dbg("typesimp", f"  local array elem: {lv.name}[{k}] @ {elem_sym}")
                         if elem_bytes > 1:
                             bnames = _byte_names(f"{lv.name}[{k}]", elem_bytes)
@@ -257,7 +258,8 @@ def _augment_with_local_vars(func_ea: int,
                                 if bkey2 not in result:
                                     result[bkey2] = VarInfo(byte_name, "uint8_t", (),
                                                             xram_sym=byte_sym,
-                                                            is_byte_field=True)
+                                                            is_byte_field=True,
+                                                            xram_addr=elem_addr + j)
             continue
         if base_sym not in result:
             result[base_sym] = VarInfo(lv.name, lv.type, (), xram_sym=base_sym,
@@ -271,7 +273,8 @@ def _augment_with_local_vars(func_ea: int,
                 bkey = f"_byte_{byte_sym}"
                 if bkey not in result:
                     result[bkey] = VarInfo(byte_name, "uint8_t", (),
-                                           xram_sym=byte_sym, is_byte_field=True)
+                                           xram_sym=byte_sym, is_byte_field=True,
+                                           xram_addr=lv.addr + k)
                     dbg("typesimp", f"  local byte: {byte_name} @ {byte_sym}")
     return result
 
@@ -304,7 +307,7 @@ def _augment_with_xram_params(func_ea: int,
                 if bkey not in result:
                     result[bkey] = VarInfo(byte_name, "uint8_t", (),
                                            xram_sym=byte_sym, is_byte_field=True,
-                                           is_param=True)
+                                           is_param=True, xram_addr=p.addr + k)
                     dbg("typesimp", f"  xram_param byte: {byte_name} @ {byte_sym}")
     return result
 

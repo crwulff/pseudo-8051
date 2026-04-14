@@ -544,6 +544,11 @@ def _subst_xram_in_expr(expr: Expr, reg_map: Dict[str, "VarInfo"]) -> Expr:
     from pseudo8051.ir.expr import BinOp as _BinOp, Const as _Const
 
     sym_map: Dict[str, str] = {}
+    # Address-keyed fallback: maps raw int XRAM address → variable name.
+    # Used when a Const(addr) was produced by constant folding (no alias) but
+    # resolve_ext_addr(addr) returned an IDA symbol name, so sym_map key doesn't
+    # match the rendered hex string.
+    addr_map: Dict[int, str] = {}
     # Array base lookups for dynamic indexed access: XRAM[base + idx] → arr[idx]
     arr_sym_map: Dict[str, "VarInfo"] = {}    # xram_sym  → array VarInfo
     arr_addr_map: Dict[int, "VarInfo"] = {}   # xram_addr → array VarInfo
@@ -553,6 +558,8 @@ def _subst_xram_in_expr(expr: Expr, reg_map: Dict[str, "VarInfo"]) -> Expr:
             continue
         if vinfo.is_byte_field:
             sym_map[vinfo.xram_sym] = vinfo.name
+            if vinfo.xram_addr > 0:
+                addr_map[vinfo.xram_addr] = vinfo.name
         elif vinfo.array_size > 0:
             # Static access to base addr maps to element [0] (also covered by elem entries)
             if vinfo.xram_sym not in sym_map:
@@ -571,6 +578,11 @@ def _subst_xram_in_expr(expr: Expr, reg_map: Dict[str, "VarInfo"]) -> Expr:
             inner_text = inner.render()
             if inner_text in sym_map:
                 return Name(sym_map[inner_text])
+            # Fallback: Const with no alias — match by raw address value.
+            # Handles the case where resolve_ext_addr returned an IDA symbol name
+            # but the Const was produced by _fold_unary_const (no alias set).
+            if isinstance(inner, _Const) and inner.value in addr_map:
+                return Name(addr_map[inner.value])
             # Dynamic indexed access: XRAM[base_sym + idx] or XRAM[base_const + idx]
             if isinstance(inner, _BinOp) and inner.op == '+':
                 lhs = inner.lhs
