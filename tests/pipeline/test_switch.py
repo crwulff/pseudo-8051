@@ -84,6 +84,57 @@ class TestSwitchStructurer:
         assert all_cases[6] == "label_fall"
         assert b1._absorbed
 
+    def test_dec_a_as_switch_step(self):
+        """Chain using 'dec A' (ExprStmt(A--)) for one step is detected as a switch.
+
+        Assembly pattern (like E54A–E558 in the real firmware):
+          b0:  A = R6; A += 0x61; jz label_c1    (case R6 == 0x9F)
+          b1:  A--;               jz label_c2    (case R6 == 0xA0, delta=0xFF)
+          b2:  A += 0xFE;         jnz label_def  (default, case R6 == 0x9E fall-through)
+        """
+        from pseudo8051.ir.expr import UnaryOp
+        b_c1   = FakeBlock(0x1020, hir=[ReturnStmt(0x1020)], label="label_c1")
+        b_c2   = FakeBlock(0x1030, hir=[ReturnStmt(0x1030)], label="label_c2")
+        b_def  = FakeBlock(0x1040, hir=[ReturnStmt(0x1040)], label="label_def")
+        b_fall = FakeBlock(0x1050, hir=[ReturnStmt(0x1050)], label="label_fall")
+
+        b2 = FakeBlock(0x1010, hir=[
+            CompoundAssign(0x1010, Reg("A"), "+=", Const(0xFE)),
+            IfGoto(0x1012, BinOp(Reg("A"), "!=", Const(0)), "label_def"),
+        ])
+        b1 = FakeBlock(0x1008, hir=[
+            ExprStmt(0x1008, UnaryOp("--", Reg("A"), post=True)),   # dec A
+            IfGoto(0x1009, BinOp(Reg("A"), "==", Const(0)), "label_c2"),
+        ])
+        b0 = FakeBlock(0x1000, hir=[
+            Assign(0x1000, Reg("A"), Reg("R6")),
+            CompoundAssign(0x1002, Reg("A"), "+=", Const(0x61)),
+            IfGoto(0x1004, BinOp(Reg("A"), "==", Const(0)), "label_c1"),
+        ])
+
+        connect(b0, b_c1); connect(b0, b1)
+        connect(b1, b_c2); connect(b1, b2)
+        connect(b2, b_def); connect(b2, b_fall)
+
+        func = FakeFunction("sw_dec_a", [b0, b1, b2, b_c1, b_c2, b_def, b_fall])
+        SwitchStructurer().run(func)
+
+        sw = b0.hir[-1]
+        assert isinstance(sw, SwitchNode), f"Expected SwitchNode, got {b0.hir!r}"
+        assert sw.subject == Reg("R6")
+        assert sw.default_label == "label_def"
+
+        all_cases = {v: lbl for vals, lbl in sw.cases for v in vals}
+        # -0x61 mod 256 = 0x9F
+        assert all_cases[0x9F] == "label_c1"
+        # delta cumulative: 0x61 + 0xFF = 0x60; case = -0x60 mod 256 = 0xA0
+        assert all_cases[0xA0] == "label_c2"
+        # delta cumulative: 0x60 + 0xFE = 0x5E; fall-through (jnz): -0x5E mod 256 = 0xA2
+        assert all_cases[0xA2] == "label_fall"
+
+        assert b1._absorbed
+        assert b2._absorbed
+
     def test_single_step_not_converted(self):
         """A single (jz) step does NOT become a SwitchNode — chain must be ≥ 2."""
         b_c2   = FakeBlock(0x1020, hir=[ReturnStmt(0x1020)], label="label_c2")

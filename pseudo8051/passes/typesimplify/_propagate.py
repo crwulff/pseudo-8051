@@ -16,7 +16,7 @@ from pseudo8051.ir.hir import (HIRNode, Assign, TypedAssign, CompoundAssign,
                                 ExprStmt, ReturnStmt, IfGoto, IfNode,
                                 WhileNode, ForNode, DoWhileNode, NodeAnnotation,
                                 Label, GotoStatement, BreakStmt, ContinueStmt)
-from pseudo8051.ir.expr import (Expr, BinOp, Call, Const,
+from pseudo8051.ir.expr import (Expr, BinOp, Call, Const, XRAMRef, UnaryOp,
                                  Regs as RegExpr, Name as NameExpr)
 from pseudo8051.passes.patterns._utils import (
     VarInfo, _count_reg_uses_in_node, _subst_reg_in_node, _walk_expr,
@@ -45,6 +45,49 @@ def _expr_name_refs(expr: Expr) -> frozenset:
 
     _walk_expr(expr, _collect)
     return frozenset(refs)
+
+
+def _xram_pre_incr_delta(node: HIRNode, r: str) -> Optional[int]:
+    """If node is Assign(XRAMRef(pre ++/-- r), ...), return +1 or -1.
+
+    Detects whether substituting `r` into `node` will consume a side-effecting
+    pre-increment/decrement in the XRAMRef LHS (e.g. XRAM[++DPTR]).  When it
+    does, the effective value of `r` after evaluation is `old_val + delta`, and
+    the caller can inject a synthetic Assign(r, old_val + delta) to keep the
+    chain propagating.
+    """
+    if not isinstance(node, Assign):
+        return None
+    lhs = node.lhs
+    if not isinstance(lhs, XRAMRef):
+        return None
+    inner = lhs.inner
+    if not (isinstance(inner, UnaryOp)
+            and not inner.post
+            and isinstance(inner.operand, RegExpr)
+            and inner.operand.is_single
+            and inner.operand.name == r):
+        return None
+    return +1 if inner.op == '++' else -1
+
+
+def _expr_stmt_incr_delta(node: HIRNode, r: str) -> Optional[int]:
+    """If node is ExprStmt(r++ / r-- / ++r / --r), return +1 or -1.
+
+    After substituting r=Const(K) into ExprStmt(r++) the statement becomes a
+    no-op ExprStmt(Const(K)), but the register r has been incremented.  The
+    caller should inject a synthetic Assign(r, K+delta) to keep any downstream
+    XRAM[++r] chain propagating correctly.
+    """
+    if not isinstance(node, ExprStmt):
+        return None
+    expr = node.expr
+    if not (isinstance(expr, UnaryOp)
+            and isinstance(expr.operand, RegExpr)
+            and expr.operand.is_single
+            and expr.operand.name == r):
+        return None
+    return +1 if expr.op == '++' else -1
 
 
 def _collect_mid_writes(nodes: List[HIRNode], reg_map: Dict) -> frozenset:
@@ -286,12 +329,41 @@ def _propagate_register_copies(live: List[HIRNode],
                         f"intermediate writes {repl_refs & mid_writes}")
                     i += 1
                     continue
+
+            # If replacement is a Const and the use is XRAM[pre ++/-- r] or a
+            # standalone r++/r-- ExprStmt, detect now (before substitution
+            # overwrites the node) so we can inject a synthetic Assign(r, K+δ)
+            # to keep the chain propagating.
+            pre_incr_delta: Optional[int] = None
+            if is_reg_lhs and isinstance(replacement, Const):
+                pre_incr_delta = _xram_pre_incr_delta(live[use_idx], r)
+                if pre_incr_delta is None:
+                    pre_incr_delta = _expr_stmt_incr_delta(live[use_idx], r)
+
             new_node = _subst_reg_in_node(live[use_idx], r, replacement)
             if new_node is not None:
                 live[use_idx] = new_node
                 live[i] = None
                 dbg("typesimp", f"  [{hex(node.ea)}] prop-values: folded {r} into node {use_idx}")
                 changed = True
+
+                # If a pre ++/-- r in XRAMRef was folded away, inject a synthetic
+                # Assign(r, K+δ) so subsequent XRAM[++r] nodes continue propagating.
+                # Only inject when there is actually another use of r beyond use_idx
+                # (avoids leaving a dangling assignment at the end of a case body).
+                if pre_incr_delta is not None:
+                    new_r_val = Const((replacement.value + pre_incr_delta) & 0xFFFF)
+                    has_more = any(
+                        _count_reg_uses_in_node(r, live[k]) > 0
+                        for k in range(use_idx + 1, len(live))
+                        if not isinstance(live[k], (GotoStatement, BreakStmt, ContinueStmt))
+                    )
+                    if has_more:
+                        synthetic = Assign(new_node.ea, RegExpr((r,)), new_r_val)
+                        live.insert(use_idx + 1, synthetic)
+                        dbg("typesimp",
+                            f"  [{hex(node.ea)}] prop-values: injected "
+                            f"{r}={hex(new_r_val.value)} after XRAM[++{r}] fold")
         elif total_uses > 1 and is_reg_lhs and _is_reg_free(replacement) and use_idx is not None:
             # Multi-use propagation only for Reg-lhs: Name-lhs replacements may be
             # Call exprs or other side-effecting expressions that cannot be duplicated.

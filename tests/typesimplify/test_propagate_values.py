@@ -218,6 +218,76 @@ class TestPropagateValues:
         assert "dest_type" in dpl_nodes[0].rhs.render()
 
 
+    def test_dptr_chain_pre_incr_propagation(self):
+        """DPTR=K; XRAM[EXT]=v0; XRAM[++DPTR]=v1; XRAM[++DPTR]=v2; XRAM[++DPTR]=v3
+        → all XRAM addresses resolved sequentially without gaps.
+
+        Regression test for the DPTR chain propagation fix:
+        after substituting DPTR=K into XRAM[++DPTR] → XRAM[K+1], a synthetic
+        Assign(DPTR, K+1) must be injected so subsequent XRAM[++DPTR] nodes
+        can continue propagating rather than falling back to stale annotations.
+        """
+        from pseudo8051.ir.hir import BreakStmt
+        K = 0xe179
+        nodes = [
+            Assign(0x100, Reg("DPTR"), Const(K)),
+            Assign(0x102, XRAMRef(Const(K)), Const(0x2d)),       # XRAM[EXT_E179] = 0x2d
+            Assign(0x104, XRAMRef(UnaryOp('++', Reg("DPTR"), post=False)), Const(0x33)),  # XRAM[++DPTR]
+            Assign(0x106, XRAMRef(UnaryOp('++', Reg("DPTR"), post=False)), Const(0x29)),  # XRAM[++DPTR]
+            Assign(0x108, XRAMRef(UnaryOp('++', Reg("DPTR"), post=False)), Const(0x1e)),  # XRAM[++DPTR]
+            BreakStmt(0x10a),
+        ]
+        result = _propagate_values(nodes, {})
+
+        # DPTR assignment should be gone; all XRAM refs should be constants
+        texts = [n.render(0)[0][1] for n in result]
+        assert not any("DPTR" in t for t in texts), \
+            f"DPTR still present in output: {texts}"
+        # Sequential addresses: 0xe179, 0xe17a, 0xe17b, 0xe17c
+        assert any(f"XRAM[0x{K:x}]" in t for t in texts), \
+            f"XRAM[0xe179] not found: {texts}"
+        assert any(f"XRAM[0x{K+1:x}]" in t for t in texts), \
+            f"XRAM[0xe17a] not found: {texts}"
+        assert any(f"XRAM[0x{K+2:x}]" in t for t in texts), \
+            f"XRAM[0xe17b] not found: {texts}"
+        assert any(f"XRAM[0x{K+3:x}]" in t for t in texts), \
+            f"XRAM[0xe17c] not found: {texts}"
+
+
+    def test_dptr_chain_post_incr_then_pre_incr(self):
+        """DPTR=K; XRAM[K]=v0; DPTR++; XRAM[K+1]=v1; XRAM[++DPTR]=v2; XRAM[++DPTR]=v3
+        → all XRAM addresses resolved sequentially without gaps.
+
+        Regression for case-159 pattern: the AEE1 callee inlines as a post-increment
+        DPTR++ (ExprStmt) between two constant-address XRAM writes.  Without the fix,
+        DPTR=K is substituted into DPTR++ → ExprStmt(Const(K)) (no-op), no synthetic
+        is injected, and subsequent XRAM[++DPTR] nodes use a stale annotation that is
+        off by one.
+        """
+        from pseudo8051.ir.hir import BreakStmt
+        K = 0xe179
+        nodes = [
+            Assign(0x100, Reg("DPTR"), Const(K)),
+            Assign(0x102, XRAMRef(Const(K)),     Const(0x21)),   # XRAM[EXT_E179] = 0x21
+            ExprStmt(0x104, UnaryOp('++', Reg("DPTR"), post=True)),  # DPTR++
+            Assign(0x106, XRAMRef(Const(K + 1)), Const(0x1d)),   # XRAM[0xe17a] = 0x1d
+            Assign(0x108, XRAMRef(UnaryOp('++', Reg("DPTR"), post=False)), Const(0x26)),  # XRAM[++DPTR]
+            Assign(0x10a, XRAMRef(UnaryOp('++', Reg("DPTR"), post=False)), Const(0x22)),  # XRAM[++DPTR]
+            Assign(0x10c, XRAMRef(UnaryOp('++', Reg("DPTR"), post=False)), Const(0xff)),  # XRAM[++DPTR]
+            BreakStmt(0x10e),
+        ]
+        result = _propagate_values(nodes, {})
+
+        texts = [n.render(0)[0][1] for n in result]
+        assert not any("DPTR" in t for t in texts), \
+            f"DPTR still present in output: {texts}"
+        assert any(f"XRAM[0x{K:x}]"   in t for t in texts), f"XRAM[0xe179] not found: {texts}"
+        assert any(f"XRAM[0x{K+1:x}]" in t for t in texts), f"XRAM[0xe17a] not found: {texts}"
+        assert any(f"XRAM[0x{K+2:x}]" in t for t in texts), f"XRAM[0xe17b] not found: {texts}"
+        assert any(f"XRAM[0x{K+3:x}]" in t for t in texts), f"XRAM[0xe17c] not found: {texts}"
+        assert any(f"XRAM[0x{K+4:x}]" in t for t in texts), f"XRAM[0xe17d] not found: {texts}"
+
+
 class TestNameLhsPropagation:
     """Tests for Name-lhs (TypedAssign) single-use propagation into call args."""
 

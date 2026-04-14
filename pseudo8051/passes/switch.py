@@ -18,7 +18,7 @@ Each (add, jz/jnz) pair is a separate basic block. This pass detects chains of
 from typing import Dict, List, Optional, Tuple, Union
 
 from pseudo8051.ir.hir import (
-    HIRNode, Label, Assign, CompoundAssign, IfGoto, SwitchNode,
+    HIRNode, Label, Assign, CompoundAssign, ExprStmt, IfGoto, SwitchNode,
     GotoStatement, BreakStmt, IfNode, WhileNode, ForNode, DoWhileNode, ReturnStmt)
 from pseudo8051.ir.expr import Reg, Regs, Const, BinOp, Expr, UnaryOp
 from pseudo8051.ir.function   import Function
@@ -47,13 +47,44 @@ def _contains_a(expr: Expr) -> bool:
     return False
 
 
+def _extract_a_delta(node) -> Optional[int]:
+    """
+    If node modifies A by a compile-time constant, return that constant mod 256.
+    Recognises:
+      CompoundAssign(A, +=, K)  → K
+      CompoundAssign(A, -=, K)  → (−K) & 0xFF
+      ExprStmt(A--)             → 0xFF  (dec A)
+      ExprStmt(A++)             → 0x01  (inc A)
+    Returns None if the node doesn't match any of these.
+    """
+    if isinstance(node, CompoundAssign) and node.lhs == Reg("A") and isinstance(node.rhs, Const):
+        if node.op == "+=":
+            return node.rhs.value & 0xFF
+        if node.op == "-=":
+            return (-node.rhs.value) & 0xFF
+    if isinstance(node, ExprStmt) and isinstance(node.expr, UnaryOp):
+        uo = node.expr
+        if isinstance(uo.operand, Regs) and uo.operand == Reg("A"):
+            if uo.op == "--":
+                return 0xFF
+            if uo.op == "++":
+                return 0x01
+    return None
+
+
 def _extract_switch_step(block: BasicBlock):
     """
     Detect whether block matches the single switch-step pattern:
 
         [optional: Assign(A, subj)]
-        CompoundAssign(A, +=, K)
+        <A-delta node>
         IfGoto(BinOp(A, ==|!=, 0), label)   ← must be last node
+
+    The A-delta node may be any of:
+        CompoundAssign(A, +=, K)   — compiler ADD
+        CompoundAssign(A, -=, K)   — compiler SUBB
+        ExprStmt(A--)              — compiler DEC A
+        ExprStmt(A++)              — compiler INC A
 
     Returns (delta, label, is_ne, subject) or None.
     - delta:   the byte constant added to A (0–255)
@@ -75,16 +106,12 @@ def _extract_switch_step(block: BasicBlock):
             and ig.cond.op in ("==", "!=")):
         return None
 
-    # Required: CompoundAssign(A, +=, K) — second-to-last node.
+    # Required: A-delta node — second-to-last.
     if len(hir) < 2:
         return None
-    ca = hir[-2]
-    if not (isinstance(ca, CompoundAssign)
-            and ca.lhs == Reg("A")
-            and ca.op == "+="
-            and isinstance(ca.rhs, Const)):
+    delta = _extract_a_delta(hir[-2])
+    if delta is None:
         return None
-    delta = ca.rhs.value
 
     # Optional: Assign(A, subj) — third-to-last, where subj doesn't reference A.
     subject = None
