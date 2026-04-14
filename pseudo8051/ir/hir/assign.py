@@ -20,6 +20,11 @@ class Assign(HIRNode):
     def written_regs(self) -> frozenset:
         return _lhs_written_regs(self.lhs)
 
+    def possibly_killed(self) -> frozenset:
+        return (self.written_regs
+                | self.lhs.side_effect_regs()
+                | self.rhs.side_effect_regs())
+
     @property
     def use_regs(self) -> frozenset:
         return _refs_from_expr(self.rhs)

@@ -37,8 +37,10 @@ def run_all_passes(func: Function) -> None:
     for block in func.blocks:
         block.hir = block.initial_hir()
 
-    from pseudo8051.passes.chunk_inline import ChunkInliner
+    from pseudo8051.passes.chunk_inline  import ChunkInliner
+    from pseudo8051.passes.simple_inline import SimpleExternalInliner
     ChunkInliner().run(func)
+    SimpleExternalInliner().run(func)
 
     # Add synthetic CFG edges for JMP @A+DPTR blocks (HIR-level, more reliable
     # than raw instruction scan).  Re-run ConstantPropagation so that AnnotationPass

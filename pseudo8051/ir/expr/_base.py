@@ -20,13 +20,25 @@ class Expr(ABC):
         """
         ...
 
-    def side_effect_regs(self) -> frozenset:
-        """Register names written as a side effect of evaluating this expression.
+    def _direct_side_effect_regs(self) -> frozenset:
+        """Register names written as a direct side effect of THIS node only.
 
-        Most expressions are pure (return frozenset()).  Increment/decrement
-        operations on a register operand are the primary exception.
+        Override in subclasses that have side effects (e.g. UnaryOp ++/--).
+        Does NOT recurse into children; side_effect_regs() does that.
         """
         return frozenset()
+
+    def side_effect_regs(self) -> frozenset:
+        """Register names written as a side effect of evaluating this expression
+        or any of its sub-expressions (recursive).
+
+        Increment/decrement operations on a register operand are the primary
+        source of side effects; e.g. XRAMRef(UnaryOp('++', DPTR)) reports DPTR.
+        """
+        result = self._direct_side_effect_regs()
+        for child in self.children():
+            result = result | child.side_effect_regs()
+        return result
 
     def children(self) -> List["Expr"]:
         """Return direct child Expr nodes.  Leaf nodes return []."""

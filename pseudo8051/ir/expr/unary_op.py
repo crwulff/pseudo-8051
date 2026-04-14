@@ -34,7 +34,7 @@ class UnaryOp(Expr):
             return f"{inner}{self.op}"
         return f"{self.op}{inner}"
 
-    def side_effect_regs(self) -> frozenset:
+    def _direct_side_effect_regs(self) -> frozenset:
         """++/-- on a single register modifies that register as a side effect."""
         if (self.op in ('++', '--')
                 and isinstance(self.operand, Regs)
