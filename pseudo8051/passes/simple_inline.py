@@ -99,14 +99,20 @@ def _lift_simple_callee(callee_ea: int) -> Optional[List]:
     """
     Lift the callee's assembly into raw HIR nodes.
 
-    Returns the body nodes (final ReturnStmt stripped) if the callee is simple
-    (no branches, no nested calls, at most MAX_INSTRUCTIONS instructions, ends
-    with a plain RET), or None if it exceeds the complexity threshold or cannot
-    be inlined.
+    Returns the body nodes if the callee is simple (no conditional branches,
+    no nested calls, at most MAX_INSTRUCTIONS instructions), or None otherwise.
+
+    Termination:
+      • RET  — strip the ReturnStmt and return the body.
+      • Unconditional direct jump (LJMP/SJMP/AJMP to a known address) — treat
+        as a tail call: append ExprStmt(Call(target_name)) and return the body.
+        The tail call returns to the original caller, so no ReturnStmt is needed.
 
     Does not require callee_ea to be the IDA function entry — works even when
     the target is a tail chunk owned by a different function.
     """
+    import ida_name
+    from pseudo8051.ir.expr import Call
     state = CPState()
     nodes: List = []
     ea = callee_ea
@@ -116,8 +122,19 @@ def _lift_simple_callee(callee_ea: int) -> Optional[List]:
         instr = Instruction(ea)
         if not instr.insn:
             return None
-        if instr.is_branch() or instr.is_call():
-            return None   # branches or nested calls — not simple
+        if instr.is_call():
+            return None   # nested call — not simple
+        if instr.is_branch():
+            # Allow a single direct unconditional jump as a tail call.
+            if not instr.is_unconditional_branch():
+                return None   # conditional branch — not simple
+            targets = instr.branch_targets()
+            if len(targets) != 1:
+                return None   # computed jump (JMP @A+DPTR) — not simple
+            tail_ea = targets[0]
+            tail_name = ida_name.get_name(tail_ea) or f"sub_{hex(tail_ea).removeprefix('0x')}"
+            nodes.append(ExprStmt(instr.ea, Call(tail_name, [])))
+            return nodes
         stmts = instr.lift(state)
         propagate_insn(instr.insn, state)
         nodes.extend(stmts)
@@ -126,4 +143,4 @@ def _lift_simple_callee(callee_ea: int) -> Optional[List]:
         if nodes and isinstance(nodes[-1], ReturnStmt):
             return nodes[:-1]   # strip ReturnStmt; caller deep-copies before insertion
 
-    return None   # exceeded MAX_INSTRUCTIONS without finding RET
+    return None   # exceeded MAX_INSTRUCTIONS without finding RET or tail call
