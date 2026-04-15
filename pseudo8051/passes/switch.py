@@ -459,6 +459,39 @@ def _absorb_switch_in_body_list(nodes: List[HIRNode]) -> tuple:
                     outer_nodes, arm_groups = _partition_by_switch_labels(
                         sibling_nodes, case_labels)
 
+                    # Resolve non-case labels embedded inside arm bodies.
+                    # These arise when a shared successor block (e.g. code_6_7732)
+                    # is not itself a case entry label but appears inside one arm
+                    # as a Label node, while other arms end with 'goto code_6_7732'.
+                    # Strategy:
+                    #   1. Collect every non-case Label found in any arm body and
+                    #      record the nodes that follow it (the "shared tail").
+                    #   2. For any arm whose last node is 'goto shared_label', strip
+                    #      the goto and append the shared tail in its place.
+                    #   3. Remove the embedded Label nodes from all arm bodies.
+                    embedded_tails: Dict[str, List[HIRNode]] = {}
+                    for arm_nodes in arm_groups.values():
+                        for idx, n in enumerate(arm_nodes):
+                            if isinstance(n, Label) and n.name not in case_labels:
+                                embedded_tails[n.name] = arm_nodes[idx + 1:]
+                    if embedded_tails:
+                        for lbl in arm_groups:
+                            arm_hir = arm_groups[lbl]
+                            # Iteratively resolve goto-chains to embedded labels.
+                            while (arm_hir
+                                   and isinstance(arm_hir[-1], GotoStatement)
+                                   and arm_hir[-1].label in embedded_tails):
+                                target_label = arm_hir[-1].label
+                                arm_hir.pop()
+                                arm_hir.extend(embedded_tails[target_label])
+                        # Strip the now-inlined embedded Label nodes.
+                        for lbl in arm_groups:
+                            arm_groups[lbl] = [
+                                n for n in arm_groups[lbl]
+                                if not (isinstance(n, Label)
+                                        and n.name in embedded_tails)
+                            ]
+
                     # Build case bodies
                     new_cases: List = []
                     for values, body in node.cases:

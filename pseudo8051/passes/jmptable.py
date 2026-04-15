@@ -140,7 +140,7 @@ def _get_table_ea(block: BasicBlock, jmp_idx: int) -> Optional[int]:
 # ── Read jump table from code memory ─────────────────────────────────────────
 
 def _read_jump_table(table_ea: int, page_base: int, func: Function,
-                     max_entries: int = 64) -> Tuple[List[Tuple[List[int], str]], int]:
+                     max_entries: int = 256) -> Tuple[List[Tuple[List[int], str]], int]:
     """
     Decode unconditional branch instructions at table_ea.
 

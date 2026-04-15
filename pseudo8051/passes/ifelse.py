@@ -600,6 +600,17 @@ class IfElseStructurer(OptimizationPass):
                     if isinstance(_n.default_label, str):
                         switch_labels.add(_n.default_label)
 
+        # Collect intra-arm goto targets: labels defined within the arm that are
+        # referenced by gotos within the arm.  These must survive _build_arm_hir so
+        # the gotos have valid targets (e.g. a shared tail block inside the arm that
+        # multiple case arms jump to).
+        for arm_list in (true_arm, false_arm):
+            arm_label_names = {_label_for(b) for b in arm_list}
+            for blk in arm_list:
+                for _tgt in _collect_goto_targets(blk.hir):
+                    if _tgt in arm_label_names and _tgt != merge_label:
+                        switch_labels.add(_tgt)
+
         then_nodes = _build_arm_hir(true_arm,  merge_label,
                                     keep_labels=switch_labels or None)
         else_nodes = _build_arm_hir(false_arm, merge_label,
