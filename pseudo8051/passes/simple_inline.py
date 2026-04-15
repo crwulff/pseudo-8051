@@ -18,7 +18,7 @@ from pseudo8051.ir.cpstate import CPState, propagate_insn
 from pseudo8051.ir.instruction import Instruction
 from pseudo8051.constants import dbg
 
-MAX_INSTRUCTIONS = 10
+MAX_INSTRUCTIONS = 50
 
 
 class SimpleExternalInliner(OptimizationPass):
@@ -99,41 +99,31 @@ def _lift_simple_callee(callee_ea: int) -> Optional[List]:
     """
     Lift the callee's assembly into raw HIR nodes.
 
-    Returns the body nodes (final ReturnStmt stripped) if the callee is simple,
-    or None if it exceeds the complexity threshold or cannot be inlined.
+    Returns the body nodes (final ReturnStmt stripped) if the callee is simple
+    (no branches, no nested calls, at most MAX_INSTRUCTIONS instructions, ends
+    with a plain RET), or None if it exceeds the complexity threshold or cannot
+    be inlined.
+
+    Does not require callee_ea to be the IDA function entry — works even when
+    the target is a tail chunk owned by a different function.
     """
-    import ida_funcs
-    import ida_gdl
-
-    callee_fn = ida_funcs.get_func(callee_ea)
-    if callee_fn is None or callee_fn.start_ea != callee_ea:
-        return None
-
-    blocks = list(ida_gdl.FlowChart(callee_fn))
-    if len(blocks) != 1:
-        return None   # has branches — not simple
-
-    blk = blocks[0]
     state = CPState()
     nodes: List = []
-    ea = blk.start_ea
+    ea = callee_ea
     count = 0
 
-    while ea < blk.end_ea:
+    while count <= MAX_INSTRUCTIONS:
         instr = Instruction(ea)
         if not instr.insn:
             return None
         if instr.is_branch() or instr.is_call():
-            return None   # unexpected branch or nested call
+            return None   # branches or nested calls — not simple
         stmts = instr.lift(state)
         propagate_insn(instr.insn, state)
         nodes.extend(stmts)
         ea += instr.size
         count += 1
-        if count > MAX_INSTRUCTIONS:
-            return None
+        if nodes and isinstance(nodes[-1], ReturnStmt):
+            return nodes[:-1]   # strip ReturnStmt; caller deep-copies before insertion
 
-    if not nodes or not isinstance(nodes[-1], ReturnStmt):
-        return None
-
-    return nodes[:-1]   # strip ReturnStmt; caller deep-copies before insertion
+    return None   # exceeded MAX_INSTRUCTIONS without finding RET
