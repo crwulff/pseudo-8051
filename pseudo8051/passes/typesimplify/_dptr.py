@@ -204,6 +204,7 @@ def _form_pair_expr(op_hi: Expr, op_lo: Expr) -> Optional[Expr]:
     Recognises:
     - Standard 8051 register pair (R0R1, R2R3, R4R5, R6R7) → RegGroup((Rhi, Rlo))
     - Named byte fields sharing the same parent (var.hi / var.lo) → Name(parent)
+    - Regs nodes with matching .hi / .lo aliases → Name(parent)
 
     Returns None if the operands cannot be identified as a matching pair.
     """
@@ -217,6 +218,16 @@ def _form_pair_expr(op_hi: Expr, op_lo: Expr) -> Optional[Expr]:
                     return RegGroupExpr((rhi, rlo))
             except ValueError:
                 pass
+        # Regs with matching .hi / .lo aliases identify a named 16-bit variable
+        # even when the register indices don't form a standard adjacent even-odd pair
+        # (e.g. R2=ptr.hi, R1=ptr.lo in a non-standard calling convention).
+        hi_alias = getattr(op_hi, "alias", None)
+        lo_alias = getattr(op_lo, "alias", None)
+        if hi_alias and lo_alias:
+            m_hi = _RE_BYTE_FIELD.match(hi_alias)
+            m_lo = _RE_BYTE_FIELD.match(lo_alias)
+            if m_hi and m_lo and m_hi.group(1) == m_lo.group(1):
+                return NameExpr(m_hi.group(1))
     if isinstance(op_hi, NameExpr) and isinstance(op_lo, NameExpr):
         m_hi = _RE_BYTE_FIELD.match(op_hi.name)
         m_lo = _RE_BYTE_FIELD.match(op_lo.name)
@@ -297,6 +308,33 @@ def _collapse_dpl_dph_arithmetic(nodes: List[HIRNode]) -> List[HIRNode]:
             out.append(node)
             i += 1
             continue
+
+        # 3a. Detect compound-add pattern: DPL = DPL + X_lo; DPH = DPH + X_hi + C
+        #     → DPTR = DPTR + pair(X_hi, X_lo)
+        #     This arises when DPTR holds a 16-bit parameter (e.g. offset) and a
+        #     second parameter (e.g. ptr) is added byte-by-byte: ADD DPL,ptr.lo /
+        #     ADDC DPH,ptr.hi.  _split_const_operand would consume the whole
+        #     "DPL + X_lo" expression as op_lo, preventing pair recognition, so
+        #     check for this shape before the generic decomposition below.
+        if (isinstance(node.rhs, BinOp) and node.rhs.op == "+"
+                and isinstance(node.rhs.lhs, RegsExpr) and node.rhs.lhs.is_single
+                and node.rhs.lhs.name == "DPL"
+                and isinstance(hi_no_c, BinOp) and hi_no_c.op == "+"
+                and isinstance(hi_no_c.lhs, RegsExpr) and hi_no_c.lhs.is_single
+                and hi_no_c.lhs.name == "DPH"):
+            add_lo = node.rhs.rhs
+            add_hi = hi_no_c.rhs
+            pair = _form_pair_expr(add_hi, add_lo)
+            if pair is not None:
+                from pseudo8051.ir.hir import NodeAnnotation as _NA
+                rhs_add: Expr = BinOp(RegsExpr(("DPTR",)), "+", pair)
+                new_node = Assign(node.ea, RegsExpr(("DPTR",)), rhs_add)
+                new_node.ann = _NA.merge(node, dph_node)
+                out.append(new_node)
+                dbg("typesimp",
+                    f"  [{hex(node.ea)}] dpl-dph-arith: DPTR = DPTR + {pair.render()!r}")
+                i += 2
+                continue
 
         # 3. Decompose both into (const_part, operand)
         c_lo, op_lo = _split_const_operand(node.rhs)

@@ -614,6 +614,11 @@ class AnnotationPass(OptimizationPass):
                     elif r in ("DPH", "DPL"):
                         const_state.pop("DPTR", None)
                         expr_state.pop("DPTR", None)
+                        # Also kill any TypeGroup that claims DPTR holds a parameter
+                        # value: if only DPH or DPL changed, DPTR no longer equals
+                        # the original parameter (e.g. offset) and substituting it
+                        # downstream would produce a stale expression.
+                        groups = _kill_groups(groups, "DPTR")
 
                 # SUBB/ADDC pattern: CompoundAssign A-=... or A+=... whose RHS
                 # references C means this instruction writes the carry flag C as

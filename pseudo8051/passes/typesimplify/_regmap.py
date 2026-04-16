@@ -168,6 +168,14 @@ def _build_reg_map(proto: FuncProto,
         info = VarInfo(p.name, p.type, regs, is_param=True)
         for r in regs:
             reg_map[r] = info
+        # For DPTR-backed 16-bit parameters, add DPH/DPL byte-field entries so
+        # that bare DPH/DPL references are substituted with param.hi / param.lo.
+        if regs == ("DPTR",) and _type_bytes(p.type) == 2:
+            bnames = _byte_names(p.name, 2)   # [hi_name, lo_name]
+            reg_map["DPH"] = VarInfo(bnames[0], "uint8_t", ("DPH",),
+                                     is_param=True, is_byte_field=True)
+            reg_map["DPL"] = VarInfo(bnames[1], "uint8_t", ("DPL",),
+                                     is_param=True, is_byte_field=True)
 
     if proto.return_regs:
         ret_regs = expand_regs(tuple(proto.return_regs), proto.return_type)
