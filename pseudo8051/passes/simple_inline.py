@@ -16,6 +16,7 @@ from pseudo8051.passes import OptimizationPass
 from pseudo8051.ir.hir import ReturnStmt, Assign, ExprStmt
 from pseudo8051.ir.cpstate import CPState, propagate_insn
 from pseudo8051.ir.instruction import Instruction
+from pseudo8051.ir.expr import Reg, RegGroup, Name, Const
 from pseudo8051.constants import dbg
 
 MAX_INSTRUCTIONS = 50
@@ -95,6 +96,47 @@ def _contains_call(node) -> bool:
     return False
 
 
+def _make_tail_call_node(ea: int, tail_name: str, state: CPState):
+    """Build a properly-annotated HIR node for a tail call to tail_name.
+
+    Consults the callee prototype to build argument expressions and, when the
+    callee has a non-void return type, wraps the Call in an Assign to the
+    appropriate return register(s).  Falls back to a bare ExprStmt(Call(..., []))
+    when no prototype is available.
+    """
+    from pseudo8051.prototypes import get_proto, param_regs, expand_regs
+    from pseudo8051.ir.expr import Call
+    proto = get_proto(tail_name)
+    if proto:
+        p_regs = param_regs(proto)
+        args = []
+        for p, regs in zip(proto.params, p_regs):
+            if regs:
+                if state is not None and len(regs) == 1:
+                    val = state.get(regs[0])
+                    if val is not None:
+                        args.append(Const(val))
+                        continue
+                elif state is not None and len(regs) > 1:
+                    vals = [state.get(r) for r in regs]
+                    if all(v is not None for v in vals):
+                        combined = 0
+                        for v in vals:
+                            combined = (combined << 8) | (v & 0xFF)
+                        args.append(Const(combined))
+                        continue
+                args.append(RegGroup(regs) if len(regs) > 1 else Name("".join(regs)))
+            else:
+                args.append(Name(p.name))
+        call_node = Call(tail_name, args)
+        if proto.return_type != "void" and proto.return_regs:
+            ret_regs = expand_regs(tuple(proto.return_regs), proto.return_type)
+            lhs = Reg(ret_regs[0]) if len(ret_regs) == 1 else RegGroup(tuple(ret_regs))
+            return Assign(ea, lhs, call_node)
+        return ExprStmt(ea, call_node)
+    return ExprStmt(ea, Call(tail_name, []))
+
+
 def _lift_simple_callee(callee_ea: int) -> Optional[List]:
     """
     Lift the callee's assembly into raw HIR nodes.
@@ -133,7 +175,7 @@ def _lift_simple_callee(callee_ea: int) -> Optional[List]:
                 return None   # computed jump (JMP @A+DPTR) — not simple
             tail_ea = targets[0]
             tail_name = ida_name.get_name(tail_ea) or f"sub_{hex(tail_ea).removeprefix('0x')}"
-            nodes.append(ExprStmt(instr.ea, Call(tail_name, [])))
+            nodes.append(_make_tail_call_node(instr.ea, tail_name, state))
             return nodes
         stmts = instr.lift(state)
         propagate_insn(instr.insn, state)
