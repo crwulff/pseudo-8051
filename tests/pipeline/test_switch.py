@@ -16,7 +16,7 @@ class TestSwitchStructurer:
     """Tests for the SwitchStructurer pass."""
 
     def test_switch_basic_jz_chain(self):
-        """3-block jz chain → SwitchNode with 2 cases, no default."""
+        """3-block jz chain → SwitchNode with 2 cases, default = fall-through."""
         b_c2   = FakeBlock(0x1020, hir=[ReturnStmt(0x1020)], label="label_c2")
         b_c4   = FakeBlock(0x1030, hir=[ReturnStmt(0x1030)], label="label_c4")
         b_fall = FakeBlock(0x1040, hir=[ReturnStmt(0x1040)])
@@ -42,7 +42,8 @@ class TestSwitchStructurer:
         sw = b0.hir[0]
         assert isinstance(sw, SwitchNode)
         assert sw.subject == Reg("R7")
-        assert sw.default_label is None
+        # Fall-through from the last JEZ step is captured as the default arm
+        assert sw.default_label == "label_1040"
         assert len(sw.cases) == 2
         all_cases = {v: lbl for vals, lbl in sw.cases for v in vals}
         assert all_cases[2] == "label_c2"

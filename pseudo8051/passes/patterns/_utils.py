@@ -397,9 +397,19 @@ def _canonicalize_expr(expr: Expr,
 
     def _fold(e: Expr) -> Expr:
         """Constant fold, identity-eliminate, and algebraically normalize."""
+        # Strip trivial Paren(Const) wrappers — allows identity rules to fire
+        # through parentheses (e.g. (0 << 8) | x  →  x after inner fold).
+        from pseudo8051.ir.expr import Paren as _Paren
+        if isinstance(e, _Paren) and isinstance(e.inner, Const):
+            return e.inner
         if not isinstance(e, BinOp):
             return e
         lhs, rhs = e.lhs, e.rhs
+        # Unwrap Paren(Const) on operands for the same reason.
+        if isinstance(lhs, _Paren) and isinstance(lhs.inner, Const):
+            lhs = lhs.inner
+        if isinstance(rhs, _Paren) and isinstance(rhs.inner, Const):
+            rhs = rhs.inner
         lc = isinstance(lhs, Const)
         rc = isinstance(rhs, Const)
         op = e.op

@@ -585,6 +585,26 @@ def _subst_from_reg_exprs(live: List[HIRNode]) -> Tuple[List[HIRNode], bool]:
             new_node = _fold_exprs_in_node(new_node)
             current = new_node
             any_changed = True
+        # Synthesize DPTR from DPH+DPL when DPTR is used but absent from reg_exprs.
+        # Handles call sites where DPH/DPL were set piecemeal (annotation kills DPTR
+        # TypeGroup but still tracks DPH/DPL individually via expr_state).
+        if (current.ann is not None
+                and "DPTR" not in current.ann.reg_exprs
+                and "DPH" in current.ann.reg_exprs
+                and "DPL" in current.ann.reg_exprs
+                and _count_reg_uses_in_node("DPTR", current) > 0):
+            dph = current.ann.reg_exprs["DPH"]
+            dpl = current.ann.reg_exprs["DPL"]
+            if (_expr_safe_to_subst(dph, current.ann)
+                    and _expr_safe_to_subst(dpl, current.ann)
+                    and "DPTR" not in _expr_name_refs(dph)
+                    and "DPTR" not in _expr_name_refs(dpl)):
+                from pseudo8051.ir.expr import BinOp as _BinOp, Const as _Const, Paren as _Paren
+                dptr_expr = _BinOp(_Paren(_BinOp(dph, "<<", _Const(8))), "|", dpl)
+                new_node = _subst_reg_in_node(current, "DPTR", dptr_expr)
+                if new_node is not None:
+                    current = _fold_exprs_in_node(new_node)
+                    any_changed = True
         if current is not node:
             result[i] = current
     return result, any_changed

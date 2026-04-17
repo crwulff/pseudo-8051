@@ -52,8 +52,13 @@ def run_all_passes(func: Function) -> None:
     AnnotationPass().run(func)
 
     RMWCollapser().run(func)
-    LoopStructurer().run(func)
+    # JmpTableStructurer and SwitchStructurer must run BEFORE LoopStructurer so
+    # that their absorbed blocks are excluded from the loop body (LoopStructurer
+    # filters _absorbed blocks when building body_blocks).  If LoopStructurer ran
+    # first it would call _structure_flat_ifelse on the loop body and convert the
+    # switch-step IfGoto nodes to IfNodes before SwitchStructurer could see them.
     JmpTableStructurer().run(func)
     SwitchStructurer().run(func)
+    LoopStructurer().run(func)
     IfElseStructurer().run(func)
     SwitchBodyAbsorber().run(func)

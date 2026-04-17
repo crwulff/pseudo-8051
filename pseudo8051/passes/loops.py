@@ -258,7 +258,7 @@ class LoopStructurer(OptimizationPass):
             from pseudo8051.passes.debug_dump import dump_pass_hir
             all_nodes = [n for b in func.blocks
                          if not getattr(b, "_absorbed", False) for n in b.hir]
-            dump_pass_hir("04.loops", all_nodes, func.name)
+            dump_pass_hir("06.loops", all_nodes, func.name)
             return
 
         # Group by header so multiple tails → one loop
@@ -305,10 +305,14 @@ class LoopStructurer(OptimizationPass):
                     changed = True
                     dbg("loops", f"  forward-extend body: +{hex(ea)}")
 
-        # Body blocks sorted by EA (excluding header)
+        # Body blocks sorted by EA (excluding header and any blocks already absorbed
+        # by a prior pass such as SwitchStructurer — their HIR is represented by the
+        # SwitchNode in the head block and should not be re-emitted into the loop body).
         body_blocks: List[BasicBlock] = sorted(
             (func._block_map[ea] for ea in body_eas
-             if ea != header.start_ea and ea in func._block_map),
+             if ea != header.start_ea
+             and ea in func._block_map
+             and not getattr(func._block_map[ea], "_absorbed", False)),
             key=lambda b: b.start_ea)
 
         body_eas_str = [hex(b.start_ea) for b in body_blocks]

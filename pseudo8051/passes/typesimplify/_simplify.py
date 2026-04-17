@@ -28,11 +28,18 @@ _RE_NOT_CMP = re.compile(r'^!\((.+?)\s+(!=|==|>=|<=|>|<)\s+(.+)\)$')
 
 
 def _simplify_bool_expr(expr: Expr) -> Expr:
-    """Push `!` inward through comparisons; eliminate double negation.
+    """Push `!` inward through comparisons and normalise arithmetic comparisons to == K form.
 
     !(lhs op rhs)  →  lhs ~op rhs   (e.g. !(A != 0) → A == 0)
     !!x            →  x
+    ~x == 0        →  x == 0xFF     (CPL then JZ pattern)
+    (x ^ K) == 0  →  x == K         (XRL then JZ pattern)
+    (x + K) == 0  →  x == (256-K)&0xFF  (ADD then JZ pattern)
+    (x - K) == 0  →  x == K
+    Mirror forms for != 0.
     """
+    from pseudo8051.ir.expr import Const as _Const
+
     def _fn(e: Expr) -> Expr:
         if isinstance(e, UnaryOp) and e.op == "!":
             inner = e.operand
@@ -40,6 +47,25 @@ def _simplify_bool_expr(expr: Expr) -> Expr:
                 return BinOp(inner.lhs, _NEGATE_OP[inner.op], inner.rhs)
             if isinstance(inner, UnaryOp) and inner.op == "!":
                 return inner.operand
+        # Arithmetic normalisations: (expr op 0) → (base_expr == K)
+        if (isinstance(e, BinOp)
+                and e.op in ("==", "!=")
+                and isinstance(e.rhs, _Const)
+                and e.rhs.value == 0):
+            lhs = e.lhs
+            op  = e.op
+            # ~x == 0  →  x == 0xFF
+            if isinstance(lhs, UnaryOp) and lhs.op == "~":
+                return BinOp(lhs.operand, op, _Const(0xFF))
+            # (x ^ K) == 0  →  x == K
+            if isinstance(lhs, BinOp) and lhs.op == "^" and isinstance(lhs.rhs, _Const):
+                return BinOp(lhs.lhs, op, lhs.rhs)
+            # (x + K) == 0  →  x == (256-K)&0xFF
+            if isinstance(lhs, BinOp) and lhs.op == "+" and isinstance(lhs.rhs, _Const):
+                return BinOp(lhs.lhs, op, _Const((256 - lhs.rhs.value) & 0xFF))
+            # (x - K) == 0  →  x == K
+            if isinstance(lhs, BinOp) and lhs.op == "-" and isinstance(lhs.rhs, _Const):
+                return BinOp(lhs.lhs, op, lhs.rhs)
         return e
     return _walk_expr(expr, _fn)
 
@@ -318,6 +344,15 @@ def _transform_default(node: HIRNode,
             if isinstance(node, TypedAssign):
                 return _out(TypedAssign(node.ea, node.type_str, new_lhs, new_rhs))
             return _out(Assign(node.ea, new_lhs, new_rhs))
+        # Convert  x = ++x  /  x = --x  →  ExprStmt(++x) / ExprStmt(--x).
+        # Pre-increment already updates x in place, so the enclosing Assign is
+        # redundant; a bare increment/decrement statement is cleaner.
+        from pseudo8051.ir.expr import UnaryOp as _UnaryOp
+        if (isinstance(node.rhs, _UnaryOp)
+                and node.rhs.op in ('++', '--')
+                and not node.rhs.post
+                and node.lhs == node.rhs.operand):
+            return _out(ExprStmt(node.ea, node.rhs))
         return node
 
     if isinstance(node, CompoundAssign):

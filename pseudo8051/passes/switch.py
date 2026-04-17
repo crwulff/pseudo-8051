@@ -182,6 +182,14 @@ def _try_switch(func: Function, head_block: BasicBlock) -> bool:
             ft = _fall_through_successor(blk, label)
             if ft is not None:
                 ft_label = _label_for(ft)
+                # If this block has no IDA-assigned label, _label_for() returns
+                # a synthetic "label_XXXX" name, but initial_hir() never inserted
+                # a Label HIR node (it only does so when block.label is set).
+                # Assign the label now so that _absorb_switch_in_body_list can
+                # find the arm boundary when the loop body is assembled flat.
+                if ft.label is None:
+                    ft.label = ft_label
+                    ft.hir.insert(0, Label(ft.start_ea, ft_label))
                 if ft_label not in cases_dict:
                     cases_dict[ft_label] = []
                     cases_order.append(ft_label)
@@ -194,6 +202,19 @@ def _try_switch(func: Function, head_block: BasicBlock) -> bool:
 
     cases = [(sorted(cases_dict[lbl]), lbl) for lbl in cases_order]
     cases.sort(key=lambda pair: min(pair[0]))
+
+    # If all steps used JEZ (is_ne=False) the chain has no explicit default branch.
+    # The fall-through from the last step is the default arm — capture it now so
+    # that _absorb_switch_in_body_list can find and partition the arm correctly.
+    if default_label is None and steps:
+        _, last_lbl, last_is_ne, last_blk = steps[-1]
+        if not last_is_ne:
+            ft_def = _fall_through_successor(last_blk, last_lbl)
+            if ft_def is not None:
+                default_label = _label_for(ft_def)
+                if ft_def.label is None:
+                    ft_def.label = default_label
+                    ft_def.hir.insert(0, Label(ft_def.start_ea, default_label))
 
     dbg("switch", f"block {hex(head_block.start_ea)}: "
                   f"SwitchNode subj={subj.render()!r} "
@@ -228,14 +249,246 @@ def _try_switch(func: Function, head_block: BasicBlock) -> bool:
     return True
 
 
+def _extract_linear_equality_step(block: BasicBlock):
+    """
+    Like _extract_switch_step but also handles CPL (A=~A) and XRL (A^=K).
+
+    Returns (transform, label, is_ne, subject, did_reload) or None.
+    - transform: ('add', K) for additive delta, ('xor', K) for XOR/CPL (XOR 0xFF)
+    - label: IfGoto branch target
+    - is_ne: True for jnz (default arm)
+    - subject: Expr from Assign(A, subj) reload if found, else None
+    - did_reload: True if the block reloaded A from a subject before the transform
+    """
+    hir = [n for n in block.hir if not isinstance(n, Label)]
+    if not hir:
+        return None
+
+    # Must end with IfGoto(BinOp(A, op, 0))
+    ig = hir[-1]
+    if not (isinstance(ig, IfGoto)
+            and isinstance(ig.cond, BinOp)
+            and ig.cond.lhs == Reg("A")
+            and ig.cond.rhs == Const(0)
+            and ig.cond.op in ("==", "!=")):
+        return None
+
+    if len(hir) < 2:
+        return None
+
+    delta_node = hir[-2]
+    transform = None
+
+    # ADD/SUB/XOR via CompoundAssign(A, op=, K)
+    if isinstance(delta_node, CompoundAssign) and delta_node.lhs == Reg("A"):
+        if delta_node.op == "+=" and isinstance(delta_node.rhs, Const):
+            transform = ('add', delta_node.rhs.value & 0xFF)
+        elif delta_node.op == "-=" and isinstance(delta_node.rhs, Const):
+            transform = ('add', (-delta_node.rhs.value) & 0xFF)
+        elif delta_node.op == "^=" and isinstance(delta_node.rhs, Const):
+            transform = ('xor', delta_node.rhs.value & 0xFF)
+    # DEC/INC via ExprStmt(UnaryOp(op, A))
+    elif isinstance(delta_node, ExprStmt) and isinstance(delta_node.expr, UnaryOp):
+        uo = delta_node.expr
+        if isinstance(uo.operand, Regs) and uo.operand == Reg("A"):
+            if uo.op == "--":
+                transform = ('add', 0xFF)   # dec A ≡ A += -1
+            elif uo.op == "++":
+                transform = ('add', 0x01)
+    # CPL A: Assign(A, ~A)  →  XOR 0xFF
+    elif (isinstance(delta_node, Assign)
+          and delta_node.lhs == Reg("A")
+          and isinstance(delta_node.rhs, UnaryOp)
+          and delta_node.rhs.op == "~"
+          and isinstance(delta_node.rhs.operand, Regs)
+          and delta_node.rhs.operand == Reg("A")):
+        transform = ('xor', 0xFF)
+
+    if transform is None:
+        return None
+
+    # Optional reload: Assign(A, subj) as third-to-last node.
+    # Must not be a CPL (A = ~A) — that's the transform node itself.
+    subject = None
+    did_reload = False
+    if len(hir) >= 3:
+        maybe = hir[-3]
+        if (isinstance(maybe, Assign)
+                and maybe.lhs == Reg("A")
+                and not _contains_a(maybe.rhs)
+                and not (isinstance(maybe.rhs, UnaryOp) and maybe.rhs.op == "~")):
+            subject = maybe.rhs
+            did_reload = True
+
+    return (transform, ig.label, ig.cond.op == "!=", subject, did_reload)
+
+
+def _try_linear_equality_switch(func: Function, head_block: BasicBlock) -> bool:
+    """
+    Detect a linear equality chain switch where each step uses CPL, XRL, ADD, DEC, or INC
+    to test whether the switch subject equals a specific value.
+
+    Unlike _try_switch (cumulative ADD + JZ/JNZ), this also handles:
+      CPL A       (A = ~A)    → case value 0xFF
+      XRL A, #K  (A ^= K)    → case value K  (with reload)
+
+    Steps compose as: XOR chains stay XOR; ADD chains stay additive; reload resets.
+    Mixed ADD-after-XOR (without reload) breaks the chain.
+
+    Returns True if a SwitchNode was created and intermediate blocks absorbed.
+    """
+    steps: List[Tuple] = []   # (case_val, label, is_ne, block)
+    subjects: List[Expr] = []
+    cur = head_block
+
+    # current_T tracks the net transform T applied to the subject since last reload.
+    # T(x) = x + delta  (type 'add')  →  A==0 when x == (-delta)&0xFF
+    # T(x) = x ^ mask   (type 'xor')  →  A==0 when x == mask
+    # Identity is ('add', 0).
+    current_T = ('add', 0)
+
+    while True:
+        result = _extract_linear_equality_step(cur)
+        if result is None:
+            break
+        transform, label, is_ne, subject, did_reload = result
+
+        if did_reload:
+            current_T = ('add', 0)   # reset to identity on subject reload
+
+        t_type, t_val = transform
+
+        if current_T[0] == 'add' and t_type == 'add':
+            new_T = ('add', (current_T[1] + t_val) & 0xFF)
+        elif current_T[0] == 'add' and current_T[1] == 0 and t_type == 'xor':
+            # Identity followed by XOR → pure XOR
+            new_T = ('xor', t_val)
+        elif current_T[0] == 'xor' and t_type == 'xor':
+            # Chained XOR: mask accumulates
+            new_T = ('xor', current_T[1] ^ t_val)
+        else:
+            # Mixed ADD+XOR without reload: case value not expressible as subj==K
+            break
+
+        current_T = new_T
+
+        if current_T[0] == 'add':
+            case_val = (-current_T[1]) & 0xFF
+        else:
+            case_val = current_T[1]
+
+        if subject is not None:
+            subjects.append(subject)
+
+        steps.append((case_val, label, is_ne, cur))
+        dbg("switch", f"  leq step @ {hex(cur.start_ea)}: "
+                      f"case={hex(case_val)} label={label!r} is_ne={is_ne}")
+
+        if is_ne:
+            break
+
+        nxt = _fall_through_successor(cur, label)
+        if nxt is None or getattr(nxt, "_absorbed", False):
+            break
+        cur = nxt
+
+    if len(steps) < 2 or not subjects:
+        return False
+
+    # Only proceed if at least one step uses XOR/CPL (pure ADD chains are handled
+    # by _try_switch which runs after this function).
+    has_xor = any(
+        _extract_linear_equality_step(blk) is not None
+        and _extract_linear_equality_step(blk)[0][0] == 'xor'
+        for _, _, _, blk in steps
+    )
+    if not has_xor:
+        return False
+
+    subj = subjects[0]
+
+    # Build cases dict (same logic as _try_switch)
+    cases_dict: Dict[str, List[int]] = {}
+    cases_order: List[str] = []
+    default_label: Optional[str] = None
+
+    for case_val, label, is_ne, blk in steps:
+        if is_ne:
+            default_label = label
+            ft = _fall_through_successor(blk, label)
+            if ft is not None:
+                ft_label = _label_for(ft)
+                if ft_label not in cases_dict:
+                    cases_dict[ft_label] = []
+                    cases_order.append(ft_label)
+                cases_dict[ft_label].append(case_val)
+        else:
+            if label not in cases_dict:
+                cases_dict[label] = []
+                cases_order.append(label)
+            cases_dict[label].append(case_val)
+
+    # If chain ends with jz (no jnz), the fall-through of the last block is the default.
+    if not any(is_ne for _, _, is_ne, _ in steps):
+        last_blk = steps[-1][3]
+        last_jz_label = steps[-1][1]
+        ft_default = _fall_through_successor(last_blk, last_jz_label)
+        if ft_default is not None:
+            default_label = _label_for(ft_default)
+
+    if not cases_dict:
+        return False
+
+    cases = [(sorted(cases_dict[lbl]), lbl) for lbl in cases_order]
+    cases.sort(key=lambda pair: min(pair[0]))
+
+    dbg("switch", f"block {hex(head_block.start_ea)}: "
+                  f"LinearEqSwitch subj={subj.render()!r} "
+                  f"{len(steps)} steps → {len(cases)} case entries")
+
+    first_hir = next((n for n in head_block.hir if not isinstance(n, Label)), None)
+    sw_ea = first_hir.ea if first_hir is not None else head_block.start_ea
+    sw = SwitchNode(ea=sw_ea, subject=subj, cases=cases, default_label=default_label)
+
+    # Keep Label nodes and any preamble before the switch tail in head block.
+    hir_no_labels = [n for n in head_block.hir if not isinstance(n, Label)]
+    first_step_result = _extract_linear_equality_step(head_block)
+    tail_len = 2 + (1 if first_step_result[4] else 0)   # +1 if reload node consumed
+    preamble = hir_no_labels[:-tail_len]
+    label_nodes = [n for n in head_block.hir if isinstance(n, Label)]
+    head_block.hir = label_nodes + preamble + [sw]
+
+    # Absorb all intermediate step blocks (not the head)
+    for _, _, _, blk in steps[1:]:
+        blk._absorbed = True
+
+    return True
+
+
 class SwitchStructurer(OptimizationPass):
     """
-    Detect 8051 switch chains (cumulative ADD + JZ/JNZ) and replace with SwitchNode.
-    Runs before IfElseStructurer so the chain blocks are absorbed before if/else
-    structuring tries to process them.
+    Detect 8051 switch chains and replace with SwitchNode.
+
+    Two patterns are detected (in order):
+    1. Linear equality chains using CPL/XRL/ADD/DEC — each step tests subject == K.
+    2. Cumulative ADD/DEC chains (the original pattern).
+
+    Runs before IfElseStructurer so chain blocks are absorbed before if/else structuring.
     """
 
     def run(self, func: Function) -> None:
+        # Pass 1: linear equality chains (CPL/XRL — must run first to grab full chains)
+        changed = True
+        while changed:
+            changed = False
+            for block in func.blocks:
+                if getattr(block, "_absorbed", False):
+                    continue
+                if _try_linear_equality_switch(func, block):
+                    changed = True
+                    break
+
+        # Pass 2: cumulative ADD chains
         changed = True
         while changed:
             changed = False
@@ -248,7 +501,7 @@ class SwitchStructurer(OptimizationPass):
         from pseudo8051.passes.debug_dump import dump_pass_hir
         all_nodes = [n for b in func.blocks
                      if not getattr(b, "_absorbed", False) for n in b.hir]
-        dump_pass_hir("06.switch", all_nodes, func.name)
+        dump_pass_hir("05.switch", all_nodes, func.name)
 
 
 # ── SwitchBodyAbsorber helpers ────────────────────────────────────────────────
@@ -338,8 +591,15 @@ def _find_switch_merge_ea(func: Function, switch_node: SwitchNode,
     for label in all_labels:
         blk = label_to_block.get(label)
         if blk is None:
-            return None
+            # Arm target is outside this function (filtered by IDA as belonging
+            # to a different function entry, e.g. an SJMP trampoline tail).
+            # Skip it from the intersection — the merge can still be found from
+            # the remaining arms.
+            continue
         per_arm.append(_reachable_eas(blk, bfs_floor))
+
+    if not per_arm:
+        return None
 
     # Strategy 1: full intersection
     common = per_arm[0].copy()
@@ -459,32 +719,114 @@ def _absorb_switch_in_body_list(nodes: List[HIRNode]) -> tuple:
                     outer_nodes, arm_groups = _partition_by_switch_labels(
                         sibling_nodes, case_labels)
 
-                    # Resolve non-case labels embedded inside arm bodies.
-                    # These arise when a shared successor block (e.g. code_6_7732)
-                    # is not itself a case entry label but appears inside one arm
-                    # as a Label node, while other arms end with 'goto code_6_7732'.
+                    # ── Pre-structuring ───────────────────────────────────────
+                    # Structure flat if/else patterns in each arm BEFORE merge-
+                    # point detection and cleanup.  This is required because:
+                    #   1. Merge-point detection uses arm gotos to identify the
+                    #      switch exit label, which must be present.
+                    #   2. The cleanup step removes GotoStatement(merge_label)
+                    #      from ALL arms, including ones embedded in diamond
+                    #      patterns where that goto is semantically necessary.
+                    # Running _structure_flat_ifelse now consumes those gotos
+                    # into IfNodes before cleanup can break the diamonds.
+                    from pseudo8051.passes.ifelse import _structure_flat_ifelse
+                    for _lbl in arm_groups:
+                        arm_groups[_lbl] = _structure_flat_ifelse(arm_groups[_lbl])
+
+                    # ── Merge-point detection ─────────────────────────────────
+                    # The merge label is the first non-case Label in the last
+                    # arm's body that at least one other arm jumps to.  It marks
+                    # the switch exit: everything from it onward belongs AFTER
+                    # the switch, not inside any arm.
+                    from pseudo8051.passes.ifelse import _collect_goto_targets
+                    last_arm_lbl = list(arm_groups.keys())[-1]
+                    other_gotos: set = set()
+                    for _lbl, _arm_hir in arm_groups.items():
+                        if _lbl != last_arm_lbl:
+                            other_gotos |= _collect_goto_targets(_arm_hir)
+
+                    merge_label: Optional[str] = None
+                    post_switch_nodes: List[HIRNode] = []
+                    last_arm_hir = arm_groups[last_arm_lbl]
+                    for _idx, _n in enumerate(last_arm_hir):
+                        if (isinstance(_n, Label)
+                                and _n.name not in case_labels
+                                and _n.name in other_gotos):
+                            merge_label = _n.name
+                            post_switch_nodes = last_arm_hir[_idx:]
+                            arm_groups[last_arm_lbl] = last_arm_hir[:_idx]
+                            break
+
+                    # Fallback: other arms may fall through (no explicit goto) so
+                    # other_gotos is empty or lacks the exit label.  Search ALL
+                    # arms for the last non-case Label that is a goto target
+                    # within that same arm — pre-structuring leaves GotoStatement
+                    # nodes nested inside IfNodes pointing to this exit label.
+                    if merge_label is None:
+                        for _search_lbl in arm_groups:
+                            _arm_hir_s = arm_groups[_search_lbl]
+                            _arm_targets_s = _collect_goto_targets(_arm_hir_s)
+                            for _idx in range(len(_arm_hir_s) - 1, -1, -1):
+                                _n = _arm_hir_s[_idx]
+                                if (isinstance(_n, Label)
+                                        and _n.name not in case_labels
+                                        and _n.name in _arm_targets_s):
+                                    merge_label = _n.name
+                                    post_switch_nodes = _arm_hir_s[_idx:]
+                                    arm_groups[_search_lbl] = (
+                                        _arm_hir_s[:_idx])
+                                    break
+                            if merge_label is not None:
+                                break
+
+                    # Replace goto(merge_label) with break throughout all arms,
+                    # including ones nested inside IfNodes produced by pre-structuring.
+                    # (A flat list-comprehension would miss gotos nested one level deep.)
+                    if merge_label is not None:
+                        for _lbl in arm_groups:
+                            arm_groups[_lbl] = _replace_goto_with_break(
+                                arm_groups[_lbl], merge_label)
+
+                    # ── Embedded-tail resolution ──────────────────────────────
+                    # Handles non-case Labels within arm bodies that represent
+                    # shared code between arms (e.g. an SJMP-trampoline target
+                    # whose code is laid out inline in the same arm).
                     # Strategy:
-                    #   1. Collect every non-case Label found in any arm body and
-                    #      record the nodes that follow it (the "shared tail").
-                    #   2. For any arm whose last node is 'goto shared_label', strip
-                    #      the goto and append the shared tail in its place.
-                    #   3. Remove the embedded Label nodes from all arm bodies.
+                    #   1. Collect every non-case Label found in any arm body.
+                    #   2. Strip dead gotos: GotoStatement(L) immediately
+                    #      followed by Label(L) — these are trampoline artifacts.
+                    #   3. For any arm whose last node is 'goto shared_label',
+                    #      strip the goto and append the shared tail in its place.
+                    #   4. Remove the now-inlined embedded Label nodes.
                     embedded_tails: Dict[str, List[HIRNode]] = {}
                     for arm_nodes in arm_groups.values():
                         for idx, n in enumerate(arm_nodes):
                             if isinstance(n, Label) and n.name not in case_labels:
                                 embedded_tails[n.name] = arm_nodes[idx + 1:]
                     if embedded_tails:
+                        # Step 2: strip dead trampoline gotos
                         for lbl in arm_groups:
                             arm_hir = arm_groups[lbl]
-                            # Iteratively resolve goto-chains to embedded labels.
+                            cleaned: List[HIRNode] = []
+                            for j, n in enumerate(arm_hir):
+                                if (isinstance(n, GotoStatement)
+                                        and n.label in embedded_tails
+                                        and j + 1 < len(arm_hir)
+                                        and isinstance(arm_hir[j + 1], Label)
+                                        and arm_hir[j + 1].name == n.label):
+                                    continue  # dead goto — target follows immediately
+                                cleaned.append(n)
+                            arm_groups[lbl] = cleaned
+                        # Step 3: iteratively resolve end-gotos to embedded labels.
+                        for lbl in arm_groups:
+                            arm_hir = arm_groups[lbl]
                             while (arm_hir
                                    and isinstance(arm_hir[-1], GotoStatement)
                                    and arm_hir[-1].label in embedded_tails):
                                 target_label = arm_hir[-1].label
                                 arm_hir.pop()
                                 arm_hir.extend(embedded_tails[target_label])
-                        # Strip the now-inlined embedded Label nodes.
+                        # Step 4: strip the now-inlined embedded Label nodes.
                         for lbl in arm_groups:
                             arm_groups[lbl] = [
                                 n for n in arm_groups[lbl]
@@ -492,11 +834,17 @@ def _absorb_switch_in_body_list(nodes: List[HIRNode]) -> tuple:
                                         and n.name in embedded_tails)
                             ]
 
+                    # Structure flat if/else within each arm body before adding
+                    # breaks.  The arm HIR is assembled from raw basic-block HIR
+                    # that was never through if/else structuring (IfElseStructurer
+                    # ran before SwitchBodyAbsorber).
+                    from pseudo8051.passes.ifelse import _structure_flat_ifelse
+
                     # Build case bodies
                     new_cases: List = []
                     for values, body in node.cases:
                         if isinstance(body, str) and body in arm_groups:
-                            arm_hir = list(arm_groups[body])
+                            arm_hir = _structure_flat_ifelse(list(arm_groups[body]))
                             if _needs_break(arm_hir):
                                 arm_hir.append(BreakStmt(node.ea))
                             new_cases.append((values, arm_hir))
@@ -524,7 +872,7 @@ def _absorb_switch_in_body_list(nodes: List[HIRNode]) -> tuple:
                     if (node.default_label
                             and isinstance(node.default_label, str)
                             and node.default_label in arm_groups):
-                        dbody = list(arm_groups[node.default_label])
+                        dbody = _structure_flat_ifelse(list(arm_groups[node.default_label]))
                         if _needs_break(dbody):
                             dbody.append(BreakStmt(node.ea))
                         node.default_body = dbody
@@ -535,6 +883,7 @@ def _absorb_switch_in_body_list(nodes: List[HIRNode]) -> tuple:
                         f"absorbed {len(arm_groups)} arm(s) from HIR siblings")
                     result.append(node)
                     result.extend(outer_nodes)
+                    result.extend(post_switch_nodes)  # merge point and beyond
                     i = len(nodes)   # skip all consumed siblings
                     changed = True
                     continue
@@ -631,7 +980,7 @@ class SwitchBodyAbsorber(OptimizationPass):
     def _absorb(self, func: Function, block, switch_node: SwitchNode,
                 label_to_block: dict,
                 _build_arm_hir, _collect_goto_targets) -> None:
-        from pseudo8051.passes.ifelse import _reachable_eas
+        from pseudo8051.passes.ifelse import _reachable_eas, _structure_flat_ifelse
         from collections import Counter
 
         all_labels_here = [body for _, body in switch_node.cases if isinstance(body, str)]
@@ -739,13 +1088,29 @@ class SwitchBodyAbsorber(OptimizationPass):
             body_blocks = _arm_blocks_sw(label_to_block[label], arm_me)
             dbg("switch", f"  _get_body({label!r}): arm_me={hex(arm_me)} arm_ml={arm_ml!r} "
                           f"body_blocks={[hex(b.start_ea) for b in body_blocks]}")
-            body_hir = _build_arm_hir(body_blocks, arm_ml)
+            # Keep intra-arm block-entry labels that are actually goto targets
+            # within the arm so _structure_flat_ifelse can detect and structure
+            # if/else diamonds.  Only keep labels that are jumped to — unused
+            # block-entry labels would pollute body-text deduplication.
+            arm_label_names = {_label_for(b) for b in body_blocks}
+            arm_goto_targets: set = set()
+            for _blk in body_blocks:
+                arm_goto_targets |= _collect_goto_targets(_blk.hir)
+            arm_keep_labels = arm_label_names & arm_goto_targets
+            body_hir = _build_arm_hir(body_blocks, arm_ml,
+                                      keep_labels=arm_keep_labels or None)
             dbg("switch", f"    after build_arm_hir: {[type(n).__name__ for n in body_hir]}")
             # Strip gotos to inlined arm blocks — these are dead fall-throughs
             # after the blocks are concatenated (e.g. goto trampoline at lower EA).
             body_hir = [n for n in body_hir
                         if not (isinstance(n, GotoStatement)
                                 and n.label in inlined_block_labels)]
+            # Structure flat if/else within the arm body.  SwitchBodyAbsorber runs
+            # after IfElseStructurer, so arm HIR is a raw concatenation of block HIR
+            # that was never through if/else structuring.  Do it now so case bodies
+            # contain IfNode trees rather than bare IfGoto/GotoStatement/Label nodes.
+            body_hir = _structure_flat_ifelse(body_hir)
+            dbg("switch", f"    after structure_flat_ifelse: {[type(n).__name__ for n in body_hir]}")
             # Stash a no-break copy for external goto replacement before adding breaks.
             # If the body falls through to the merge, append the merge block's code so
             # the external copy includes the full execution path.

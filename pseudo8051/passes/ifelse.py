@@ -211,6 +211,60 @@ def _drop_dead_labels(nodes: List[HIRNode], live: set) -> List[HIRNode]:
     return result
 
 
+def _strip_gotos_to(nodes: List[HIRNode], labels: set) -> List[HIRNode]:
+    """
+    Strip GotoStatement(X) and IfGoto(_, X) where X is in *labels* from *nodes*,
+    recursing into IfNode then/else bodies.  Does not recurse into loops or
+    switches (those have their own exit mechanisms).
+    """
+    result = []
+    for node in nodes:
+        if isinstance(node, GotoStatement) and node.label in labels:
+            continue
+        if isinstance(node, IfGoto) and node.label in labels:
+            continue
+        if isinstance(node, IfNode):
+            node.then_nodes = _strip_gotos_to(node.then_nodes, labels)
+            node.else_nodes = _strip_gotos_to(node.else_nodes, labels)
+        result.append(node)
+    return result
+
+
+def _strip_redundant_exit_gotos(nodes: List[HIRNode]) -> List[HIRNode]:
+    """
+    For each IfNode immediately followed by Label(s) in the same list, remove
+    GotoStatement(X) / IfGoto(_, X) (where X is one of those labels) from
+    within the IfNode's then/else bodies at any depth.
+    Recurses into all structured node bodies first (bottom-up).
+    Iterates until stable.
+    """
+    # Bottom-up: recurse into existing structured nodes first
+    result = [node.map_bodies(_strip_redundant_exit_gotos) for node in nodes]
+
+    changed = True
+    while changed:
+        changed = False
+        for i, node in enumerate(result):
+            if not isinstance(node, IfNode):
+                continue
+            # Collect Label names immediately following this IfNode (no code between)
+            following_labels: set = set()
+            j = i + 1
+            while j < len(result) and isinstance(result[j], Label):
+                following_labels.add(result[j].name)
+                j += 1
+            if not following_labels:
+                continue
+            new_then = _strip_gotos_to(node.then_nodes, following_labels)
+            new_else = _strip_gotos_to(node.else_nodes, following_labels)
+            if new_then != node.then_nodes or new_else != node.else_nodes:
+                node.then_nodes = new_then
+                node.else_nodes = new_else
+                changed = True
+
+    return result
+
+
 def _replace_goto_in_hir(nodes: List[HIRNode], label: str,
                           replacement: List[HIRNode]) -> List[HIRNode]:
     """
@@ -288,6 +342,8 @@ def _structure_flat_ifelse(nodes: List[HIRNode]) -> List[HIRNode]:
     changed = True
     while changed:
         nodes, changed = _structure_flat_ifelse_pass(nodes)
+    # Strip GotoStatement(X) from IfNode bodies where Label(X) immediately follows
+    nodes = _strip_redundant_exit_gotos(nodes)
     return nodes
 
 
@@ -338,6 +394,83 @@ def _structure_flat_ifelse_pass(nodes: List[HIRNode]) -> Tuple[List[HIRNode], bo
                     break
 
             if merge_pos is None:
+                # The merge label is external (not a Label in this list).
+                # Check whether the jumped-to arm also ends with the same
+                # GotoStatement(merge_label) — both arms exit to the same
+                # external label, forming a diamond with an external merge.
+                else_start = else_pos
+                while (else_start < len(result)
+                       and isinstance(result[else_start], Label)
+                       and result[else_start].name == else_label):
+                    else_start += 1
+                # The else arm extends to the next top-level Label (or end of list).
+                else_end = else_start
+                while else_end < len(result) and not isinstance(result[else_end], Label):
+                    else_end += 1
+                else_arm_raw = result[else_start:else_end]
+                if (else_arm_raw
+                        and isinstance(else_arm_raw[-1], GotoStatement)
+                        and else_arm_raw[-1].label == merge_label):
+                    # Both arms exit to the same external label.
+                    jumped_to_ext  = else_arm_raw[:-1]
+                    fall_through_ext = result[i + 1:goto_pos]
+
+                    then_nodes = jumped_to_ext
+                    else_nodes = fall_through_ext
+                    eff_cond   = cond
+                    then_nonempty = any(not isinstance(n, Label) for n in then_nodes)
+                    else_nonempty = any(not isinstance(n, Label) for n in else_nodes)
+                    if not then_nonempty and else_nonempty:
+                        eff_cond   = _invert_condition(cond)
+                        then_nodes = else_nodes
+                        else_nodes = []
+
+                    if not then_nonempty and not else_nonempty:
+                        i += 1
+                        continue
+
+                    if_node = IfNode(node.ea, eff_cond, then_nodes, else_nodes)
+                    if_node.ann = node.ann
+
+                    # Retain the shared exit goto as the continuation.
+                    goto_node = result[goto_pos]
+                    result = result[:i] + [if_node, goto_node] + result[else_end:]
+                    return result, True
+
+                # Asymmetric diamond: fall-through arm exits explicitly via
+                # goto(merge_label); jumped-to arm is at the end of the list
+                # and falls through implicitly (no terminal goto).
+                # Pattern:
+                #   IfGoto(cond, else_label)
+                #   [fall-through body]
+                #   GotoStatement(merge_label)   ← goto_pos
+                #   Label(else_label)
+                #   [else body — no trailing goto]
+                #   <end of list>
+                # →  IfNode(cond, else_body, fall_through_body)
+                #    GotoStatement(merge_label)
+                if (else_end == len(result)
+                        and else_arm_raw
+                        and not isinstance(else_arm_raw[-1], GotoStatement)):
+                    fall_through_no_goto = result[i + 1:goto_pos]
+                    then_nodes = else_arm_raw
+                    else_nodes = fall_through_no_goto
+                    eff_cond   = cond
+                    then_nonempty = any(not isinstance(n, Label) for n in then_nodes)
+                    else_nonempty = any(not isinstance(n, Label) for n in else_nodes)
+                    if not then_nonempty and else_nonempty:
+                        eff_cond   = _invert_condition(cond)
+                        then_nodes = else_nodes
+                        else_nodes = []
+                    if not then_nonempty and not else_nonempty:
+                        i += 1
+                        continue
+                    if_node = IfNode(node.ea, eff_cond, then_nodes, else_nodes)
+                    if_node.ann = node.ann
+                    goto_node = result[goto_pos]
+                    result = result[:i] + [if_node, goto_node]
+                    return result, True
+
                 i += 1
                 continue
 
@@ -458,6 +591,13 @@ class IfElseStructurer(OptimizationPass):
         for block in func.blocks:
             if not getattr(block, "_absorbed", False) and block.hir:
                 block.hir = _remove_nop_gotos(block.hir)
+
+        # ── Strip redundant exit gotos ────────────────────────────────────
+        # Remove GotoStatement(X) from IfNode bodies when Label(X) immediately
+        # follows the IfNode at the same level — those gotos are no-ops.
+        for block in func.blocks:
+            if not getattr(block, "_absorbed", False) and block.hir:
+                block.hir = _strip_redundant_exit_gotos(block.hir)
 
         # ── Dead-label cleanup ────────────────────────────────────────────
         live_labels: set = set()
