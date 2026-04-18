@@ -9,7 +9,7 @@ from typing import Dict, List, Optional, Tuple
 from pseudo8051.ir.hir import HIRNode, Assign, TypedAssign, ReturnStmt, ExprStmt
 from pseudo8051.ir.expr import Reg, Regs, Const, Name, RegGroup
 from pseudo8051.constants import dbg
-from pseudo8051.passes.patterns.base   import Pattern, Match, Simplify
+from pseudo8051.passes.patterns.base   import CombineTransform, Match, Simplify
 from pseudo8051.passes.patterns._utils import (
     VarInfo, _replace_pairs, _parse_int, _const_str, _type_bytes,
     _walk_expr, _fold_into_node,
@@ -84,17 +84,17 @@ def _scan_const_group(nodes: List[HIRNode], start: int,
     return (value, i)
 
 
-class ConstGroupPattern(Pattern):
+class ConstGroupPattern(CombineTransform):
     """
     Collapse a byte-by-byte constant load into a single typed assignment,
     optionally folding the constant directly into a following return statement.
     """
 
-    def match(self,
-              nodes:    List[HIRNode],
-              i:        int,
-              reg_map:  Dict[str, VarInfo],
-              simplify: Simplify) -> Optional[Match]:
+    def produce(self,
+               nodes:    List[HIRNode],
+               i:        int,
+               reg_map:  Dict[str, VarInfo],
+               simplify: Simplify) -> Optional[Tuple[HIRNode, int]]:
         candidates = sorted(
             {v for v in reg_map.values()
              if isinstance(v, VarInfo) and len(v.regs) >= 2
@@ -138,7 +138,7 @@ class ConstGroupPattern(Pattern):
                     # Span: nodes[i]…next_node; reg_groups from first, call_arg from last
                     from pseudo8051.ir.hir import NodeAnnotation
                     folded_node.ann = NodeAnnotation.merge(nodes[i], next_node)
-                    return ([folded_node], end_i + 1)
+                    return (folded_node, end_i + 1)
 
             # Declare with type
             from pseudo8051.ir.hir import NodeAnnotation
@@ -146,5 +146,5 @@ class ConstGroupPattern(Pattern):
             out = TypedAssign(nodes[i].ea, vinfo.type,
                               RegGroup(vinfo.regs, alias=vinfo.name), const_expr)
             out.ann = NodeAnnotation.merge(nodes[i], last)
-            return ([out], end_i)
+            return (out, end_i)
         return None

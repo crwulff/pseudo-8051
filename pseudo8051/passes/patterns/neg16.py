@@ -5,12 +5,12 @@ Collapses the 7-statement 8051 16-bit two's-complement negation into:
     var = -var;
 """
 
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from pseudo8051.ir.hir import HIRNode, Assign, CompoundAssign
 from pseudo8051.ir.expr import Reg, Regs, Const, BinOp, UnaryOp, Name
 from pseudo8051.constants import dbg
-from pseudo8051.passes.patterns.base   import Pattern, Match, Simplify
+from pseudo8051.passes.patterns.base   import CombineTransform, Match, Simplify
 from pseudo8051.passes.patterns._utils import VarInfo
 
 
@@ -36,14 +36,14 @@ def _is_store_a(node: HIRNode, reg: str) -> bool:
     return isinstance(node, Assign) and node.lhs == Reg(reg) and node.rhs == Reg("A")
 
 
-class Neg16Pattern(Pattern):
+class Neg16Pattern(CombineTransform):
     """Collapse 7-statement SUBB negation into 'var = -var;'."""
 
-    def match(self,
-              nodes:    List[HIRNode],
-              i:        int,
-              reg_map:  Dict[str, VarInfo],
-              simplify: Simplify) -> Optional[Match]:
+    def produce(self,
+               nodes:    List[HIRNode],
+               i:        int,
+               reg_map:  Dict[str, VarInfo],
+               simplify: Simplify) -> Optional[Tuple[HIRNode, int]]:
         if i + 7 > len(nodes):
             return None
         ns = nodes[i:i + 7]
@@ -73,4 +73,4 @@ class Neg16Pattern(Pattern):
             return None
 
         dbg("typesimp", f"  neg16: {info_lo.name} = -{info_lo.name}")
-        return ([Assign(nodes[i].ea, Name(info_lo.name), UnaryOp("-", Name(info_lo.name)))], i + 7)
+        return (Assign(nodes[i].ea, Name(info_lo.name), UnaryOp("-", Name(info_lo.name))), i + 7)

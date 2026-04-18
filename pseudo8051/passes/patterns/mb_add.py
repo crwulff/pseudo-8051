@@ -5,12 +5,12 @@ Recognises the 8051 idiom for adding a 16-bit constant to a register pair
 and storing the result byte-by-byte into a declared XRAM local.
 """
 
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from pseudo8051.ir.hir import HIRNode, Assign, CompoundAssign, ExprStmt
 from pseudo8051.ir.expr import Reg, Regs, Const, XRAMRef, UnaryOp, Name, BinOp, Cast, Expr
 from pseudo8051.constants import dbg
-from pseudo8051.passes.patterns.base   import Pattern, Match, Simplify
+from pseudo8051.passes.patterns.base   import CombineTransform, Match, Simplify
 from pseudo8051.passes.patterns._utils import (
     VarInfo, _type_bytes, _const_str, _replace_pairs,
 )
@@ -115,14 +115,14 @@ def _is_lo_companion(sym_lo: str,
     return lo_binfo.name.startswith(hi_vinfo.name + ".")
 
 
-class MultiByteAddPattern(Pattern):
+class MultiByteAddPattern(CombineTransform):
     """Collapse 8051 16-bit ADD+ADDC arithmetic + XRAM byte writes into a typed assignment."""
 
-    def match(self,
-              nodes:    List[HIRNode],
-              i:        int,
-              reg_map:  Dict[str, VarInfo],
-              simplify: Simplify) -> Optional[Match]:
+    def produce(self,
+               nodes:    List[HIRNode],
+               i:        int,
+               reg_map:  Dict[str, VarInfo],
+               simplify: Simplify) -> Optional[Tuple[HIRNode, int]]:
         n_total = len(nodes)
         j = i
 
@@ -196,4 +196,4 @@ class MultiByteAddPattern(Pattern):
                                  BinOp(src_expr, "+", Const(cval)))
 
         dbg("typesimp", f"  mb-add: {result_node.render()[0][1]}  (nodes {i}–{j-1}, ea={nodes[i].ea:#x})")
-        return ([result_node], j)
+        return (result_node, j)

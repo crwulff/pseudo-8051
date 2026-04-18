@@ -9,19 +9,17 @@ from typing import Dict, List, Optional
 from pseudo8051.ir.hir import HIRNode, Assign, TypedAssign
 from pseudo8051.ir.expr import Reg, Regs, RegGroup, Call
 from pseudo8051.constants import dbg
-from pseudo8051.passes.patterns.base   import Pattern, Match, Simplify
+from pseudo8051.passes.patterns.base   import SubstituteTransform, Match, Simplify
 from pseudo8051.passes.patterns._utils import VarInfo, _subst_all_expr
 
 
-class RetvalPattern(Pattern):
+class RetvalPattern(SubstituteTransform):
     """Rename call return registers to retvalN and emit a typed declaration."""
 
-    def match(self,
-              nodes:    List[HIRNode],
-              i:        int,
+    def apply(self,
+              node:     HIRNode,
               reg_map:  Dict[str, VarInfo],
-              simplify: Simplify) -> Optional[Match]:
-        node = nodes[i]
+              simplify: Simplify) -> Optional[HIRNode]:
 
         if not isinstance(node, Assign) or isinstance(node, TypedAssign):
             return None
@@ -92,4 +90,4 @@ class RetvalPattern(Pattern):
         out_node: HIRNode = TypedAssign(node.ea, return_type, lhs, subst_call)
         out_node.ann = node.ann  # propagate annotation so downstream passes see callee_args
         dbg("typesimp", f"  retval: {out_node.render(0)[0][1]}")
-        return ([out_node], i + 1)
+        return out_node

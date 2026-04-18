@@ -22,12 +22,12 @@ Both patterns:
     the pattern does not fire (avoids composing pre/post patterns)
 """
 
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from pseudo8051.ir.hir import HIRNode, ExprStmt
 from pseudo8051.ir.expr import Reg, Regs, UnaryOp
 from pseudo8051.constants import dbg
-from pseudo8051.passes.patterns.base   import Pattern, Match, Simplify
+from pseudo8051.passes.patterns.base   import InlineTransform, Match, Simplify
 from pseudo8051.passes.patterns._utils import (
     VarInfo, _count_reg_uses_in_node, _subst_reg_in_node,
 )
@@ -54,7 +54,7 @@ def _embed_op(node: HIRNode, rn: str, op: str, post: bool) -> Optional[HIRNode]:
     return _subst_reg_in_node(node, rn, replacement)
 
 
-class RegPostIncPattern(Pattern):
+class RegPostIncPattern(InlineTransform):
     """
     Collapse 'node-using-Rn-once; Rn++/--;' into 'node-with-Rn++/-- embedded;'.
 
@@ -64,11 +64,11 @@ class RegPostIncPattern(Pattern):
     - Rn must appear exactly once in read positions of n0
     """
 
-    def match(self,
-              nodes:    List[HIRNode],
-              i:        int,
-              reg_map:  Dict[str, VarInfo],
-              simplify: Simplify) -> Optional[Match]:
+    def produce(self,
+                nodes:    List[HIRNode],
+                i:        int,
+                reg_map:  Dict[str, VarInfo],
+                simplify: Simplify) -> Optional[Tuple[HIRNode, int]]:
 
         n0 = nodes[i]
         # Don't consume another inc node (avoid conflicting with RegPreIncPattern)
@@ -85,10 +85,10 @@ class RegPostIncPattern(Pattern):
         if new_node is None:
             return None
         dbg("typesimp", f"  [{hex(n0.ea)}] reg_post_inc: embedded {rn}{op} into node")
-        return ([new_node], i + 2)
+        return (new_node, i + 2)
 
 
-class RegPreIncPattern(Pattern):
+class RegPreIncPattern(InlineTransform):
     """
     Collapse 'Rn++/--; node-using-Rn-once;' into 'node-with-++Rn/--Rn embedded;'.
 
@@ -98,11 +98,11 @@ class RegPreIncPattern(Pattern):
     - Rn must appear exactly once in read positions of n1
     """
 
-    def match(self,
-              nodes:    List[HIRNode],
-              i:        int,
-              reg_map:  Dict[str, VarInfo],
-              simplify: Simplify) -> Optional[Match]:
+    def produce(self,
+                nodes:    List[HIRNode],
+                i:        int,
+                reg_map:  Dict[str, VarInfo],
+                simplify: Simplify) -> Optional[Tuple[HIRNode, int]]:
 
         inc = _match_inc_node(nodes[i])
         if inc is None:
@@ -142,4 +142,4 @@ class RegPreIncPattern(Pattern):
                 patched.reg_exprs.pop(rn, None)
             new_node.ann = patched
         dbg("typesimp", f"  [{hex(n1.ea)}] reg_pre_inc: embedded {op}{rn} into node")
-        return ([new_node], i + 2)
+        return (new_node, i + 2)

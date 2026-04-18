@@ -9,7 +9,7 @@ from typing import Dict, List, Optional, Tuple
 from pseudo8051.ir.hir import HIRNode, Assign, TypedAssign, ExprStmt
 from pseudo8051.ir.expr import Reg, Regs, RegGroup, Name, XRAMRef, UnaryOp
 from pseudo8051.constants import dbg
-from pseudo8051.passes.patterns.base   import Pattern, Match, Simplify
+from pseudo8051.passes.patterns.base   import CombineTransform, Match, Simplify
 from pseudo8051.passes.patterns._utils import (
     VarInfo, _fold_into_node, _type_bytes,
 )
@@ -87,14 +87,14 @@ def _scan_xram_group(nodes: List[HIRNode], start: int,
     return (base_addr_str, i)
 
 
-class XRAMGroupReadPattern(Pattern):
+class XRAMGroupReadPattern(CombineTransform):
     """Collapse byte-by-byte XRAM reads into a typed pointer dereference."""
 
-    def match(self,
-              nodes:    List[HIRNode],
-              i:        int,
-              reg_map:  Dict[str, VarInfo],
-              simplify: Simplify) -> Optional[Match]:
+    def produce(self,
+               nodes:    List[HIRNode],
+               i:        int,
+               reg_map:  Dict[str, VarInfo],
+               simplify: Simplify) -> Optional[Tuple[HIRNode, int]]:
         candidates = sorted(
             {v for v in reg_map.values() if isinstance(v, VarInfo) and len(v.regs) >= 2},
             key=lambda v: len(v.regs), reverse=True,
@@ -124,12 +124,12 @@ class XRAMGroupReadPattern(Pattern):
 
                 if folded_node is not None:
                     folded_node.ann = NodeAnnotation.merge(nodes[i], next_node)
-                    return ([folded_node], end_i + 1)
+                    return (folded_node, end_i + 1)
 
             last = nodes[end_i - 1] if end_i > i else nodes[i]
             out = TypedAssign(nodes[i].ea, vinfo.type,
                               RegGroup(vinfo.regs, alias=vinfo.name), Name(ptr_expr))
             out.ann = NodeAnnotation.merge(nodes[i], last)
-            return ([out], end_i)
+            return (out, end_i)
 
         return None

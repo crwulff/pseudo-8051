@@ -10,7 +10,7 @@ from typing import Dict, List, Optional, Tuple
 from pseudo8051.ir.hir import HIRNode, Assign, ExprStmt
 from pseudo8051.ir.expr import Expr, Reg, Name, Const, XRAMRef, UnaryOp
 from pseudo8051.constants import dbg
-from pseudo8051.passes.patterns.base   import Pattern, Match, Simplify
+from pseudo8051.passes.patterns.base   import CombineTransform, Match, Simplify
 from pseudo8051.passes.patterns._utils import (
     VarInfo, _type_bytes, _const_str,
 )
@@ -90,14 +90,14 @@ def _build_value_str(byte_exprs: List[Expr], type_str: str) -> Optional[Tuple[in
     return (value, _const_str(value, type_str))
 
 
-class XRAMLocalWritePattern(Pattern):
+class XRAMLocalWritePattern(CombineTransform):
     """Collapse byte-by-byte XRAM writes to a declared local into a typed assignment."""
 
-    def match(self,
-              nodes:    List[HIRNode],
-              i:        int,
-              reg_map:  Dict[str, VarInfo],
-              simplify: Simplify) -> Optional[Match]:
+    def produce(self,
+               nodes:    List[HIRNode],
+               i:        int,
+               reg_map:  Dict[str, VarInfo],
+               simplify: Simplify) -> Optional[Tuple[HIRNode, int]]:
         candidates = sorted(
             [v for v in reg_map.values() if isinstance(v, VarInfo) and v.xram_sym],
             key=lambda v: _type_bytes(v.type), reverse=True,
@@ -117,6 +117,6 @@ class XRAMLocalWritePattern(Pattern):
             else:
                 continue
             dbg("typesimp", f"  [{hex(nodes[i].ea)}] xram-local-write: {vinfo.name} = {value_str}")
-            return ([Assign(nodes[i].ea, Name(vinfo.name), rhs_expr)], end_i)
+            return (Assign(nodes[i].ea, Name(vinfo.name), rhs_expr), end_i)
 
         return None

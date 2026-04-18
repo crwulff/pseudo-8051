@@ -29,7 +29,7 @@ from typing import Dict, List, Optional, Tuple
 from pseudo8051.ir.hir import HIRNode, Assign, ExprStmt
 from pseudo8051.ir.expr import Reg, Regs, Const, BinOp, UnaryOp, Call, CROMRef, XRAMRef, RegGroup
 from pseudo8051.constants import dbg
-from pseudo8051.passes.patterns.base   import Pattern, Match, Simplify
+from pseudo8051.passes.patterns.base   import RestructureTransform, Match, Simplify
 from pseudo8051.passes.patterns._utils import VarInfo
 
 
@@ -171,7 +171,7 @@ def _try_match_read(nodes: List[HIRNode], i: int):
 
 # ── Pattern ───────────────────────────────────────────────────────────────────
 
-class XchCopyPattern(Pattern):
+class XchCopyPattern(RestructureTransform):
     """
     Collapse the XCH-based dual-pointer copy idiom (ROM→XRAM or XRAM→XRAM) into:
         XRAM[Rhi:Rlo] = CROM[DPTR];   (or XRAM[DPTR] for XRAM source)
@@ -179,11 +179,11 @@ class XchCopyPattern(Pattern):
         Rhi:Rlo++;
     """
 
-    def match(self,
-              nodes:    List[HIRNode],
-              i:        int,
-              reg_map:  Dict[str, VarInfo],
-              simplify: Simplify) -> Optional[Match]:
+    def produce(self,
+                nodes:    List[HIRNode],
+                i:        int,
+                reg_map:  Dict[str, VarInfo],
+                simplify: Simplify) -> Optional[Match]:
 
         # ── Source read (CROM or XRAM) ────────────────────────────────────────
         read = _try_match_read(nodes, i)

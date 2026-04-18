@@ -13,26 +13,26 @@ into a single statement:
 Handles both expression-tree nodes (Assign) and legacy Statement nodes.
 """
 
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from pseudo8051.ir.hir import HIRNode, Assign
 from pseudo8051.ir.expr import Reg
 from pseudo8051.constants import dbg
-from pseudo8051.passes.patterns.base   import Pattern, Match, Simplify
+from pseudo8051.passes.patterns.base   import InlineTransform, Match, Simplify
 from pseudo8051.passes.patterns._utils import (
     VarInfo,
     _subst_all_expr,
 )
 
 
-class AccumRelayPattern(Pattern):
+class AccumRelayPattern(InlineTransform):
     """Collapse 'A = expr; target = A;' into 'target = expr;'."""
 
-    def match(self,
-              nodes:    List[HIRNode],
-              i:        int,
-              reg_map:  Dict[str, VarInfo],
-              simplify: Simplify) -> Optional[Match]:
+    def produce(self,
+                nodes:    List[HIRNode],
+                i:        int,
+                reg_map:  Dict[str, VarInfo],
+                simplify: Simplify) -> Optional[Match]:
         if i + 1 >= len(nodes):
             return None
 
@@ -49,6 +49,6 @@ class AccumRelayPattern(Pattern):
                 from pseudo8051.ir.hir import NodeAnnotation as _NA
                 new_node = Assign(n0.ea, new_lhs, new_rhs)
                 new_node.ann = _NA.merge(n0, n1)
-                return ([new_node], i + 2)
+                return (new_node, i + 2)
 
         return None

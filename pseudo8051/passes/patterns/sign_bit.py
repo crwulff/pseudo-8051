@@ -9,12 +9,12 @@ into:
     if (var < 0) { … }
 """
 
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from pseudo8051.ir.hir import HIRNode, Assign, IfNode
 from pseudo8051.ir.expr import Reg, Regs
 from pseudo8051.constants import dbg
-from pseudo8051.passes.patterns.base  import Pattern, Match, Simplify
+from pseudo8051.passes.patterns.base  import InlineTransform, Match, Simplify
 from pseudo8051.passes.patterns._utils import VarInfo, _type_bytes, _is_signed
 
 
@@ -26,14 +26,14 @@ def _is_a_load_reg(node: HIRNode) -> Optional[str]:
     return None
 
 
-class SignBitTestPattern(Pattern):
+class SignBitTestPattern(InlineTransform):
     """Replace 'A = R_hi; if (ACC.7) {…}' with 'if (var < 0) {…}'."""
 
-    def match(self,
-              nodes:    List[HIRNode],
-              i:        int,
-              reg_map:  Dict[str, VarInfo],
-              simplify: Simplify) -> Optional[Match]:
+    def produce(self,
+                nodes:    List[HIRNode],
+                i:        int,
+                reg_map:  Dict[str, VarInfo],
+                simplify: Simplify) -> Optional[Match]:
         node = nodes[i]
 
         reg_name = _is_a_load_reg(node)
@@ -62,4 +62,4 @@ class SignBitTestPattern(Pattern):
             then_nodes = simplify(nxt.then_nodes, reg_map),
             else_nodes = simplify(nxt.else_nodes, reg_map),
         )
-        return ([replacement], i + 2)
+        return (replacement, i + 2)

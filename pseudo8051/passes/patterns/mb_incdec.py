@@ -26,7 +26,7 @@ from typing import Dict, List, Optional, Tuple
 from pseudo8051.ir.hir import HIRNode, Assign, ExprStmt, IfGoto, Label
 from pseudo8051.ir.expr import Expr, Reg, Regs, Const, Name, XRAMRef, BinOp, UnaryOp
 from pseudo8051.constants import dbg
-from pseudo8051.passes.patterns.base   import Pattern, Match, Simplify
+from pseudo8051.passes.patterns.base   import CombineTransform, Match, Simplify
 from pseudo8051.passes.patterns._utils import VarInfo
 
 
@@ -186,14 +186,14 @@ def _resolve_var_name(byte_exprs: List[Expr], op: str,
     return parent
 
 
-class IfNodeIncDecPattern(Pattern):
+class IfNodeIncDecPattern(CombineTransform):
     """Collapse IfNode-based 16-bit inc/dec (produced by multi-tail loop structuring)."""
 
-    def match(self,
-              nodes:    List[HIRNode],
-              i:        int,
-              reg_map:  Dict[str, VarInfo],
-              simplify: Simplify) -> Optional[Match]:
+    def produce(self,
+                nodes:    List[HIRNode],
+                i:        int,
+                reg_map:  Dict[str, VarInfo],
+                simplify: Simplify) -> Optional[Tuple[HIRNode, int]]:
         from pseudo8051.ir.hir import IfNode as _IfNode
 
         # 1. Outer (lo-byte) unit
@@ -234,17 +234,17 @@ class IfNodeIncDecPattern(Pattern):
 
         ea = nodes[i].ea
         dbg("typesimp", f"  ifnode-incdec: {var_name}{op};  (nodes {i}–{j}, ea={ea:#x})")
-        return ([ExprStmt(ea, UnaryOp(op, Name(var_name), post=True))], j + 1)
+        return (ExprStmt(ea, UnaryOp(op, Name(var_name), post=True)), j + 1)
 
 
-class MultiByteIncDecPattern(Pattern):
+class MultiByteIncDecPattern(CombineTransform):
     """Collapse 8051 multi-byte increment/decrement sequences into var++/var--."""
 
-    def match(self,
-              nodes:    List[HIRNode],
-              i:        int,
-              reg_map:  Dict[str, VarInfo],
-              simplify: Simplify) -> Optional[Match]:
+    def produce(self,
+                nodes:    List[HIRNode],
+                i:        int,
+                reg_map:  Dict[str, VarInfo],
+                simplify: Simplify) -> Optional[Tuple[HIRNode, int]]:
 
         j = i
         units: List[Tuple[Expr, int]] = []   # (byte_expr, ea)
@@ -295,4 +295,4 @@ class MultiByteIncDecPattern(Pattern):
 
         ea = units[0][1]
         dbg("typesimp", f"  mb-incdec: {var_name}{op};  (nodes {i}–{j-1}, ea={ea:#x})")
-        return ([ExprStmt(ea, UnaryOp(op, Name(var_name), post=True))], j)
+        return (ExprStmt(ea, UnaryOp(op, Name(var_name), post=True)), j)

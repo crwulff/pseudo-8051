@@ -10,7 +10,7 @@ from typing import Dict, List, Optional
 from pseudo8051.ir.hir import HIRNode, Assign
 from pseudo8051.ir.expr import Reg, Regs
 from pseudo8051.constants import dbg
-from pseudo8051.passes.patterns.base   import Pattern, Match, Simplify
+from pseudo8051.passes.patterns.base   import EliminateTransform, Match, Simplify
 from pseudo8051.passes.patterns._utils import VarInfo
 
 
@@ -23,14 +23,14 @@ def _as_reg_copy(node: HIRNode) -> Optional[tuple]:
     return None
 
 
-class RegCopyGroupPattern(Pattern):
+class RegCopyGroupPattern(EliminateTransform):
     """Drop register-copy sequences and propagate the source variable name."""
 
-    def match(self,
-              nodes:    List[HIRNode],
-              i:        int,
-              reg_map:  Dict[str, VarInfo],
-              simplify: Simplify) -> Optional[Match]:
+    def detect(self,
+               nodes:    List[HIRNode],
+               i:        int,
+               reg_map:  Dict[str, VarInfo],
+               simplify: Simplify) -> Optional[int]:
         node = nodes[i]
         pair = _as_reg_copy(node)
         if pair is None:
@@ -70,4 +70,4 @@ class RegCopyGroupPattern(Pattern):
         dbg("typesimp",
             f"  reg-copy-group: {vinfo.name} {vinfo.regs!r} → {tuple(dsts)!r}, "
             f"dropped {n} copy statements")
-        return ([], i + n)
+        return i + n

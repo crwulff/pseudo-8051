@@ -25,7 +25,7 @@ from typing import Dict, List, Optional, Tuple
 from pseudo8051.ir.hir import HIRNode, Assign, CompoundAssign, SwitchNode
 from pseudo8051.ir.expr import Expr, Reg, Const, BinOp, Rot8Op
 from pseudo8051.constants import dbg
-from pseudo8051.passes.patterns.base   import Pattern, Match, Simplify
+from pseudo8051.passes.patterns.base   import CombineTransform, Match, Simplify
 from pseudo8051.passes.patterns._utils import (VarInfo, _subst_all_expr,
                                                 _canonicalize_expr, _is_reg_free)
 
@@ -45,7 +45,7 @@ def _is_rol_a(node: HIRNode) -> bool:
             and node.rhs.a_arg == Reg("A"))
 
 
-class RolSwitchPattern(Pattern):
+class RolSwitchPattern(CombineTransform):
     """
     Collapse a pre-switch rol8(A) preamble into the switch discriminant.
 
@@ -64,11 +64,11 @@ class RolSwitchPattern(Pattern):
     Builds: switch((A << prefix) op1 rhs1 op2 rhs2 ...) substituting reg_map.
     """
 
-    def match(self,
-              nodes:    List[HIRNode],
-              i:        int,
-              reg_map:  Dict[str, VarInfo],
-              simplify: Simplify) -> Optional[Match]:
+    def produce(self,
+               nodes:    List[HIRNode],
+               i:        int,
+               reg_map:  Dict[str, VarInfo],
+               simplify: Simplify) -> Optional[Tuple[HIRNode, int]]:
 
         # Must start with A = rol8(A)
         if not _is_rol_a(nodes[i]):
@@ -155,4 +155,4 @@ class RolSwitchPattern(Pattern):
         dbg("typesimp",
             f"  [{hex(nodes[i].ea)}] rol_switch: {n_before}+{n_after} rols "
             f"(k={k}) → switch({new_subj.render()})")
-        return ([new_sw], j + 1)
+        return (new_sw, j + 1)
