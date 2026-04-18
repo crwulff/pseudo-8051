@@ -141,10 +141,8 @@ class Operand:
                 return Reg(sfr)
             if addr <= 7:
                 return Reg(f"R{addr}")
-            iname = ida_name.get_name(op.addr)
-            if iname:
-                return Name(iname)
-            return Name(f"MEM[{hex(addr)}]")
+            iname = ida_name.get_name(op.addr) or None
+            return IRAMRef(Const(addr, alias=iname))
 
         if op.type == ida_ua.o_phrase:
             phrase = op.phrase
