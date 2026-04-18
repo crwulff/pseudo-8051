@@ -144,6 +144,10 @@ def _lift_simple_callee(callee_ea: int) -> Optional[List]:
     Returns the body nodes if the callee is simple (no conditional branches,
     no nested calls, at most MAX_INSTRUCTIONS instructions), or None otherwise.
 
+    Returns None (skips inlining) if the callee has a type signature — typed
+    functions should remain as named call nodes so TypeAwareSimplifier can
+    substitute their register arguments with named parameters.
+
     Termination:
       • RET  — strip the ReturnStmt and return the body.
       • Unconditional direct jump (LJMP/SJMP/AJMP to a known address) — treat
@@ -155,6 +159,11 @@ def _lift_simple_callee(callee_ea: int) -> Optional[List]:
     """
     import ida_name
     from pseudo8051.ir.expr import Call
+    from pseudo8051.prototypes import get_proto
+    callee_name = ida_name.get_name(callee_ea) or f"sub_{hex(callee_ea).removeprefix('0x')}"
+    if get_proto(callee_name) is not None:
+        return None   # has a type signature — keep as a named call
+
     state = CPState()
     nodes: List = []
     ea = callee_ea
