@@ -103,6 +103,8 @@ def _collapse_block_hir(hir: List[HIRNode]) -> List[HIRNode]:
         if ops and j < n and _match_write_a(hir[j], inner):
             rhs = _build_expr_node(XRAMRef(inner), ops)
             collapsed = Assign(node.ea, XRAMRef(inner), rhs)
+            collapsed.src_eas = frozenset().union(
+                *(n.src_eas for n in hir[i:j + 1]))
             dbg("RMW", f"  {node.render(0)[0][1]!r}  →  {collapsed.render(0)[0][1]!r}")
             result.append(collapsed)
             i = j + 1

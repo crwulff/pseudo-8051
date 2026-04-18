@@ -319,8 +319,9 @@ def _transform_default(node: HIRNode,
         simplify_fn = _simplify
 
     def _out(new_node: HIRNode) -> HIRNode:
-        """Copy annotation from input node to any newly created output node."""
+        """Copy annotation and src_eas from input node to any newly created output node."""
         new_node.ann = node.ann
+        new_node.src_eas = node.src_eas
         return new_node
 
     if isinstance(node, Assign):
@@ -496,6 +497,8 @@ def _simplify_once(nodes: List[HIRNode], reg_map: Dict[str, VarInfo],
                 extra_groups, killed_regs = _kill_groups_written(extra_groups, killed_regs, written)
                 extra_groups, killed_regs = _absorb_eff_mutations(
                     eff, pre_eff, extra_groups, killed_regs)
+                for rn in result[0]:
+                    rn.src_eas = rn.src_eas | node.src_eas
                 out.extend(result[0])
                 break
         else:
@@ -545,6 +548,11 @@ def _simplify(nodes: List[HIRNode], reg_map: Dict[str, VarInfo]) -> List[HIRNode
             result = pat.match(nodes, i, eff, _sub_simplify)
             if result is not None:
                 replacement, new_i = result
+                # Collect src_eas from all consumed nodes before they're discarded.
+                consumed_src_eas = frozenset().union(
+                    *(n.src_eas for n in nodes[i:new_i]))
+                for rn in replacement:
+                    rn.src_eas = rn.src_eas | consumed_src_eas
                 # Kill old entries BEFORE absorbing pattern mutations so that
                 # newly-added TypeGroups (e.g. retval1) are immune to the kill.
                 written: FrozenSet[str] = frozenset()

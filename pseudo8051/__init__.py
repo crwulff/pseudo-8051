@@ -211,6 +211,22 @@ class PseudocodeViewer(ida_kernwin.simplecustviewer_t):
             idc.jumpto(ea)
         return True
 
+    def OnClick(self, _shift: int) -> bool:
+        """Update the detail viewer (if open) when the cursor moves via mouse."""
+        _maybe_update_detail(self)
+        return False  # don't consume — let IDA handle selection
+
+    def OnKeydown(self, key: int, shift: int) -> bool:
+        """Update the detail viewer after arrow-key cursor movement."""
+        # The cursor hasn't moved yet at this point; defer to the next
+        # event-loop iteration so GetLineNo() reflects the new position.
+        try:
+            from PyQt5.QtCore import QTimer
+            QTimer.singleShot(0, lambda: _maybe_update_detail(self))
+        except Exception:
+            pass
+        return False  # don't consume — let IDA handle the key
+
     def OnClose(self) -> None:
         sys._pseudo8051_viewers.pop(getattr(self, '_title', None), None)
 
@@ -233,6 +249,20 @@ def run_pseudocode_view() -> None:
     # Store in the persistent registry so GC doesn't collect it
     sys._pseudo8051_viewers[title] = viewer
     viewer.Show(func.start_ea)
+
+
+def _maybe_update_detail(viewer) -> None:
+    """Update the paired detail viewer (if open) from the given pseudocode viewer."""
+    dv_mod = sys.modules.get('pseudo8051.detail_viewer')
+    if dv_mod is None:
+        return
+    pv_title     = getattr(viewer, '_title', '')
+    suffix       = pv_title[len("8051 Pseudocode"):]
+    detail_title = f"8051 Detail{suffix}"
+    dv_viewers   = getattr(dv_mod, '_viewers', {})
+    dv = dv_viewers.get(detail_title)
+    if dv is not None and getattr(dv, '_visible', False):
+        dv.update_from(viewer)
 
 
 _register_local_actions()

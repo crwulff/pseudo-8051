@@ -98,6 +98,21 @@ class _ExprTreeAction(ida_kernwin.action_handler_t):
         return ida_kernwin.AST_ENABLE_ALWAYS
 
 
+class _ShowDetailAction(ida_kernwin.action_handler_t):
+    """Open (or focus) the detail traceability pane for the current line."""
+
+    def activate(self, ctx) -> int:
+        viewer = _popup_ctx["viewer"]
+        if viewer is None:
+            return 1
+        from pseudo8051.detail_viewer import show_detail_viewer
+        show_detail_viewer(viewer)
+        return 1
+
+    def update(self, ctx) -> int:
+        return ida_kernwin.AST_ENABLE_ALWAYS
+
+
 class _HexToggleAction(ida_kernwin.action_handler_t):
     """Toggle integer constants between hexadecimal and decimal display."""
 
@@ -147,6 +162,9 @@ def setup_popup(form, popup_handle,
     ida_kernwin.attach_action_to_popup(form, popup_handle,
                                        "pseudo8051:expr_tree", "")
 
+    ida_kernwin.attach_action_to_popup(form, popup_handle,
+                                       "pseudo8051:show_detail", "")
+
 
 def _register_local_actions() -> None:
     """Register (or re-register after a reload) the UI actions."""
@@ -156,6 +174,7 @@ def _register_local_actions() -> None:
         ("pseudo8051:regann_manage",     "Manage\u2026",          _RegAnnManageAction()),
         ("pseudo8051:toggle_hex",        "View constants as decimal", _HexToggleAction()),
         ("pseudo8051:expr_tree",         "Annotate HIR nodes",    _ExprTreeAction()),
+        ("pseudo8051:show_detail",       "Show detail pane",      _ShowDetailAction()),
     ]
     for name, label, handler in _defs:
         ida_kernwin.unregister_action(name)

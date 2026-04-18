@@ -70,6 +70,7 @@ def _subst_reg_in_call_node(node: HIRNode, reg: str, replacement: Expr) -> HIRNo
         if new_call is not node.expr:
             new_node = ExprStmt(node.ea, new_call)
             new_node.ann = node.ann
+            new_node.src_eas = node.src_eas
             return new_node
         return node
     if isinstance(node, Assign) and isinstance(node.rhs, Call):
@@ -77,6 +78,7 @@ def _subst_reg_in_call_node(node: HIRNode, reg: str, replacement: Expr) -> HIRNo
         if new_call is not node.rhs:
             new_node = Assign(node.ea, node.lhs, new_call)
             new_node.ann = node.ann
+            new_node.src_eas = node.src_eas
             return new_node
         return node
     return node
@@ -165,6 +167,7 @@ def _fold_and_prune_setups(nodes: List[HIRNode],
                 continue
             new_nj = _subst_reg_in_call_node(nj, reg, val)
             if new_nj is not nj:
+                new_nj.src_eas = new_nj.src_eas | node.src_eas
                 work[j] = new_nj
                 work[i] = None
                 dbg("typesimp", f"  [{hex(node.ea)}] fold-const: {reg}={val.render()} into call")
@@ -348,11 +351,14 @@ def _fold_call_arg_pairs(nodes: List[HIRNode],
             dbg("typesimp",
                 f"  [{hex(node.ea)}] fold-call-arg-pair → binop (not all Const)")
 
+        all_src_eas = frozenset().union(*(nodes[idx].src_eas for _, (idx, _) in byte_assigns.items()))
         if naming_vinfo.type and naming_vinfo.name:
-            out.append(TypedAssign(node.ea, naming_vinfo.type,
-                                   RegGroupExpr(regs_key, alias=naming_vinfo.name), combined))
+            result_node = TypedAssign(node.ea, naming_vinfo.type,
+                                      RegGroupExpr(regs_key, alias=naming_vinfo.name), combined)
         else:
-            out.append(Assign(node.ea, RegGroupExpr(regs_key), combined))
+            result_node = Assign(node.ea, RegGroupExpr(regs_key), combined)
+        result_node.src_eas = all_src_eas
+        out.append(result_node)
         dbg("typesimp",
             f"  [{hex(node.ea)}] fold-call-arg-pair: {''.join(regs_key)} = {combined.render()}")
 

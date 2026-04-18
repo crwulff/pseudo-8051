@@ -116,6 +116,7 @@ _RELOAD_ORDER = [
     "pseudo8051.ir.basicblock",
     "pseudo8051.ir.function",
     "pseudo8051.locals_ui",
+    "pseudo8051.detail_viewer",
     "pseudo8051",
 ]
 

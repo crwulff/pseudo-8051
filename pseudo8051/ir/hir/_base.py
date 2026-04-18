@@ -72,7 +72,8 @@ class HIRNode(ABC):
     """Abstract base for all HIR nodes."""
 
     def __init__(self, ea: int):
-        self.ea  = ea
+        self.ea      = ea
+        self.src_eas: frozenset = frozenset({ea})  # all instruction EAs that produced this node
         self.ann: Optional[NodeAnnotation] = None
 
     @abstractmethod
