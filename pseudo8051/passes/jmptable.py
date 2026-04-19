@@ -309,9 +309,9 @@ def _try_jmptable(func: Function, block: BasicBlock) -> bool:
     sw = SwitchNode(sw_ea, subject, cases)
     sw.ann = block.hir[jmp_idx].ann  # carry forward annotation (reg_exprs, etc.)
 
-    # src_eas: the MOV DPTR + JMP @A+DPTR instructions (the whole dispatch)
+    # source_nodes: the MOV DPTR + JMP @A+DPTR instructions (the whole dispatch)
     consumed = block.hir[start : jmp_idx + 1]
-    sw.src_eas = frozenset().union(*(n.src_eas for n in consumed))
+    sw.source_nodes = list(consumed)
     # Per-case src_eas: each jump-table entry (SJMP/LJMP) EA
     sw.case_src_eas = [frozenset({ea}) for ea in entry_eas]
 

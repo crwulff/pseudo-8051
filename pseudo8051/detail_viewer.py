@@ -82,11 +82,36 @@ def _collect_nodes_with_depth(
 
 
 def _sorted_eas(node: HIRNode, max_depth: int) -> List[int]:
-    """Sorted unique EAs from node.src_eas and its descendants up to max_depth."""
-    eas: set = set(getattr(node, 'src_eas', frozenset({node.ea})))
-    for _, child in _collect_nodes_with_depth(node, max_depth):
-        eas |= getattr(child, 'src_eas', frozenset({child.ea}))
-    return sorted(eas)
+    """EAs from node's source_nodes tree in execution order (post-order DFS, unique).
+
+    Post-order (children before self) matches execution order because each
+    synthetic/merged node's sources were executed before the node itself.
+    max_depth is unused but kept for API compatibility.
+    """
+    seen: set = set()
+    result: List[int] = []
+
+    def _walk(n: object) -> None:
+        for sn in getattr(n, 'source_nodes', []):
+            _walk(sn)
+        ea = getattr(n, 'ea', None)
+        if ea is not None and ea not in seen:
+            seen.add(ea)
+            result.append(ea)
+
+    _walk(node)
+    return result
+
+
+def _collect_source_tree(node: HIRNode) -> List[Tuple[int, HIRNode]]:
+    """DFS over source_nodes, yielding (depth, node) pairs (depth 0 = direct sources)."""
+    result: List[Tuple[int, HIRNode]] = []
+    def _walk(n: HIRNode, d: int) -> None:
+        for sn in getattr(n, 'source_nodes', []):
+            result.append((d, sn))
+            _walk(sn, d + 1)
+    _walk(node, 0)
+    return result
 
 
 # ── Detail viewer ─────────────────────────────────────────────────────────────
@@ -104,6 +129,7 @@ class DetailViewer(ida_kernwin.simplecustviewer_t):
 
     def Create(self, title: str, pv_title: str) -> bool:
         self.show_annotations: bool = False
+        self.show_sources:     bool = False
         self.child_depth:      int  = 0   # 0=hidden, 1,2,...=N levels, -1=all
         self._visible:         bool = False
         self._title:           str  = title
@@ -155,6 +181,24 @@ class DetailViewer(ida_kernwin.simplecustviewer_t):
         for ea in _sorted_eas(node, 0):
             disasm = idc.GetDisasm(ea)
             self._add_insn_line(ea, f"  {hex(ea)}  {disasm if disasm else '(no disasm)'}")
+
+        # Source node provenance tree
+        self.AddLine("")
+        if not self.show_sources:
+            self.AddLine("Source nodes (hidden)")
+        else:
+            self.AddLine("Source nodes:")
+            source_tree = _collect_source_tree(node)
+            if not source_tree:
+                self.AddLine("  [no source nodes — leaf from IDA]")
+            else:
+                for depth, sn in source_tree:
+                    pad   = "  " * (depth + 1)
+                    stype = type(sn).__name__
+                    first = sn.render(indent=0)
+                    stext = first[0][1].strip() if first else ""
+                    self.AddLine(f"{pad}[depth={depth}]  {stype}  EA: {hex(sn.ea)}")
+                    self._add_insn_line(sn.ea, f"{pad}  {stext!r}")
 
         # Optional annotations
         if self.show_annotations:
@@ -216,6 +260,13 @@ class DetailViewer(ida_kernwin.simplecustviewer_t):
         ida_kernwin.attach_action_to_popup(
             form, popup_handle, "pseudo8051:detail_toggle_ann", "")
 
+        src_label = ("Hide source nodes" if self.show_sources
+                     else "Show source nodes")
+        ida_kernwin.update_action_label(
+            "pseudo8051:detail_toggle_sources", src_label)
+        ida_kernwin.attach_action_to_popup(
+            form, popup_handle, "pseudo8051:detail_toggle_sources", "")
+
         for action_id, label in [
             ("pseudo8051:detail_depth_0",   "Children: off"),
             ("pseudo8051:detail_depth_1",   "Children: depth 1"),
@@ -257,6 +308,17 @@ class _ToggleAnnAction(ida_kernwin.action_handler_t):
         return ida_kernwin.AST_ENABLE_ALWAYS
 
 
+class _ToggleSourcesAction(ida_kernwin.action_handler_t):
+    def activate(self, ctx) -> int:
+        if _active_viewer is not None:
+            _active_viewer.show_sources = not _active_viewer.show_sources
+            _refresh_active()
+        return 1
+
+    def update(self, ctx) -> int:
+        return ida_kernwin.AST_ENABLE_ALWAYS
+
+
 class _SetDepthAction(ida_kernwin.action_handler_t):
     def __init__(self, depth: int) -> None:
         super().__init__()
@@ -274,11 +336,12 @@ class _SetDepthAction(ida_kernwin.action_handler_t):
 
 def _register_detail_actions() -> None:
     _defs = [
-        ("pseudo8051:detail_toggle_ann", "Show expressions",   _ToggleAnnAction()),
-        ("pseudo8051:detail_depth_0",    "Children: off",      _SetDepthAction(0)),
-        ("pseudo8051:detail_depth_1",    "Children: depth 1",  _SetDepthAction(1)),
-        ("pseudo8051:detail_depth_2",    "Children: depth 2",  _SetDepthAction(2)),
-        ("pseudo8051:detail_depth_all",  "Children: all",      _SetDepthAction(-1)),
+        ("pseudo8051:detail_toggle_ann",     "Show expressions",    _ToggleAnnAction()),
+        ("pseudo8051:detail_toggle_sources", "Show source nodes",   _ToggleSourcesAction()),
+        ("pseudo8051:detail_depth_0",        "Children: off",       _SetDepthAction(0)),
+        ("pseudo8051:detail_depth_1",        "Children: depth 1",   _SetDepthAction(1)),
+        ("pseudo8051:detail_depth_2",        "Children: depth 2",   _SetDepthAction(2)),
+        ("pseudo8051:detail_depth_all",      "Children: all",       _SetDepthAction(-1)),
     ]
     for name, label, handler in _defs:
         ida_kernwin.unregister_action(name)

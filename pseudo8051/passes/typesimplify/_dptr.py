@@ -122,7 +122,9 @@ def _collapse_dpl_dph(nodes: List[HIRNode],
         rhs = (NameExpr(vinfo.name)
                if isinstance(vinfo, VarInfo)
                else RegGroupExpr((reg_hi, reg_lo)))
-        out.append(Assign(node.ea, RegExpr("DPTR"), rhs))
+        result_node = Assign(node.ea, RegExpr("DPTR"), rhs)
+        result_node.source_nodes = [node, recursed[partner_idx]]
+        out.append(result_node)
         dead.add(partner_idx)
         dbg("typesimp", f"  [{hex(node.ea)}] dpl-dph-collapse: DPTR = {pair_key}")
 
@@ -330,6 +332,7 @@ def _collapse_dpl_dph_arithmetic(nodes: List[HIRNode]) -> List[HIRNode]:
                 rhs_add: Expr = BinOp(RegsExpr(("DPTR",)), "+", pair)
                 new_node = Assign(node.ea, RegsExpr(("DPTR",)), rhs_add)
                 new_node.ann = _NA.merge(node, dph_node)
+                new_node.source_nodes = [node, dph_node]
                 out.append(new_node)
                 dbg("typesimp",
                     f"  [{hex(node.ea)}] dpl-dph-arith: DPTR = DPTR + {pair.render()!r}")
@@ -377,6 +380,7 @@ def _collapse_dpl_dph_arithmetic(nodes: List[HIRNode]) -> List[HIRNode]:
         from pseudo8051.ir.hir import NodeAnnotation as _NA
         new_node = Assign(node.ea, RegExpr("DPTR"), rhs)
         new_node.ann = _NA.merge(node, dph_node)
+        new_node.source_nodes = [node, dph_node]
         out.append(new_node)
         dbg("typesimp",
             f"  [{hex(node.ea)}] dpl-dph-arith: DPTR = {rhs.render()!r}")

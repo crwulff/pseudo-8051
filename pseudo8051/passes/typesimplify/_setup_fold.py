@@ -161,7 +161,7 @@ def _fold_and_prune_setups(nodes: List[HIRNode],
                 continue
             new_nj = _subst_reg_in_call_node(nj, reg, val)
             if new_nj is not nj:
-                new_nj.src_eas = new_nj.src_eas | node.src_eas
+                new_nj.source_nodes = [node] + list(nj.source_nodes or [nj])
                 work[j] = new_nj
                 work[i] = None
                 dbg("typesimp", f"  [{hex(node.ea)}] fold-const: {reg}={val.render()} into call")
@@ -177,6 +177,17 @@ def _fold_and_prune_setups(nodes: List[HIRNode],
             if lhs_regs.isdisjoint(all_downstream):
                 dbg("typesimp",
                     f"  [{hex(node.ea)}] prune-setup: {node.lhs.render()} = {node.rhs.render()}")
+                # Before dropping: if the RHS is a Name that IS used downstream,
+                # link this node as a provenance source of the first user.
+                # This preserves the contribution of instructions like "mov A, R7"
+                # that were pruned only because A was renamed to R7's alias.
+                if isinstance(node.rhs, NameExpr):
+                    rhs_name = node.rhs.name
+                    for j in range(i + 1, len(work)):
+                        if rhs_name in _collect_hir_name_refs([work[j]]):
+                            work[j].source_nodes = [node] + list(
+                                work[j].source_nodes or [work[j]])
+                            break
                 continue
             live_lhs = lhs_regs & all_downstream
             if live_lhs and all(_first_kill_before_read(r, work[i + 1:])
@@ -345,13 +356,12 @@ def _fold_call_arg_pairs(nodes: List[HIRNode],
             dbg("typesimp",
                 f"  [{hex(node.ea)}] fold-call-arg-pair → binop (not all Const)")
 
-        all_src_eas = frozenset().union(*(nodes[idx].src_eas for _, (idx, _) in byte_assigns.items()))
         if naming_vinfo.type and naming_vinfo.name:
             result_node = TypedAssign(node.ea, naming_vinfo.type,
                                       RegGroupExpr(regs_key, alias=naming_vinfo.name), combined)
         else:
             result_node = Assign(node.ea, RegGroupExpr(regs_key), combined)
-        result_node.src_eas = all_src_eas
+        result_node.source_nodes = [nodes[idx] for _, (idx, _) in byte_assigns.items()]
         out.append(result_node)
         dbg("typesimp",
             f"  [{hex(node.ea)}] fold-call-arg-pair: {''.join(regs_key)} = {combined.render()}")

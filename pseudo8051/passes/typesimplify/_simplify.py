@@ -319,6 +319,13 @@ def _transform_default(node: HIRNode,
         simplify_fn = _simplify
 
     def _out(new_node: HIRNode) -> HIRNode:
+        """Leaf expression changed → record old node as provenance source."""
+        node.copy_meta_to(new_node)
+        new_node.source_nodes = [node]
+        return new_node
+
+    def _passthrough(new_node: HIRNode) -> HIRNode:
+        """Structural rewrite (body simplified, same condition) → preserve sources."""
         return node.copy_meta_to(new_node)
 
     if isinstance(node, Assign):
@@ -384,7 +391,7 @@ def _transform_default(node: HIRNode,
             new_cond = _simplify_bool_str(_subst_text(cond, reg_map))
         else:
             new_cond = _simplify_bool_expr(_subst_expr(cond, reg_map))
-        return _out(IfNode(
+        return _passthrough(IfNode(
             ea         = node.ea,
             condition  = new_cond,
             then_nodes = simplify_fn(node.then_nodes, reg_map),
@@ -396,7 +403,7 @@ def _transform_default(node: HIRNode,
             new_cond = _simplify_bool_str(_subst_text(cond, reg_map))
         else:
             new_cond = _simplify_bool_expr(_subst_expr(cond, reg_map))
-        return _out(WhileNode(
+        return _passthrough(WhileNode(
             ea         = node.ea,
             condition  = new_cond,
             body_nodes = simplify_fn(node.body_nodes, reg_map),
@@ -420,7 +427,7 @@ def _transform_default(node: HIRNode,
             new_update = _subst_text(update, reg_map)
         else:
             new_update = _subst_expr(update, reg_map)
-        return _out(ForNode(
+        return _passthrough(ForNode(
             ea         = node.ea,
             init       = new_init,
             condition  = new_cond,
@@ -433,7 +440,7 @@ def _transform_default(node: HIRNode,
             new_cond = _simplify_bool_str(_subst_text(cond, reg_map))
         else:
             new_cond = _simplify_bool_expr(_subst_expr(cond, reg_map))
-        return _out(DoWhileNode(
+        return _passthrough(DoWhileNode(
             ea         = node.ea,
             condition  = new_cond,
             body_nodes = simplify_fn(node.body_nodes, reg_map),
@@ -448,8 +455,8 @@ def _transform_default(node: HIRNode,
             simplify_fn(node.default_body, reg_map)
             if isinstance(node.default_body, list) else node.default_body
         )
-        return _out(SwitchNode(node.ea, new_subject, new_cases,
-                               node.default_label, new_default_body))
+        return _passthrough(SwitchNode(node.ea, new_subject, new_cases,
+                                       node.default_label, new_default_body))
     return node
 
 
@@ -522,9 +529,21 @@ def _simplify(nodes: List[HIRNode], reg_map: Dict[str, VarInfo]) -> List[HIRNode
 
     out: List[HIRNode] = []
     i = 0
+    # Nodes dropped by _transform_default (e.g. DPTR=sym for XRAM locals) are
+    # accumulated here and prepended to the next emitted node's source_nodes so
+    # provenance is not lost.
+    pending_dropped: List[HIRNode] = []
 
     def _sub_simplify(ns: List[HIRNode], rm: Dict) -> List[HIRNode]:
         return _simplify(ns, rm)
+
+    def _attach_pending(node: HIRNode) -> HIRNode:
+        """Prepend any pending_dropped nodes to node.source_nodes."""
+        nonlocal pending_dropped
+        if pending_dropped:
+            node.source_nodes = pending_dropped + list(node.source_nodes or [])
+            pending_dropped = []
+        return node
 
     while i < len(nodes):
         # Inject user annotations into extra_groups so they propagate forward
@@ -554,12 +573,19 @@ def _simplify(nodes: List[HIRNode], reg_map: Dict[str, VarInfo]) -> List[HIRNode
                     eff, pre_eff, extra_groups, killed_regs)
                 new_reg_map = _rebuild_reg_map(extra_groups, xram_map, counter)
                 i = new_i
-                out.extend(_simplify_once(replacement, new_reg_map, _sub_simplify))
+                emitted = _simplify_once(replacement, new_reg_map, _sub_simplify)
+                if emitted:
+                    _attach_pending(emitted[0])
+                out.extend(emitted)
                 break
         else:
             transformed = _transform_default(nodes[i], eff, _sub_simplify)
             if transformed is not None:
-                out.append(transformed)
+                out.append(_attach_pending(transformed))
+            else:
+                # Node was dropped — carry it forward so the next emitted node
+                # can reference it as a provenance source.
+                pending_dropped.append(nodes[i])
             written = nodes[i].written_regs | nodes[i].definitely_killed()
             extra_groups, killed_regs = _kill_groups_written(
                 extra_groups, killed_regs, written)

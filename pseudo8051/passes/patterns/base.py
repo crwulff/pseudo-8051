@@ -20,7 +20,7 @@ Pattern = Transform   # backward-compatible alias
 from abc import ABC, abstractmethod
 from typing import Callable, Dict, List, Optional, Tuple
 
-from pseudo8051.ir.hir import HIRNode, NodeAnnotation
+from pseudo8051.ir.hir import HIRNode, NodeAnnotation, RemovedNode
 from pseudo8051.passes.patterns._utils import VarInfo
 
 # Recursive-simplify callback.  Transforms that need to recurse into nested HIR
@@ -83,9 +83,8 @@ class SubstituteTransform(Transform):
         if result is None:
             return None
         if result is not node:
-            result.src_eas = node.src_eas
-            if result.ann is None:
-                result.ann = node.ann
+            node.copy_meta_to(result)
+            result.source_nodes = [node]
         return ([result], i + 1)
 
     @abstractmethod
@@ -112,8 +111,7 @@ class _NTo1Transform(Transform):
         if result is None:
             return None
         out_node, new_i = result
-        out_node.src_eas = frozenset().union(
-            *(n.src_eas for n in nodes[i:new_i]))
+        out_node.source_nodes = list(nodes[i:new_i])
         if out_node.ann is None:
             out_node.ann = NodeAnnotation.merge(nodes[i], nodes[new_i - 1])
         return ([out_node], new_i)
@@ -156,16 +154,22 @@ class EliminateTransform(Transform):
     Implement detect(), which returns the new position (past all consumed nodes)
     when the transform applies, or None otherwise.
 
-    src_eas from consumed nodes are intentionally discarded.
+    Consumed nodes are recorded in self._pending_removed (drained by
+    TypeAwareSimplifier into func.removed_nodes after each pattern pass).
 
     Example: RegCopyGroupPattern — drops register-copy sequences and propagates
              the source variable name forward via reg_map mutation.
     """
 
+    def __init__(self):
+        self._pending_removed: List[RemovedNode] = []
+
     def match(self, nodes, i, reg_map, simplify):
         new_i = self.detect(nodes, i, reg_map, simplify)
         if new_i is None:
             return None
+        for n in nodes[i:new_i]:
+            self._pending_removed.append(RemovedNode(n, type(self).__name__))
         return ([], new_i)
 
     @abstractmethod
@@ -193,9 +197,9 @@ class RestructureTransform(Transform):
         if result is None:
             return None
         out_nodes, new_i = result
-        all_src = frozenset().union(*(n.src_eas for n in nodes[i:new_i]))
+        consumed = list(nodes[i:new_i])
         for out in out_nodes:
-            out.src_eas = out.src_eas | all_src
+            out.source_nodes = consumed
         return (out_nodes, new_i)
 
     @abstractmethod
@@ -274,8 +278,8 @@ class ConditionFoldTransform(Transform):
         if new_cond is None:
             return None
         repl = cond_node.replace_condition(new_cond)
-        # Union setup node's src_eas: both instructions build this condition.
-        repl.src_eas = repl.src_eas | node.src_eas
+        # Record setup node + original condition node as sources.
+        repl.source_nodes = [node, cond_node]
         gap_nodes = list(nodes[i + 1:j])
         return (gap_nodes + [repl], j + 1)
 

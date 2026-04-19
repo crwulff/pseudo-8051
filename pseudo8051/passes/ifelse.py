@@ -547,7 +547,9 @@ def _remove_nop_gotos(nodes: List[HIRNode]) -> List[HIRNode]:
             # condition expression may set flags (e.g. C) as a side effect, so keep
             # it as a plain expression statement rather than dropping it entirely.
             dbg("ifelse", f"  nop-goto → expr: if ({node.cond}) goto {node.label}")
-            result.append(ExprStmt(node.ea, node.cond))
+            expr_stmt = ExprStmt(node.ea, node.cond)
+            expr_stmt.source_nodes = [node]  # ExprStmt is derived from the IfGoto it replaces
+            result.append(expr_stmt)
             continue
         result.append(node)
     return result
@@ -767,8 +769,8 @@ class IfElseStructurer(BlockStructurer):
             then_nodes = then_nodes,
             else_nodes = else_nodes,
         )
-        if_node.ann     = branch_node.ann      # preserve annotation for downstream passes
-        if_node.src_eas = branch_node.src_eas  # inherit EAs folded into the condition
+        if_node.ann          = branch_node.ann          # preserve annotation for downstream passes
+        if_node.source_nodes = branch_node.source_nodes  # inherit provenance from the condition
 
         # Keep HIR before the branch, replace branch+tail with IfNode
         block.hir = block.hir[:branch_idx] + [if_node]

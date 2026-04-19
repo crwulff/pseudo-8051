@@ -213,7 +213,7 @@ def _carry_cmp_op(cond: Expr) -> Optional[str]:
     return None
 
 
-def _try_cjne_carry(nodes: List[HIRNode], j: int,
+def _try_cjne_carry(nodes: List[HIRNode], i: int, j: int,
                     terminal: HIRNode,
                     a_expr_subst: Expr,
                     a_start_node: HIRNode,
@@ -261,6 +261,8 @@ def _try_cjne_carry(nodes: List[HIRNode], j: int,
 
     new_cond = BinOp(a_expr_subst, cmp_op, limit)
     new_if   = IfGoto(a_start_node.ea, new_cond, carry_node.label)
+    _skip_ids = {id(n) for n in skipped}
+    new_if.source_nodes = [n for n in nodes[i:jj + 1] if id(n) not in _skip_ids]
 
     # Re-emit A = a_expr_subst when A is read by any later node,
     # so that downstream uses (e.g. DPL = A) see the correct updated value.
@@ -391,16 +393,20 @@ class AccumFoldPattern(Pattern):
         a_expr_subst = _subst_all_expr(a_expr, reg_map)
 
         # CJNE no-op + JNC/JC: IfGoto(A!=LIMIT, L) + Label(L) + IfGoto(!C/C, target)
-        cjne_result = _try_cjne_carry(nodes, j, terminal, a_expr_subst,
+        cjne_result = _try_cjne_carry(nodes, i, j, terminal, a_expr_subst,
                                       a_start_node, skipped)
         if cjne_result is not None:
             return cjne_result
+
+        _skip_ids = {id(n) for n in skipped}
 
         # IfGoto: substitute A in condition
         if isinstance(terminal, IfGoto) and _contains_a(terminal.cond):
             new_cond = _subst_a(terminal.cond, a_expr_subst)
             dbg("typesimp", f"  [{hex(a_start_node.ea)}] accum_fold (IfGoto): folded {a_expr_subst.render()} into cond")
-            result = [IfGoto(a_start_node.ea, new_cond, terminal.label)]
+            new_if = IfGoto(a_start_node.ea, new_cond, terminal.label)
+            new_if.source_nodes = [n for n in nodes[i:j + 1] if id(n) not in _skip_ids]
+            result = [new_if]
             if any(_count_reg_uses_in_node("A", nodes[k]) > 0
                    for k in range(j + 1, len(nodes))):
                 result = [Assign(a_start_node.ea, Reg("A"), a_expr_subst)] + result
@@ -414,14 +420,18 @@ class AccumFoldPattern(Pattern):
                 new_then = simplify(terminal.then_nodes, reg_map)
                 new_else = simplify(terminal.else_nodes, reg_map) if terminal.else_nodes else []
                 dbg("typesimp", f"  [{hex(a_start_node.ea)}] accum_fold (IfNode expr): folded {a_expr_subst.render()} into cond")
-                return (skipped + [IfNode(a_start_node.ea, new_cond, new_then, new_else)], j + 1)
+                new_node = IfNode(a_start_node.ea, new_cond, new_then, new_else)
+                new_node.source_nodes = [n for n in nodes[i:j + 1] if id(n) not in _skip_ids]
+                return (skipped + [new_node], j + 1)
             if isinstance(cond, str) and re.search(r'\bA\b', cond):
                 rendered = a_expr_subst.render()
                 new_cond_str = re.sub(r'\bA\b', rendered, cond)
                 new_then = simplify(terminal.then_nodes, reg_map)
                 new_else = simplify(terminal.else_nodes, reg_map) if terminal.else_nodes else []
                 dbg("typesimp", f"  [{hex(a_start_node.ea)}] accum_fold (IfNode str): folded {rendered} into cond")
-                return (skipped + [IfNode(a_start_node.ea, new_cond_str, new_then, new_else)], j + 1)
+                new_node = IfNode(a_start_node.ea, new_cond_str, new_then, new_else)
+                new_node.source_nodes = [n for n in nodes[i:j + 1] if id(n) not in _skip_ids]
+                return (skipped + [new_node], j + 1)
 
         # Assign(target, Reg("A")) where target != A:
         # only fold if there was at least one compound assign or a DPTR prefix
@@ -444,6 +454,7 @@ class AccumFoldPattern(Pattern):
             from pseudo8051.ir.hir import NodeAnnotation as _NA
             new_node = Assign(a_start_node.ea, terminal.lhs, a_expr_subst)
             new_node.ann = _NA.merge(a_start_node, terminal)
+            new_node.source_nodes = [n for n in nodes[i:j + 1] if id(n) not in _skip_ids]
             return (skipped + [new_node], j + 1)
 
         # ReturnStmt(Reg("A")): only if compound > 0 or DPTR consumed
@@ -451,7 +462,9 @@ class AccumFoldPattern(Pattern):
                 and terminal.value == Reg("A")
                 and (num_compound > 0 or dptr_consumed)):
             dbg("typesimp", f"  [{hex(a_start_node.ea)}] accum_fold (ReturnStmt): folded {a_expr_subst.render()}")
-            return (skipped + [ReturnStmt(a_start_node.ea, a_expr_subst)], j + 1)
+            new_ret = ReturnStmt(a_start_node.ea, a_expr_subst)
+            new_ret.source_nodes = [n for n in nodes[i:j + 1] if id(n) not in _skip_ids]
+            return (skipped + [new_ret], j + 1)
 
         # Carry-comparison terminal: A=val; A-=sub; if(C)/while(C) → if(val < sub)
         # After SUBB, carry is set iff the subtraction produced a borrow (val < sub unsigned).
@@ -481,11 +494,15 @@ class AccumFoldPattern(Pattern):
                 if _is_carry(terminal.cond):
                     dbg("typesimp",
                         f"  [{hex(a_start_node.ea)}] accum_fold (carry< IfGoto): {minuend.render()} < {subtrahend.render()}")
-                    return (skipped + [IfGoto(a_start_node.ea, carry_cond, terminal.label)], j + 1)
+                    new_if = IfGoto(a_start_node.ea, carry_cond, terminal.label)
+                    new_if.source_nodes = [n for n in nodes[i:j + 1] if id(n) not in _skip_ids]
+                    return (skipped + [new_if], j + 1)
                 if _is_not_carry(terminal.cond):
                     dbg("typesimp",
                         f"  [{hex(a_start_node.ea)}] accum_fold (carry>= IfGoto): {minuend.render()} >= {subtrahend.render()}")
-                    return (skipped + [IfGoto(a_start_node.ea, no_carry, terminal.label)], j + 1)
+                    new_if = IfGoto(a_start_node.ea, no_carry, terminal.label)
+                    new_if.source_nodes = [n for n in nodes[i:j + 1] if id(n) not in _skip_ids]
+                    return (skipped + [new_if], j + 1)
 
             if isinstance(terminal, IfNode):
                 cond = terminal.condition
@@ -494,12 +511,14 @@ class AccumFoldPattern(Pattern):
                 if _is_carry(cond):
                     dbg("typesimp",
                         f"  [{hex(a_start_node.ea)}] accum_fold (carry< IfNode): {minuend.render()} < {subtrahend.render()}")
-                    return (skipped + [IfNode(a_start_node.ea, carry_cond,
-                                             new_then, new_else)], j + 1)
+                    new_node = IfNode(a_start_node.ea, carry_cond, new_then, new_else)
+                    new_node.source_nodes = [n for n in nodes[i:j + 1] if id(n) not in _skip_ids]
+                    return (skipped + [new_node], j + 1)
                 if _is_not_carry(cond):
                     dbg("typesimp",
                         f"  [{hex(a_start_node.ea)}] accum_fold (carry>= IfNode): {minuend.render()} >= {subtrahend.render()}")
-                    return (skipped + [IfNode(a_start_node.ea, no_carry,
-                                             new_then, new_else)], j + 1)
+                    new_node = IfNode(a_start_node.ea, no_carry, new_then, new_else)
+                    new_node.source_nodes = [n for n in nodes[i:j + 1] if id(n) not in _skip_ids]
+                    return (skipped + [new_node], j + 1)
 
         return None

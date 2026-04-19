@@ -3,6 +3,7 @@ ir/hir/_base.py — NodeAnnotation, HIRNode ABC, and shared helpers.
 """
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, Dict, FrozenSet, List, Optional, Tuple, Union
 
 from pseudo8051.ir.expr import Expr, Regs as _RegsExpr, Name as _NameExpr
@@ -68,13 +69,30 @@ class NodeAnnotation:
 
 
 
+@dataclass
+class RemovedNode:
+    """Record of a HIR node eliminated by a transform, with the reason for removal."""
+    node:   "HIRNode"
+    reason: str
+
+
 class HIRNode(ABC):
     """Abstract base for all HIR nodes."""
 
     def __init__(self, ea: int):
-        self.ea      = ea
-        self.src_eas: frozenset = frozenset({ea})  # all instruction EAs that produced this node
+        self.ea           = ea
+        self.source_nodes: List["HIRNode"] = []   # immediate inputs; empty = leaf from IDA
         self.ann: Optional[NodeAnnotation] = None
+
+    @property
+    def src_eas(self) -> frozenset:
+        """Recursively union EAs from all source nodes; leaf nodes return {self.ea}."""
+        if not self.source_nodes:
+            return frozenset({self.ea})
+        result: frozenset = frozenset()
+        for sn in self.source_nodes:
+            result |= sn.src_eas
+        return result
 
     @abstractmethod
     def render(self, indent: int = 0) -> List[Tuple[int, str]]:
@@ -129,14 +147,14 @@ class HIRNode(ABC):
         return self.def_regs
 
     def copy_meta_to(self, dst: "HIRNode") -> "HIRNode":
-        """Copy ann and src_eas from self to dst; return dst for chaining.
+        """Copy ann and source_nodes from self to dst; return dst for chaining.
 
         Use this whenever a new node is constructed to replace an existing one
-        and both fields should be preserved:
+        and provenance should be preserved unchanged:
             node = node.copy_meta_to(Assign(node.ea, new_lhs, new_rhs))
         """
-        dst.ann     = self.ann
-        dst.src_eas = self.src_eas
+        dst.ann          = self.ann
+        dst.source_nodes = self.source_nodes
         return dst
 
     def map_bodies(self, fn: "Callable[[List[HIRNode]], List[HIRNode]]") -> "HIRNode":

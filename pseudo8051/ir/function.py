@@ -10,7 +10,7 @@ import ida_name
 import idc
 
 from pseudo8051.ir.basicblock import BasicBlock
-from pseudo8051.ir.hir        import HIRNode, Label
+from pseudo8051.ir.hir        import HIRNode, Label, RemovedNode
 from pseudo8051.constants     import PARAM_REG_ORDER, dbg, reset_debug_session
 
 
@@ -24,8 +24,9 @@ class Function:
 
     def __init__(self, func_ea: int):
         reset_debug_session()
-        self.ea   = func_ea
-        self.name = ida_funcs.get_func_name(func_ea) or hex(func_ea)
+        self.ea            = func_ea
+        self.name          = ida_funcs.get_func_name(func_ea) or hex(func_ea)
+        self.removed_nodes: List[RemovedNode] = []
 
         ida_func = ida_funcs.get_func(func_ea)
         if not ida_func:

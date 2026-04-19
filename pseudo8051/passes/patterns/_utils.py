@@ -623,27 +623,33 @@ def _apply_expr_subst_to_node(node: HIRNode,
     Handles Assign/CompoundAssign (rhs), ExprStmt (expr), ReturnStmt (value),
     IfGoto/IfNode (condition).
     LHS is never transformed. Returns node unchanged if nothing changed.
+    When a new node is created it records the original as its immediate source.
     """
+    def _derive(new_node: HIRNode) -> HIRNode:
+        node.copy_meta_to(new_node)
+        new_node.source_nodes = [node]
+        return new_node
+
     if isinstance(node, Assign):
         new_rhs = expr_fn(node.rhs)
-        return Assign(node.ea, node.lhs, new_rhs) if new_rhs is not node.rhs else node
+        return _derive(Assign(node.ea, node.lhs, new_rhs)) if new_rhs is not node.rhs else node
     if isinstance(node, CompoundAssign):
         new_rhs = expr_fn(node.rhs)
-        return node.copy_meta_to(CompoundAssign(node.ea, node.lhs, node.op, new_rhs)) if new_rhs is not node.rhs else node
+        return _derive(CompoundAssign(node.ea, node.lhs, node.op, new_rhs)) if new_rhs is not node.rhs else node
     if isinstance(node, ExprStmt):
         new_expr = expr_fn(node.expr)
-        return node.copy_meta_to(ExprStmt(node.ea, new_expr)) if new_expr is not node.expr else node
+        return _derive(ExprStmt(node.ea, new_expr)) if new_expr is not node.expr else node
     if isinstance(node, ReturnStmt) and node.value is not None:
         new_val = expr_fn(node.value)
-        return node.copy_meta_to(ReturnStmt(node.ea, new_val)) if new_val is not node.value else node
+        return _derive(ReturnStmt(node.ea, new_val)) if new_val is not node.value else node
     if isinstance(node, IfGoto):
         new_cond = expr_fn(node.cond)
-        return node.copy_meta_to(IfGoto(node.ea, new_cond, node.label)) if new_cond is not node.cond else node
+        return _derive(IfGoto(node.ea, new_cond, node.label)) if new_cond is not node.cond else node
     if isinstance(node, IfNode):
         new_cond = expr_fn(node.condition)
         if new_cond is node.condition:
             return node
-        return node.copy_meta_to(IfNode(node.ea, new_cond, node.then_nodes, node.else_nodes))
+        return _derive(IfNode(node.ea, new_cond, node.then_nodes, node.else_nodes))
     return node
 
 
@@ -737,7 +743,9 @@ def _subst_reg_in_node(node: HIRNode, r: str,
         return _fold_unary_const(e)
 
     def _out(new_node: HIRNode) -> HIRNode:
-        return node.copy_meta_to(new_node)
+        node.copy_meta_to(new_node)
+        new_node.source_nodes = [node]
+        return new_node
 
     if isinstance(node, Assign):
         new_rhs = _walk_expr(node.rhs, _fn)

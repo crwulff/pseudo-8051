@@ -6,6 +6,7 @@ from pseudo8051.ir.hir    import VarDecl
 from pseudo8051.passes    import OptimizationPass
 from pseudo8051.passes.patterns.mb_assign import collapse_mb_assigns
 from pseudo8051.passes.patterns._utils  import VarInfo
+from pseudo8051.passes.patterns.base    import EliminateTransform
 from pseudo8051.ir.function import Function
 from pseudo8051.constants import PARAM_REG_ORDER
 
@@ -29,6 +30,15 @@ from pseudo8051.passes.typesimplify._post     import (
 )
 from pseudo8051.passes.typesimplify._enum_resolve import _resolve_enum_consts
 from pseudo8051.constants import dbg
+
+
+def _drain_pending_removed(func: Function) -> None:
+    """Drain _pending_removed from all EliminateTransform instances into func.removed_nodes."""
+    from pseudo8051.passes.patterns import _PATTERNS
+    for pat in _PATTERNS:
+        if isinstance(pat, EliminateTransform) and pat._pending_removed:
+            func.removed_nodes.extend(pat._pending_removed)
+            pat._pending_removed.clear()
 
 
 class TypeAwareSimplifier(OptimizationPass):
@@ -73,6 +83,7 @@ class TypeAwareSimplifier(OptimizationPass):
         dbg("typesimp", f"{func.name}: final reg_map={list(reg_map.keys())}")
         reg_map["__n__"] = [0]
         func.hir = _simplify(func.hir, reg_map)
+        _drain_pending_removed(func)
         func.hir = _consolidate_xram_local_loads(func.hir, reg_map)
         func.hir = _simplify_once(func.hir, reg_map)
         func.hir = _fold_call_arg_pairs(func.hir, reg_map)

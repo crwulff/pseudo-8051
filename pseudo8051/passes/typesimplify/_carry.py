@@ -501,7 +501,7 @@ def _simplify_acc_bit_test(nodes: List[HIRNode]) -> List[HIRNode]:
                         new_cond = bit_test if polarity else UnaryOp("!", bit_test)
                         remove.add(i)
                         replace[j] = new_cond
-                        extra_src[j] = node.src_eas   # C=ACC.N contributes to the condition
+                        extra_src[j] = node   # C=ACC.N contributes to the condition
                         dbg("typesimp",
                             f"  [{hex(node.ea)}] acc-bit-test(indirect): "
                             f"C=ACC.{bit} → {'!' if not polarity else ''}"
@@ -558,10 +558,11 @@ def _simplify_acc_bit_test(nodes: List[HIRNode]) -> List[HIRNode]:
         if i in remove:
             continue
         if i in replace:
+            orig = node
             node = node.replace_condition(replace[i])
-            # node.ann and node.src_eas are already copied by replace_condition;
-            # also union src_eas from any removed node that contributed (indirect path).
+            # replace_condition copies source_nodes via copy_meta_to;
+            # also prepend the removed C=ACC.N node for the indirect path.
             if i in extra_src:
-                node.src_eas = node.src_eas | extra_src[i]
+                node.source_nodes = [extra_src[i]] + list(orig.source_nodes or [orig])
         result.append(node)
     return result

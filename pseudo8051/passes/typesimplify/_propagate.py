@@ -197,8 +197,9 @@ def _fold_compound_assigns(live: List[HIRNode]) -> Tuple[List[HIRNode], bool]:
                     and nxt.lhs == node.lhs
                     and nxt.op in _COMPOUND_OPS):
                 op_str = _COMPOUND_OPS[nxt.op]
-                folded = Assign(nxt.ea, nxt.lhs, BinOp(node.rhs, op_str, nxt.rhs))
+                folded = Assign(node.ea, nxt.lhs, BinOp(node.rhs, op_str, nxt.rhs))
                 folded.ann = NodeAnnotation.merge(node, nxt)
+                folded.source_nodes = [node, nxt]
                 live[i + 1] = folded
                 live[i] = None
                 dbg("typesimp",
@@ -336,17 +337,21 @@ def _propagate_register_copies(live: List[HIRNode],
             # standalone r++/r-- ExprStmt, detect now (before substitution
             # overwrites the node) so we can inject a synthetic Assign(r, K+δ)
             # to keep the chain propagating.
+            old_use_node = live[use_idx]  # save before potential overwrite
             pre_incr_delta: Optional[int] = None
+            pre_incr_is_xram = False
             if is_reg_lhs and isinstance(replacement, Const):
-                pre_incr_delta = _xram_pre_incr_delta(live[use_idx], r)
-                if pre_incr_delta is None:
-                    pre_incr_delta = _expr_stmt_incr_delta(live[use_idx], r)
+                pre_incr_delta = _xram_pre_incr_delta(old_use_node, r)
+                if pre_incr_delta is not None:
+                    pre_incr_is_xram = True
+                else:
+                    pre_incr_delta = _expr_stmt_incr_delta(old_use_node, r)
 
-            new_node = _subst_reg_in_node(live[use_idx], r, replacement)
+            new_node = _subst_reg_in_node(old_use_node, r, replacement)
             if new_node is not None:
-                # Union src_eas from the eliminated source node: the use site now
-                # represents the combined effect of both instructions.
-                new_node.src_eas = new_node.src_eas | live[i].src_eas
+                # Record the eliminated source node: the use site now represents
+                # the combined effect of both instructions.
+                new_node.source_nodes = [live[i]] + list(old_use_node.source_nodes or [old_use_node])
                 live[use_idx] = new_node
                 live[i] = None
                 dbg("typesimp", f"  [{hex(node.ea)}] prop-values: folded {r} into node {use_idx}")
@@ -364,7 +369,21 @@ def _propagate_register_copies(live: List[HIRNode],
                         if not isinstance(live[k], (GotoStatement, BreakStmt, ContinueStmt))
                     )
                     if has_more:
-                        synthetic = Assign(new_node.ea, RegExpr((r,)), new_r_val)
+                        # Use the EA and source of the inc/dec instruction itself,
+                        # not the substituted XRAM node. For XRAM[++r], the inc
+                        # instruction is source_nodes[0] of the original use node.
+                        # Also include the defining node (new_node.source_nodes[0] ==
+                        # original live[i]) so the full derivation is traceable.
+                        defn_node = new_node.source_nodes[0]  # = original live[i]
+                        if pre_incr_is_xram and old_use_node.source_nodes:
+                            inc_node = old_use_node.source_nodes[0]
+                            synthetic_ea = inc_node.ea
+                            synthetic_sn: list = [defn_node, inc_node]
+                        else:
+                            synthetic_ea = old_use_node.ea
+                            synthetic_sn = [defn_node, old_use_node]
+                        synthetic = Assign(synthetic_ea, RegExpr((r,)), new_r_val)
+                        synthetic.source_nodes = synthetic_sn
                         live.insert(use_idx + 1, synthetic)
                         dbg("typesimp",
                             f"  [{hex(node.ea)}] prop-values: injected "
@@ -387,10 +406,10 @@ def _propagate_register_copies(live: List[HIRNode],
                         break
                     tentative[j] = new_node
             if all_ok and tentative:
-                src_src_eas = live[i].src_eas
+                src_node = live[i]
                 for j, new_node in tentative.items():
-                    # Union the defining node's src_eas into every use site.
-                    new_node.src_eas = new_node.src_eas | src_src_eas
+                    # Record the defining node as a source of every use site.
+                    new_node.source_nodes = [src_node] + list(live[j].source_nodes or [live[j]])
                     live[j] = new_node
                 remaining = _collect_hir_name_refs(live[i + 1:end])
                 if r not in remaining:

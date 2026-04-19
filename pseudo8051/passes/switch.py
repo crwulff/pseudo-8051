@@ -222,9 +222,10 @@ def _try_switch(func: Function, head_block: BasicBlock) -> bool:
 
     # ── Per-case EA tracking ──────────────────────────────────────────────────
     # Map each case label to the union of src_eas from all steps that jump there.
+    # (case_src_eas / default_src_eas remain frozensets for _SwitchCaseView display.)
     _step_eas_by_label: Dict[str, frozenset] = {}
     _default_step_eas: frozenset = frozenset()
-    _all_step_eas: frozenset = frozenset()
+    _all_step_nodes: list = []
 
     for delta, label, is_ne, blk in steps:
         _hir_nl = [n for n in blk.hir if not isinstance(n, Label)]
@@ -234,8 +235,9 @@ def _try_switch(func: Function, head_block: BasicBlock) -> bool:
                 and _hir_nl[-3].lhs == Reg("A")
                 and not _contains_a(_hir_nl[-3].rhs)):
             _tl = 3
-        _step_ea_set = frozenset().union(*(n.src_eas for n in _hir_nl[-_tl:]))
-        _all_step_eas |= _step_ea_set
+        _step_nodes = _hir_nl[-_tl:]
+        _step_ea_set = frozenset().union(*(n.src_eas for n in _step_nodes))
+        _all_step_nodes.extend(_step_nodes)
         if is_ne:
             _default_step_eas |= _step_ea_set
             _ft = _fall_through_successor(blk, label)
@@ -257,7 +259,8 @@ def _try_switch(func: Function, head_block: BasicBlock) -> bool:
         case_src_eas    = [_step_eas_by_label.get(lbl, frozenset()) for _, lbl in cases],
         default_src_eas = _default_step_eas if _default_step_eas else None,
     )
-    sw.src_eas = _all_step_eas if _all_step_eas else sw.src_eas
+    if _all_step_nodes:
+        sw.source_nodes = _all_step_nodes
 
     # Keep any Label nodes and all preamble code that precedes the switch tail.
     # The tail is: [Assign(A,subj)?] + CompoundAssign + IfGoto — 2 or 3 nodes.
@@ -477,15 +480,17 @@ def _try_linear_equality_switch(func: Function, head_block: BasicBlock) -> bool:
                   f"{len(steps)} steps → {len(cases)} case entries")
 
     # ── Per-case EA tracking ──────────────────────────────────────────────────
+    # (case_src_eas / default_src_eas remain frozensets for _SwitchCaseView display.)
     _step_eas_by_label: Dict[str, frozenset] = {}
     _default_step_eas: frozenset = frozenset()
-    _all_step_eas: frozenset = frozenset()
+    _all_step_nodes: list = []
 
     for case_val, label, is_ne, blk, dr in steps:
         _hir_nl = [n for n in blk.hir if not isinstance(n, Label)]
         _tl = 3 if dr else 2
-        _step_ea_set = frozenset().union(*(n.src_eas for n in _hir_nl[-_tl:]))
-        _all_step_eas |= _step_ea_set
+        _step_nodes = _hir_nl[-_tl:]
+        _step_ea_set = frozenset().union(*(n.src_eas for n in _step_nodes))
+        _all_step_nodes.extend(_step_nodes)
         if is_ne:
             _default_step_eas |= _step_ea_set
             _ft = _fall_through_successor(blk, label)
@@ -507,7 +512,8 @@ def _try_linear_equality_switch(func: Function, head_block: BasicBlock) -> bool:
         case_src_eas    = [_step_eas_by_label.get(lbl, frozenset()) for _, lbl in cases],
         default_src_eas = _default_step_eas if _default_step_eas else None,
     )
-    sw.src_eas = _all_step_eas if _all_step_eas else sw.src_eas
+    if _all_step_nodes:
+        sw.source_nodes = _all_step_nodes
 
     # Keep Label nodes and any preamble before the switch tail in head block.
     hir_no_labels = [n for n in head_block.hir if not isinstance(n, Label)]
