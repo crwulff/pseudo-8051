@@ -19,6 +19,7 @@ from pseudo8051.ir.hir import (HIRNode, Assign, TypedAssign, CompoundAssign,
 from pseudo8051.ir.expr import (Expr, BinOp, Const, UnaryOp,
                                  Reg, Regs as RegExpr,
                                  Name as NameExpr)
+from pseudo8051.passes.patterns.base import ConditionFoldTransform
 from pseudo8051.constants import dbg
 
 _RE_BYTE_FIELD = re.compile(r'^(.+)\.(?:hi|lo|b\d+)$')
@@ -192,21 +193,60 @@ def _simplify_carry_comparison(nodes: List[HIRNode]) -> List[HIRNode]:
     result: List[HIRNode] = []
     for node in nodes:
         if isinstance(node, WhileNode):
-            new_body = _simplify_carry_comparison(node.body_nodes)
-            if node.condition == Reg("C"):
-                transformed = (_try_collapse_subb16(node.condition, new_body)
-                               or _try_collapse_subb8(new_body))
+            # Recurse into body; map_bodies preserves ann + src_eas on the rebuilt node.
+            rebuilt = node.map_bodies(_simplify_carry_comparison)
+            if rebuilt.condition == Reg("C"):
+                transformed = (_try_collapse_subb16(rebuilt.condition, rebuilt.body_nodes)
+                               or _try_collapse_subb8(rebuilt.body_nodes))
                 if transformed is not None:
                     new_cond, new_body = transformed
-                    result.append(WhileNode(node.ea, new_cond, new_body))
+                    result.append(rebuilt.copy_meta_to(WhileNode(rebuilt.ea, new_cond, new_body)))
                     continue
-            result.append(WhileNode(node.ea, node.condition, new_body))
+            result.append(rebuilt)
         else:
             result.append(node.map_bodies(_simplify_carry_comparison))
     return result
 
 
 # ── CJNE + JNC/JC carry-comparison simplification ────────────────────────────
+
+class _CjneJncFold(ConditionFoldTransform):
+    """
+    Fold ExprStmt(expr != const) [Labels…] IfNode/IfGoto(!C/C)
+    into IfNode/IfGoto(expr >= const / expr < const).
+
+    CJNE sets C = (expr < const) as a side-effect; the nop-goto form
+    (_remove_nop_gotos converts the IfGoto to ExprStmt) leaves that
+    comparison visible.  This fold consumes the ExprStmt and rewrites
+    the carry-branch condition into a typed comparison.
+    """
+
+    def match_setup(self, node: HIRNode) -> bool:
+        return (isinstance(node, ExprStmt)
+                and isinstance(node.expr, BinOp)
+                and node.expr.op == "!="
+                and isinstance(node.expr.rhs, Const))
+
+    def new_condition(self, setup_node, cond_node, current_cond) -> Optional[Expr]:
+        cond_expr = setup_node.expr
+        is_not_c = (isinstance(current_cond, UnaryOp)
+                    and current_cond.op == "!"
+                    and current_cond.operand == Reg("C"))
+        is_c = (current_cond == Reg("C"))
+        if is_not_c:
+            new_cond = BinOp(cond_expr.lhs, ">=", cond_expr.rhs)
+        elif is_c:
+            new_cond = BinOp(cond_expr.lhs, "<", cond_expr.rhs)
+        else:
+            return None
+        dbg("typesimp",
+            f"  [{hex(setup_node.ea)}] cjne-jnc: "
+            f"{cond_expr.render()!r} + carry-branch → {new_cond.render()!r}")
+        return new_cond
+
+
+_cjne_jnc_fold = _CjneJncFold()
+
 
 def _simplify_cjne_jnc(nodes: List[HIRNode]) -> List[HIRNode]:
     """
@@ -220,57 +260,52 @@ def _simplify_cjne_jnc(nodes: List[HIRNode]) -> List[HIRNode]:
 
     Also handles IfGoto variants and JC (Reg("C")).
     """
-    def _is_not_c(c) -> bool:
-        return (isinstance(c, UnaryOp) and c.op == "!"
-                and c.operand == Reg("C"))
-
-    def _is_c(c) -> bool:
-        return c == Reg("C")
-
-    work = [n.map_bodies(_simplify_cjne_jnc) for n in nodes]
-    result: List[HIRNode] = []
-    i = 0
-    while i < len(work):
-        node = work[i]
-        if (isinstance(node, ExprStmt)
-                and isinstance(node.expr, BinOp)
-                and node.expr.op == "!="
-                and isinstance(node.expr.rhs, Const)):
-            j = i + 1
-            while j < len(work) and isinstance(work[j], Label):
-                j += 1
-            if j < len(work):
-                next_node = work[j]
-                cond_expr = node.expr
-                new_cond = None
-
-                if isinstance(next_node, IfNode):
-                    if _is_not_c(next_node.condition):
-                        new_cond = BinOp(cond_expr.lhs, ">=", cond_expr.rhs)
-                    elif _is_c(next_node.condition):
-                        new_cond = BinOp(cond_expr.lhs, "<", cond_expr.rhs)
-                elif isinstance(next_node, IfGoto):
-                    if _is_not_c(next_node.cond):
-                        new_cond = BinOp(cond_expr.lhs, ">=", cond_expr.rhs)
-                    elif _is_c(next_node.cond):
-                        new_cond = BinOp(cond_expr.lhs, "<", cond_expr.rhs)
-
-                if new_cond is not None:
-                    repl = next_node.replace_condition(new_cond)
-                    result.extend(work[i + 1:j])
-                    result.append(repl)
-                    dbg("typesimp",
-                        f"  [{hex(node.ea)}] cjne-jnc: "
-                        f"{cond_expr.render()!r} + carry-branch → {new_cond.render()!r}")
-                    i = j + 1
-                    continue
-
-        result.append(node)
-        i += 1
-    return result
+    nodes = [n.map_bodies(_simplify_cjne_jnc) for n in nodes]
+    return _cjne_jnc_fold.fold_sequence(nodes)
 
 
 # ── ORL + JZ zero-check simplification ───────────────────────────────────────
+
+class _OrlZeroCheckFold(ConditionFoldTransform):
+    """
+    Fold CompoundAssign(A, |=, v.field) + IfNode/IfGoto(A == 0 / A != 0)
+    into IfNode/IfGoto(parent_var == 0 / parent_var != 0).
+
+    The ORL instruction ORs a byte field (e.g. var.hi) into A to test
+    whether the full multi-byte variable is zero.  After the ORL the
+    condition is tested; this fold replaces both with a direct comparison.
+    No label gap is permitted — the ORL and branch must be consecutive.
+    """
+
+    def can_gap(self, node: HIRNode) -> bool:
+        return False   # ORL and its branch must be strictly consecutive
+
+    def match_setup(self, node: HIRNode) -> bool:
+        return (isinstance(node, CompoundAssign)
+                and node.lhs == Reg("A")
+                and node.op == "|="
+                and isinstance(node.rhs, NameExpr)
+                and bool(_RE_BYTE_FIELD.match(node.rhs.name)))
+
+    def new_condition(self, setup_node, cond_node, current_cond) -> Optional[Expr]:
+        m = _RE_BYTE_FIELD.match(setup_node.rhs.name)
+        if not m:
+            return None
+        parent = m.group(1)
+        if not (isinstance(current_cond, BinOp)
+                and current_cond.op in ("==", "!=")
+                and isinstance(current_cond.rhs, Const)
+                and current_cond.rhs.value == 0):
+            return None
+        new_cond = BinOp(NameExpr(parent), current_cond.op, Const(0))
+        dbg("typesimp",
+            f"  [{hex(setup_node.ea)}] orl-zero-check: "
+            f"A|={setup_node.rhs.name} → {parent} {current_cond.op} 0")
+        return new_cond
+
+
+_orl_zero_check_fold = _OrlZeroCheckFold()
+
 
 def _simplify_orl_zero_check(nodes: List[HIRNode]) -> List[HIRNode]:
     """
@@ -285,33 +320,7 @@ def _simplify_orl_zero_check(nodes: List[HIRNode]) -> List[HIRNode]:
     Recurses into WhileNode / IfNode / ForNode bodies first.
     """
     nodes = [n.map_bodies(_simplify_orl_zero_check) for n in nodes]
-    result: List[HIRNode] = []
-    i = 0
-    while i < len(nodes):
-        node = nodes[i]
-        if (isinstance(node, CompoundAssign)
-                and node.lhs == Reg("A")
-                and node.op == "|="
-                and isinstance(node.rhs, NameExpr)):
-            m = _RE_BYTE_FIELD.match(node.rhs.name)
-            if m and i + 1 < len(nodes):
-                parent = m.group(1)
-                next_node = nodes[i + 1]
-                cond = (next_node.condition if isinstance(next_node, IfNode)
-                        else next_node.cond if isinstance(next_node, IfGoto)
-                        else None)
-                if (isinstance(cond, BinOp)
-                        and cond.op in ("==", "!=")
-                        and isinstance(cond.rhs, Const) and cond.rhs.value == 0):
-                    new_cond = BinOp(NameExpr(parent), cond.op, Const(0))
-                    result.append(next_node.replace_condition(new_cond))
-                    dbg("typesimp",
-                        f"  [{hex(node.ea)}] orl-zero-check: A|={node.rhs.name} → {parent} {cond.op} 0")
-                    i += 2
-                    continue
-        result.append(node)
-        i += 1
-    return result
+    return _orl_zero_check_fold.fold_sequence(nodes)
 
 
 # ── Constant arithmetic folding ───────────────────────────────────────────────
@@ -364,35 +373,25 @@ def _simplify_arithmetic(nodes: List[HIRNode]) -> List[HIRNode]:
             new_lhs = node.lhs if isinstance(node.lhs, RegExpr) else _fold_const_expr(node.lhs)
             if new_rhs is not node.rhs or new_lhs is not node.lhs:
                 if isinstance(node, TypedAssign):
-                    n2 = TypedAssign(node.ea, node.type_str, new_lhs, new_rhs)
+                    node = node.copy_meta_to(TypedAssign(node.ea, node.type_str, new_lhs, new_rhs))
                 else:
-                    n2 = Assign(node.ea, new_lhs, new_rhs)
-                n2.ann = node.ann
-                node = n2
+                    node = node.copy_meta_to(Assign(node.ea, new_lhs, new_rhs))
         elif isinstance(node, CompoundAssign):
             new_rhs = _fold_const_expr(node.rhs)
             if new_rhs is not node.rhs:
-                n2 = CompoundAssign(node.ea, node.lhs, node.op, new_rhs)
-                n2.ann = node.ann
-                node = n2
+                node = node.copy_meta_to(CompoundAssign(node.ea, node.lhs, node.op, new_rhs))
         elif isinstance(node, ExprStmt):
             new_expr = _fold_const_expr(node.expr)
             if new_expr is not node.expr:
-                n2 = ExprStmt(node.ea, new_expr)
-                n2.ann = node.ann
-                node = n2
+                node = node.copy_meta_to(ExprStmt(node.ea, new_expr))
         elif isinstance(node, ReturnStmt) and node.value is not None:
             new_val = _fold_const_expr(node.value)
             if new_val is not node.value:
-                n2 = ReturnStmt(node.ea, new_val)
-                n2.ann = node.ann
-                node = n2
+                node = node.copy_meta_to(ReturnStmt(node.ea, new_val))
         elif isinstance(node, IfGoto):
             new_cond = _fold_const_expr(node.cond)
             if new_cond is not node.cond:
-                n2 = IfGoto(node.ea, new_cond, node.label)
-                n2.ann = node.ann
-                node = n2
+                node = node.copy_meta_to(IfGoto(node.ea, new_cond, node.label))
         # Recurse into structured bodies.
         node = node.map_bodies(_simplify_arithmetic)
         result.append(node)
@@ -467,6 +466,7 @@ def _simplify_acc_bit_test(nodes: List[HIRNode]) -> List[HIRNode]:
 
     remove: set = set()                     # indices of C = ACC.N nodes to drop
     replace: dict = {}                       # index → new condition for if/while/goto
+    extra_src: dict = {}                     # index → extra src_eas to union into replaced node
 
     for i, node in enumerate(nodes):
         # ── Indirect path: C = ACC.N ──────────────────────────────────────────
@@ -501,6 +501,7 @@ def _simplify_acc_bit_test(nodes: List[HIRNode]) -> List[HIRNode]:
                         new_cond = bit_test if polarity else UnaryOp("!", bit_test)
                         remove.add(i)
                         replace[j] = new_cond
+                        extra_src[j] = node.src_eas   # C=ACC.N contributes to the condition
                         dbg("typesimp",
                             f"  [{hex(node.ea)}] acc-bit-test(indirect): "
                             f"C=ACC.{bit} → {'!' if not polarity else ''}"
@@ -558,6 +559,9 @@ def _simplify_acc_bit_test(nodes: List[HIRNode]) -> List[HIRNode]:
             continue
         if i in replace:
             node = node.replace_condition(replace[i])
-            node.ann = nodes[i].ann
+            # node.ann and node.src_eas are already copied by replace_condition;
+            # also union src_eas from any removed node that contributed (indirect path).
+            if i in extra_src:
+                node.src_eas = node.src_eas | extra_src[i]
         result.append(node)
     return result

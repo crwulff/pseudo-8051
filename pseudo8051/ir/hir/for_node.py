@@ -39,9 +39,7 @@ class ForNode(HIRNode):
         return str(self.init)
 
     def map_bodies(self, fn: Callable[[List[HIRNode]], List[HIRNode]]) -> "ForNode":
-        n = ForNode(self.ea, self.init, self.condition, self.update, fn(self.body_nodes))
-        n.ann = self.ann
-        return n
+        return self.copy_meta_to(ForNode(self.ea, self.init, self.condition, self.update, fn(self.body_nodes)))
 
     def definitely_killed(self) -> frozenset:
         """Body may execute zero times, so no register is guaranteed killed."""
@@ -52,7 +50,7 @@ class ForNode(HIRNode):
         return _possibly_killed_by_seq(self.body_nodes)
 
     def replace_condition(self, new_cond) -> "ForNode":
-        return ForNode(self.ea, self.init, new_cond, self.update, self.body_nodes)
+        return self.copy_meta_to(ForNode(self.ea, self.init, new_cond, self.update, self.body_nodes))
 
     def render(self, indent: int = 0) -> List[Tuple[int, str]]:
         ind = self._ind(indent)

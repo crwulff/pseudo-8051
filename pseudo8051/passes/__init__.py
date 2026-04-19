@@ -1,10 +1,12 @@
 """
-passes/__init__.py — OptimizationPass ABC + run_all_passes().
+passes/__init__.py — OptimizationPass ABC + BlockStructurer + run_all_passes().
 """
 
 from abc import ABC, abstractmethod
+from typing import Callable
 
-from pseudo8051.ir.function import Function
+from pseudo8051.ir.function   import Function
+from pseudo8051.ir.basicblock import BasicBlock
 
 
 class OptimizationPass(ABC):
@@ -14,6 +16,79 @@ class OptimizationPass(ABC):
     def run(self, func: Function) -> None:
         """Transform / annotate func in-place."""
         ...
+
+
+# ── Standalone block-iteration helpers ────────────────────────────────────────
+
+def run_blocks_until_stable(func: Function,
+                             try_fn: Callable[[Function, BasicBlock], bool],
+                             *,
+                             reverse: bool = False) -> None:
+    """
+    Iterate func.blocks (skipping absorbed blocks), calling try_fn(func, block)
+    for each.  Restart from the beginning whenever try_fn returns True.
+    Stops when a full pass produces no changes.
+    """
+    blocks = func.blocks
+    changed = True
+    while changed:
+        changed = False
+        seq = reversed(blocks) if reverse else iter(blocks)
+        for block in seq:
+            if getattr(block, "_absorbed", False):
+                continue
+            if try_fn(func, block):
+                changed = True
+                break
+
+
+def dump_hir(func: Function, pass_name: str) -> None:
+    """Dump all non-absorbed HIR nodes to the per-pass debug file."""
+    from pseudo8051.passes.debug_dump import dump_pass_hir
+    all_nodes = [n for b in func.blocks
+                 if not getattr(b, "_absorbed", False) for n in b.hir]
+    dump_pass_hir(pass_name, all_nodes, func.name)
+
+
+# ── BlockStructurer ABC ───────────────────────────────────────────────────────
+
+class BlockStructurer(OptimizationPass, ABC):
+    """
+    Base for CFG-level structuring passes that:
+      1. Iterate func.blocks (forward or reverse).
+      2. Call try_block() on each non-absorbed block.
+      3. Restart whenever try_block() returns True.
+      4. Stop when a full pass produces no changes.
+      5. Call post_run() for any cleanup after the stable point.
+      6. Emit a debug dump (if pass_name is set).
+
+    Subclass contract:
+      • Set block_order = "forward" (default) or "reverse".
+      • Set pass_name to the debug-dump key (e.g. "07.ifelse"); "" skips dump.
+      • Implement try_block(func, block) -> bool.
+      • Override post_run(func) for cleanup after the stable point.
+    """
+
+    block_order: str = "forward"
+    pass_name:   str = ""
+
+    @abstractmethod
+    def try_block(self, func: Function, block: BasicBlock) -> bool:
+        """
+        Attempt to detect and apply one structuring transform starting at block.
+        Return True if the block graph was changed (triggers a restart).
+        Absorbed-block skipping is handled by run().
+        """
+
+    def post_run(self, func: Function) -> None:
+        """Called after the stable point. Override for post-structuring cleanup."""
+
+    def run(self, func: Function) -> None:
+        run_blocks_until_stable(func, self.try_block,
+                                reverse=(self.block_order == "reverse"))
+        self.post_run(func)
+        if self.pass_name:
+            dump_hir(func, self.pass_name)
 
 
 def run_all_passes(func: Function) -> None:

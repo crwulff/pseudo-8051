@@ -39,8 +39,11 @@ _active_viewer: Optional["DetailViewer"] = None
 
 # ── HIR child helpers ─────────────────────────────────────────────────────────
 
-def _get_hir_children(node: HIRNode) -> List[HIRNode]:
+def _get_hir_children(node) -> List[HIRNode]:
     """Direct HIR child nodes of a container node; empty list for leaves."""
+    # _SwitchCaseView sentinel: return just this case arm's body nodes
+    if hasattr(node, 'case_body'):
+        return list(node.case_body())
     if isinstance(node, IfNode):
         return list(node.then_nodes) + list(node.else_nodes)
     if isinstance(node, (WhileNode, ForNode, DoWhileNode)):
@@ -105,13 +108,21 @@ class DetailViewer(ida_kernwin.simplecustviewer_t):
         self._visible:         bool = False
         self._title:           str  = title
         self._pv_title:        str  = pv_title   # matching pseudocode tab title
+        self._line_ea_map:     dict = {}          # line_no → ea for instruction lines
         return super().Create(title)
 
     # ── Content rendering ─────────────────────────────────────────────────
 
+    def _add_insn_line(self, ea: int, text: str) -> None:
+        """Add an instruction line and record the EA for double-click navigation."""
+        line_no = self.Count()
+        self._line_ea_map[line_no] = ea
+        self.AddLine(text)
+
     def update_from(self, pseudocode_viewer) -> None:
         """Refresh detail content from the pseudocode viewer's current line."""
         self.ClearLines()
+        self._line_ea_map = {}
 
         line_no  = pseudocode_viewer.GetLineNo()
         node_map = getattr(pseudocode_viewer, '_node_map', {})
@@ -124,22 +135,31 @@ class DetailViewer(ida_kernwin.simplecustviewer_t):
 
         node = chain[-1]
 
+        # _SwitchCaseView sentinel: case/default header line
+        is_case_view = hasattr(node, 'case_body')
+
         # Header
-        first_render = node.render(indent=0)
-        line_text    = first_render[0][1].strip() if first_render else ""
-        self.AddLine(f"Line {line_no}:  {line_text}")
-        self.AddLine(f"Node: {type(node).__name__}  EA: {hex(node.ea)}")
+        if is_case_view:
+            line_text = node.case_label()
+            self.AddLine(f"Line {line_no}:  {line_text}")
+            self.AddLine(f"Node: SwitchNode  EA: {hex(node.ea)}")
+        else:
+            first_render = node.render(indent=0)
+            line_text    = first_render[0][1].strip() if first_render else ""
+            self.AddLine(f"Line {line_no}:  {line_text}")
+            self.AddLine(f"Node: {type(node).__name__}  EA: {hex(node.ea)}")
         self.AddLine(_SEP)
 
-        # Instructions for this node
+        # Instructions for this node (src_eas present on both HIRNode and _SwitchCaseView)
         self.AddLine("Instructions:")
         for ea in _sorted_eas(node, 0):
             disasm = idc.GetDisasm(ea)
-            self.AddLine(f"  {hex(ea)}  {disasm if disasm else '(no disasm)'}")
+            self._add_insn_line(ea, f"  {hex(ea)}  {disasm if disasm else '(no disasm)'}")
 
         # Optional annotations
         if self.show_annotations:
-            ann_lines = node.ann_lines() + node.node_ann_lines()
+            ann_node = node.switch_node if is_case_view else node
+            ann_lines = ann_node.ann_lines() + ann_node.node_ann_lines()
             if ann_lines:
                 self.AddLine("")
                 self.AddLine("Expressions:")
@@ -164,7 +184,8 @@ class DetailViewer(ida_kernwin.simplecustviewer_t):
                         f"{pad}[depth={depth}]  {ctype}  EA: {hex(child.ea)}")
                     for cea in _sorted_eas(child, 0):
                         cdisasm = idc.GetDisasm(cea)
-                        self.AddLine(
+                        self._add_insn_line(
+                            cea,
                             f"{pad}  {hex(cea)}  "
                             f"{cdisasm if cdisasm else '(no disasm)'}")
                     if self.show_annotations:
@@ -172,6 +193,15 @@ class DetailViewer(ida_kernwin.simplecustviewer_t):
                             self.AddLine(f"{pad}  // {a}")
 
         self.Refresh()
+
+    # ── Double-click navigation ───────────────────────────────────────────
+
+    def OnDblClick(self, _shift: int) -> bool:
+        """Jump IDA disassembly view to the address of the double-clicked line."""
+        ea = self._line_ea_map.get(self.GetLineNo())
+        if ea is not None:
+            idc.jumpto(ea)
+        return True
 
     # ── Context menu ──────────────────────────────────────────────────────
 

@@ -114,6 +114,43 @@ def _next_title() -> str:
 
 
 
+class _SwitchCaseView:
+    """
+    Sentinel stored as the innermost chain entry for case/default header lines
+    within a SwitchNode.  Carries the parent SwitchNode and the case index
+    (-1 = default) so the detail viewer can:
+      • show the switch dispatch src_eas as "Instructions"
+      • show just this case's body as "Children"
+    """
+    __slots__ = ('switch_node', 'case_index', 'ea', 'src_eas')
+
+    def __init__(self, switch_node, case_index: int):
+        self.switch_node = switch_node
+        self.case_index  = case_index   # -1 means default
+        self.ea          = switch_node.ea
+        # Use per-case EAs if tracked; fall back to the whole switch's src_eas.
+        if case_index == -1:
+            eas = getattr(switch_node, 'default_src_eas', None)
+        else:
+            _cse = getattr(switch_node, 'case_src_eas', None)
+            eas  = _cse[case_index] if (_cse and 0 <= case_index < len(_cse)) else None
+        self.src_eas = eas if eas else switch_node.src_eas
+
+    def case_label(self) -> str:
+        if self.case_index == -1:
+            return "default:"
+        values, _ = self.switch_node.cases[self.case_index]
+        return " ".join(f"case {v}:" for v in values)
+
+    def case_body(self):
+        """Body HIRNodes for this case arm, or [] for goto-form cases."""
+        if self.case_index == -1:
+            b = self.switch_node.default_body
+        else:
+            _, b = self.switch_node.cases[self.case_index]
+        return b if isinstance(b, list) else []
+
+
 def _collect_line_chains(nodes, node_map: dict, offset: int, ancestors: tuple) -> int:
     """
     Recursively map every viewer line number to its full HIR containment chain.
@@ -138,7 +175,24 @@ def _collect_line_chains(nodes, node_map: dict, offset: int, ancestors: tuple) -
                 sub = _collect_line_chains(node.else_nodes, node_map, sub, chain)
         elif name in ('WhileNode', 'ForNode'):
             _collect_line_chains(node.body_nodes, node_map, sub, chain)
-        # SwitchNode has no child HIR nodes to recurse into
+        elif name == 'SwitchNode':
+            # sub = first line after "switch (...) {"
+            for ci, (_, body) in enumerate(node.cases):
+                case_chain = ancestors + (node, _SwitchCaseView(node, ci))
+                if isinstance(body, str):
+                    node_map[sub] = case_chain   # "case N: goto label;"
+                    sub += 1
+                else:
+                    node_map[sub] = case_chain   # "case N:" header
+                    sub += 1
+                    sub = _collect_line_chains(body, node_map, sub, ancestors + (node,))
+            if node.default_body is not None:
+                node_map[sub] = ancestors + (node, _SwitchCaseView(node, -1))
+                sub += 1
+                _collect_line_chains(node.default_body, node_map, sub, ancestors + (node,))
+            elif node.default_label is not None:
+                node_map[sub] = ancestors + (node, _SwitchCaseView(node, -1))
+            # closing "}" stays as chain (already set by initial loop above)
         offset += len(node_lines)
     return offset
 

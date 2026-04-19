@@ -28,13 +28,20 @@ class SwitchNode(HIRNode):
                  cases: List[Tuple[List[int], Union[str, List['HIRNode']]]],
                  default_label: Optional[str] = None,
                  default_body: Optional[List['HIRNode']] = None,
-                 case_comments: Optional[List[Optional[str]]] = None):
+                 case_comments: Optional[List[Optional[str]]] = None,
+                 case_src_eas: Optional[List[frozenset]] = None,
+                 default_src_eas: Optional[frozenset] = None):
         super().__init__(ea)
-        self.subject       = subject
-        self.cases         = cases
-        self.default_label = default_label
-        self.default_body  = default_body
-        self.case_comments: List[Optional[str]] = case_comments or []
+        self.subject         = subject
+        self.cases           = cases
+        self.default_label   = default_label
+        self.default_body    = default_body
+        self.case_comments:  List[Optional[str]] = case_comments or []
+        # Per-case instruction EAs: one frozenset per entry in self.cases (same order).
+        # None means "not tracked" — fall back to the whole-switch src_eas.
+        self.case_src_eas:   Optional[List[frozenset]] = case_src_eas
+        # EAs for the default arm's comparison/branch instruction(s).
+        self.default_src_eas: Optional[frozenset] = default_src_eas
 
     def map_bodies(self, fn: Callable[[List[HIRNode]], List[HIRNode]]) -> "SwitchNode":
         new_cases = [
@@ -42,10 +49,10 @@ class SwitchNode(HIRNode):
             for vals, body in self.cases
         ]
         new_default_body = fn(self.default_body) if isinstance(self.default_body, list) else self.default_body
-        n = SwitchNode(self.ea, self.subject, new_cases, self.default_label, new_default_body,
-                       case_comments=list(self.case_comments))
-        n.ann = self.ann
-        return n
+        return self.copy_meta_to(SwitchNode(self.ea, self.subject, new_cases, self.default_label, new_default_body,
+                                             case_comments=list(self.case_comments),
+                                             case_src_eas=self.case_src_eas,
+                                             default_src_eas=self.default_src_eas))
 
     def render(self, indent: int = 0) -> List[Tuple[int, str]]:
         ind  = self._ind(indent)

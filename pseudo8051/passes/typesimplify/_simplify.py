@@ -319,10 +319,7 @@ def _transform_default(node: HIRNode,
         simplify_fn = _simplify
 
     def _out(new_node: HIRNode) -> HIRNode:
-        """Copy annotation and src_eas from input node to any newly created output node."""
-        new_node.ann = node.ann
-        new_node.src_eas = node.src_eas
-        return new_node
+        return node.copy_meta_to(new_node)
 
     if isinstance(node, Assign):
         from pseudo8051.ir.hir import TypedAssign

@@ -23,9 +23,7 @@ class IfNode(HIRNode):
         self.else_nodes = else_nodes or []
 
     def map_bodies(self, fn: Callable[[List[HIRNode]], List[HIRNode]]) -> "IfNode":
-        n = IfNode(self.ea, self.condition, fn(self.then_nodes), fn(self.else_nodes))
-        n.ann = self.ann
-        return n
+        return self.copy_meta_to(IfNode(self.ea, self.condition, fn(self.then_nodes), fn(self.else_nodes)))
 
     def definitely_killed(self) -> frozenset:
         """Registers killed on ALL paths: intersection of both branch kill sets."""
@@ -55,7 +53,7 @@ class IfNode(HIRNode):
         return cond_refs | body_refs
 
     def replace_condition(self, new_cond) -> "IfNode":
-        return IfNode(self.ea, new_cond, self.then_nodes, self.else_nodes)
+        return self.copy_meta_to(IfNode(self.ea, new_cond, self.then_nodes, self.else_nodes))
 
     def ann_lines(self) -> List[str]:
         return (["IfNode"] + _ann_field("cond", self.condition)

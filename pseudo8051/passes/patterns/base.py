@@ -207,6 +207,101 @@ class RestructureTransform(Transform):
         """Return (out_nodes, new_i) if the transform applies, or None."""
 
 
+class ConditionFoldTransform(Transform):
+    """
+    Consume a 'setup' node, skip optional gap nodes (Labels by default),
+    and replace the following condition node's condition expression.
+
+    Pattern (at nodes[i]):
+      nodes[i]     — setup node (matched by match_setup)
+      nodes[i+1:j] — gap nodes (all satisfy can_gap; Labels by default)
+      nodes[j]     — condition node with replace_condition (IfNode, IfGoto, …)
+
+    Output: [gap_nodes…, modified_condition_node]
+    The setup node is consumed; the condition node's src_eas absorbs the
+    setup node's src_eas so both source instructions appear in the detail view.
+
+    For post-processing use (outside _PATTERNS), call fold_sequence() which
+    drives the scan loop without needing reg_map / simplify arguments.
+    """
+
+    def can_gap(self, node: HIRNode) -> bool:
+        """Return True if node may appear between setup and condition (default: Label)."""
+        # Import inside method to avoid circular imports at module load time.
+        from pseudo8051.ir.hir.label import Label
+        return isinstance(node, Label)
+
+    @abstractmethod
+    def match_setup(self, node: HIRNode) -> bool:
+        """Return True if node is the setup node for this fold."""
+
+    @abstractmethod
+    def new_condition(self,
+                      setup_node:   HIRNode,
+                      cond_node:    HIRNode,
+                      current_cond: "Expr") -> "Optional[Expr]":
+        """
+        Return the replacement condition expression, or None if this combination
+        doesn't match.  current_cond is the existing condition of cond_node.
+        """
+
+    # ------------------------------------------------------------------
+    # Transform ABC implementation
+    # ------------------------------------------------------------------
+
+    def match(self, nodes, i, reg_map, simplify):
+        node = nodes[i]
+        if not self.match_setup(node):
+            return None
+        # Skip gap nodes (Labels by default).
+        j = i + 1
+        while j < len(nodes) and self.can_gap(nodes[j]):
+            j += 1
+        if j >= len(nodes):
+            return None
+        cond_node = nodes[j]
+        if not hasattr(cond_node, "replace_condition"):
+            return None
+        # Extract the existing condition from the target node.
+        from pseudo8051.ir.hir import IfNode, WhileNode, ForNode, DoWhileNode, IfGoto
+        if isinstance(cond_node, (IfNode, WhileNode, ForNode, DoWhileNode)):
+            current_cond = cond_node.condition
+        elif isinstance(cond_node, IfGoto):
+            current_cond = cond_node.cond
+        else:
+            return None
+        new_cond = self.new_condition(node, cond_node, current_cond)
+        if new_cond is None:
+            return None
+        repl = cond_node.replace_condition(new_cond)
+        # Union setup node's src_eas: both instructions build this condition.
+        repl.src_eas = repl.src_eas | node.src_eas
+        gap_nodes = list(nodes[i + 1:j])
+        return (gap_nodes + [repl], j + 1)
+
+    # ------------------------------------------------------------------
+    # Convenience runner for post-processing (no reg_map / simplify needed)
+    # ------------------------------------------------------------------
+
+    def fold_sequence(self, nodes: List[HIRNode]) -> List[HIRNode]:
+        """
+        Apply this fold to a flat node list.
+        Does not recurse into structured-node bodies — callers should do so
+        via map_bodies before or after if needed.
+        """
+        result: List[HIRNode] = []
+        i = 0
+        while i < len(nodes):
+            m = self.match(nodes, i, {}, lambda x, _: x)
+            if m is not None:
+                result.extend(m[0])
+                i = m[1]
+            else:
+                result.append(nodes[i])
+                i += 1
+        return result
+
+
 # ── Backward-compatible alias ─────────────────────────────────────────────────
 
 Pattern = Transform

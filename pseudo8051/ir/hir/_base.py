@@ -128,6 +128,17 @@ class HIRNode(ABC):
         """
         return self.def_regs
 
+    def copy_meta_to(self, dst: "HIRNode") -> "HIRNode":
+        """Copy ann and src_eas from self to dst; return dst for chaining.
+
+        Use this whenever a new node is constructed to replace an existing one
+        and both fields should be preserved:
+            node = node.copy_meta_to(Assign(node.ea, new_lhs, new_rhs))
+        """
+        dst.ann     = self.ann
+        dst.src_eas = self.src_eas
+        return dst
+
     def map_bodies(self, fn: "Callable[[List[HIRNode]], List[HIRNode]]") -> "HIRNode":
         """Return a copy of this node with fn applied to every child body list.
 

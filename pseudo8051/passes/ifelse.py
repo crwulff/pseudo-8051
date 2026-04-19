@@ -18,7 +18,7 @@ from typing import List, Optional, Tuple, Union
 
 from pseudo8051.ir.hir      import HIRNode, IfNode, WhileNode, ForNode, DoWhileNode, Label, IfGoto, GotoStatement, SwitchNode, ExprStmt
 from pseudo8051.ir.expr     import Expr, UnaryOp
-from pseudo8051.passes    import OptimizationPass
+from pseudo8051.passes    import BlockStructurer
 from pseudo8051.constants import dbg
 
 from pseudo8051.ir.function   import Function
@@ -277,9 +277,7 @@ def _replace_goto_in_hir(nodes: List[HIRNode], label: str,
         if isinstance(node, GotoStatement) and node.label == label:
             result.extend(copy.deepcopy(replacement))
         elif isinstance(node, IfGoto) and node.label == label:
-            new_if = IfNode(node.ea, node.cond, copy.deepcopy(replacement))
-            new_if.ann = node.ann
-            result.append(new_if)
+            result.append(node.copy_meta_to(IfNode(node.ea, node.cond, copy.deepcopy(replacement))))
         elif isinstance(node, IfNode):
             node.then_nodes = _replace_goto_in_hir(node.then_nodes, label, replacement)
             node.else_nodes = _replace_goto_in_hir(node.else_nodes, label, replacement)
@@ -429,8 +427,7 @@ def _structure_flat_ifelse_pass(nodes: List[HIRNode]) -> Tuple[List[HIRNode], bo
                         i += 1
                         continue
 
-                    if_node = IfNode(node.ea, eff_cond, then_nodes, else_nodes)
-                    if_node.ann = node.ann
+                    if_node = node.copy_meta_to(IfNode(node.ea, eff_cond, then_nodes, else_nodes))
 
                     # Retain the shared exit goto as the continuation.
                     goto_node = result[goto_pos]
@@ -465,8 +462,7 @@ def _structure_flat_ifelse_pass(nodes: List[HIRNode]) -> Tuple[List[HIRNode], bo
                     if not then_nonempty and not else_nonempty:
                         i += 1
                         continue
-                    if_node = IfNode(node.ea, eff_cond, then_nodes, else_nodes)
-                    if_node.ann = node.ann
+                    if_node = node.copy_meta_to(IfNode(node.ea, eff_cond, then_nodes, else_nodes))
                     goto_node = result[goto_pos]
                     result = result[:i] + [if_node, goto_node]
                     return result, True
@@ -498,8 +494,7 @@ def _structure_flat_ifelse_pass(nodes: List[HIRNode]) -> Tuple[List[HIRNode], bo
                 i += 1
                 continue
 
-            if_node = IfNode(node.ea, eff_cond, then_nodes, else_nodes)
-            if_node.ann = node.ann
+            if_node = node.copy_meta_to(IfNode(node.ea, eff_cond, then_nodes, else_nodes))
 
             # Keep one merge label (dead-label cleanup removes it if unreferenced)
             merge_label_node = result[merge_pos]
@@ -519,8 +514,7 @@ def _structure_flat_ifelse_pass(nodes: List[HIRNode]) -> Tuple[List[HIRNode], bo
             if body_nonempty:
                 # Invert: cond-true means skip body; so body runs when cond is false
                 inv_cond = _invert_condition(cond)
-                if_node  = IfNode(node.ea, inv_cond, body, [])
-                if_node.ann = node.ann
+                if_node  = node.copy_meta_to(IfNode(node.ea, inv_cond, body, []))
                 end_label_node = result[else_pos]
                 next_pos = else_pos + 1
                 while (next_pos < len(result)
@@ -561,7 +555,7 @@ def _remove_nop_gotos(nodes: List[HIRNode]) -> List[HIRNode]:
 
 # ── Pass ──────────────────────────────────────────────────────────────────────
 
-class IfElseStructurer(OptimizationPass):
+class IfElseStructurer(BlockStructurer):
     """
     Promote conditional branch blocks into IfNode HIR nodes.
 
@@ -571,22 +565,13 @@ class IfElseStructurer(OptimizationPass):
     them.
     """
 
-    def run(self, func: Function) -> None:
-        # ── Structure if/else nodes ───────────────────────────────────────
-        changed = True
-        passes  = 0
-        while changed:
-            changed = False
-            passes += 1
-            for block in reversed(func.blocks):
-                if getattr(block, "_absorbed", False):
-                    continue
-                if self._try_structure(func, block):
-                    changed = True
-                    break   # restart — absorbed-set has changed
+    block_order = "reverse"
+    pass_name   = "07.ifelse"
 
-        dbg("ifelse", f"{passes} iteration(s) to reach fixed point")
+    def try_block(self, func: Function, block: BasicBlock) -> bool:
+        return self._try_structure(func, block)
 
+    def post_run(self, func: Function) -> None:
         # ── Nop-goto removal ─────────────────────────────────────────────
         for block in func.blocks:
             if not getattr(block, "_absorbed", False) and block.hir:
@@ -614,10 +599,6 @@ class IfElseStructurer(OptimizationPass):
                 removed.extend(dead)
         if removed:
             dbg("ifelse", f"dead labels removed: {removed}")
-        from pseudo8051.passes.debug_dump import dump_pass_hir
-        all_nodes = [n for b in func.blocks
-                     if not getattr(b, "_absorbed", False) for n in b.hir]
-        dump_pass_hir("07.ifelse", all_nodes, func.name)
 
     def _try_structure(self, func: Function, block: BasicBlock) -> bool:
         succs = [s for s in block.successors
@@ -779,13 +760,15 @@ class IfElseStructurer(OptimizationPass):
                       f"then={len(then_nodes)} node(s)  "
                       f"else={len(else_nodes)} node(s)")
 
+        branch_node = block.hir[branch_idx]
         if_node = IfNode(
-            ea         = block.hir[branch_idx].ea,
+            ea         = branch_node.ea,
             condition  = cond,
             then_nodes = then_nodes,
             else_nodes = else_nodes,
         )
-        if_node.ann = block.hir[branch_idx].ann   # preserve annotation for downstream passes
+        if_node.ann     = branch_node.ann      # preserve annotation for downstream passes
+        if_node.src_eas = branch_node.src_eas  # inherit EAs folded into the condition
 
         # Keep HIR before the branch, replace branch+tail with IfNode
         block.hir = block.hir[:branch_idx] + [if_node]

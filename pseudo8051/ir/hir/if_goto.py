@@ -23,7 +23,7 @@ class IfGoto(HIRNode):
         return _refs_from_expr(self.cond)
 
     def replace_condition(self, new_cond: Expr) -> "IfGoto":
-        return IfGoto(self.ea, new_cond, self.label)
+        return self.copy_meta_to(IfGoto(self.ea, new_cond, self.label))
 
     def ann_lines(self) -> List[str]:
         return ["IfGoto"] + _ann_field("cond", self.cond) + [f"  label: {self.label!r}"]

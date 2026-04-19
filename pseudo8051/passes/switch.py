@@ -23,7 +23,7 @@ from pseudo8051.ir.hir import (
 from pseudo8051.ir.expr import Reg, Regs, Const, BinOp, Expr, UnaryOp
 from pseudo8051.ir.function   import Function
 from pseudo8051.ir.basicblock import BasicBlock
-from pseudo8051.passes        import OptimizationPass
+from pseudo8051.passes        import OptimizationPass, run_blocks_until_stable, dump_hir
 from pseudo8051.constants     import dbg
 
 
@@ -220,14 +220,44 @@ def _try_switch(func: Function, head_block: BasicBlock) -> bool:
                   f"SwitchNode subj={subj.render()!r} "
                   f"{len(steps)} steps → {len(cases)} case entries")
 
+    # ── Per-case EA tracking ──────────────────────────────────────────────────
+    # Map each case label to the union of src_eas from all steps that jump there.
+    _step_eas_by_label: Dict[str, frozenset] = {}
+    _default_step_eas: frozenset = frozenset()
+    _all_step_eas: frozenset = frozenset()
+
+    for delta, label, is_ne, blk in steps:
+        _hir_nl = [n for n in blk.hir if not isinstance(n, Label)]
+        _tl = 2
+        if (len(_hir_nl) >= 3
+                and isinstance(_hir_nl[-3], Assign)
+                and _hir_nl[-3].lhs == Reg("A")
+                and not _contains_a(_hir_nl[-3].rhs)):
+            _tl = 3
+        _step_ea_set = frozenset().union(*(n.src_eas for n in _hir_nl[-_tl:]))
+        _all_step_eas |= _step_ea_set
+        if is_ne:
+            _default_step_eas |= _step_ea_set
+            _ft = _fall_through_successor(blk, label)
+            if _ft is not None:
+                _ft_lbl = _label_for(_ft)
+                _step_eas_by_label[_ft_lbl] = (
+                    _step_eas_by_label.get(_ft_lbl, frozenset()) | _step_ea_set)
+        else:
+            _step_eas_by_label[label] = (
+                _step_eas_by_label.get(label, frozenset()) | _step_ea_set)
+
     first_hir = next((n for n in head_block.hir if not isinstance(n, Label)), None)
     sw_ea = first_hir.ea if first_hir is not None else head_block.start_ea
     sw = SwitchNode(
-        ea            = sw_ea,
-        subject       = subj,
-        cases         = cases,
-        default_label = default_label,
+        ea              = sw_ea,
+        subject         = subj,
+        cases           = cases,
+        default_label   = default_label,
+        case_src_eas    = [_step_eas_by_label.get(lbl, frozenset()) for _, lbl in cases],
+        default_src_eas = _default_step_eas if _default_step_eas else None,
     )
+    sw.src_eas = _all_step_eas if _all_step_eas else sw.src_eas
 
     # Keep any Label nodes and all preamble code that precedes the switch tail.
     # The tail is: [Assign(A,subj)?] + CompoundAssign + IfGoto — 2 or 3 nodes.
@@ -380,7 +410,7 @@ def _try_linear_equality_switch(func: Function, head_block: BasicBlock) -> bool:
         if subject is not None:
             subjects.append(subject)
 
-        steps.append((case_val, label, is_ne, cur))
+        steps.append((case_val, label, is_ne, cur, did_reload))
         dbg("switch", f"  leq step @ {hex(cur.start_ea)}: "
                       f"case={hex(case_val)} label={label!r} is_ne={is_ne}")
 
@@ -400,7 +430,7 @@ def _try_linear_equality_switch(func: Function, head_block: BasicBlock) -> bool:
     has_xor = any(
         _extract_linear_equality_step(blk) is not None
         and _extract_linear_equality_step(blk)[0][0] == 'xor'
-        for _, _, _, blk in steps
+        for _, _, _, blk, _ in steps
     )
     if not has_xor:
         return False
@@ -412,7 +442,7 @@ def _try_linear_equality_switch(func: Function, head_block: BasicBlock) -> bool:
     cases_order: List[str] = []
     default_label: Optional[str] = None
 
-    for case_val, label, is_ne, blk in steps:
+    for case_val, label, is_ne, blk, _dr in steps:
         if is_ne:
             default_label = label
             ft = _fall_through_successor(blk, label)
@@ -429,7 +459,7 @@ def _try_linear_equality_switch(func: Function, head_block: BasicBlock) -> bool:
             cases_dict[label].append(case_val)
 
     # If chain ends with jz (no jnz), the fall-through of the last block is the default.
-    if not any(is_ne for _, _, is_ne, _ in steps):
+    if not any(is_ne for _, _, is_ne, _, _ in steps):
         last_blk = steps[-1][3]
         last_jz_label = steps[-1][1]
         ft_default = _fall_through_successor(last_blk, last_jz_label)
@@ -446,9 +476,38 @@ def _try_linear_equality_switch(func: Function, head_block: BasicBlock) -> bool:
                   f"LinearEqSwitch subj={subj.render()!r} "
                   f"{len(steps)} steps → {len(cases)} case entries")
 
+    # ── Per-case EA tracking ──────────────────────────────────────────────────
+    _step_eas_by_label: Dict[str, frozenset] = {}
+    _default_step_eas: frozenset = frozenset()
+    _all_step_eas: frozenset = frozenset()
+
+    for case_val, label, is_ne, blk, dr in steps:
+        _hir_nl = [n for n in blk.hir if not isinstance(n, Label)]
+        _tl = 3 if dr else 2
+        _step_ea_set = frozenset().union(*(n.src_eas for n in _hir_nl[-_tl:]))
+        _all_step_eas |= _step_ea_set
+        if is_ne:
+            _default_step_eas |= _step_ea_set
+            _ft = _fall_through_successor(blk, label)
+            if _ft is not None:
+                _ft_lbl = _label_for(_ft)
+                _step_eas_by_label[_ft_lbl] = (
+                    _step_eas_by_label.get(_ft_lbl, frozenset()) | _step_ea_set)
+        else:
+            _step_eas_by_label[label] = (
+                _step_eas_by_label.get(label, frozenset()) | _step_ea_set)
+
     first_hir = next((n for n in head_block.hir if not isinstance(n, Label)), None)
     sw_ea = first_hir.ea if first_hir is not None else head_block.start_ea
-    sw = SwitchNode(ea=sw_ea, subject=subj, cases=cases, default_label=default_label)
+    sw = SwitchNode(
+        ea              = sw_ea,
+        subject         = subj,
+        cases           = cases,
+        default_label   = default_label,
+        case_src_eas    = [_step_eas_by_label.get(lbl, frozenset()) for _, lbl in cases],
+        default_src_eas = _default_step_eas if _default_step_eas else None,
+    )
+    sw.src_eas = _all_step_eas if _all_step_eas else sw.src_eas
 
     # Keep Label nodes and any preamble before the switch tail in head block.
     hir_no_labels = [n for n in head_block.hir if not isinstance(n, Label)]
@@ -459,7 +518,7 @@ def _try_linear_equality_switch(func: Function, head_block: BasicBlock) -> bool:
     head_block.hir = label_nodes + preamble + [sw]
 
     # Absorb all intermediate step blocks (not the head)
-    for _, _, _, blk in steps[1:]:
+    for _, _, _, blk, _ in steps[1:]:
         blk._absorbed = True
 
     return True
@@ -478,30 +537,10 @@ class SwitchStructurer(OptimizationPass):
 
     def run(self, func: Function) -> None:
         # Pass 1: linear equality chains (CPL/XRL — must run first to grab full chains)
-        changed = True
-        while changed:
-            changed = False
-            for block in func.blocks:
-                if getattr(block, "_absorbed", False):
-                    continue
-                if _try_linear_equality_switch(func, block):
-                    changed = True
-                    break
-
+        run_blocks_until_stable(func, _try_linear_equality_switch)
         # Pass 2: cumulative ADD chains
-        changed = True
-        while changed:
-            changed = False
-            for block in func.blocks:
-                if getattr(block, "_absorbed", False):
-                    continue
-                if _try_switch(func, block):
-                    changed = True
-                    break   # restart — absorbed-set has changed
-        from pseudo8051.passes.debug_dump import dump_pass_hir
-        all_nodes = [n for b in func.blocks
-                     if not getattr(b, "_absorbed", False) for n in b.hir]
-        dump_pass_hir("05.switch", all_nodes, func.name)
+        run_blocks_until_stable(func, _try_switch)
+        dump_hir(func, "05.switch")
 
 
 # ── SwitchBodyAbsorber helpers ────────────────────────────────────────────────

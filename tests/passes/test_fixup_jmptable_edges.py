@@ -119,7 +119,7 @@ class TestFixupJmptableEdges:
         with patch("pseudo8051.passes.jmptable._find_jmp_hir_idx", return_value=1), \
              patch("pseudo8051.passes.jmptable._get_table_ea", return_value=table_ea), \
              patch("pseudo8051.passes.jmptable._read_jump_table",
-                   return_value=(cases, stride)):
+                   return_value=(cases, stride, sjmp_eas)):
             fixup_jmptable_edges(func)
 
         assert set(jmp_block.successors) == set(sjmp_blocks)
@@ -151,7 +151,7 @@ class TestFixupJmptableEdges:
 
         with patch("pseudo8051.passes.jmptable._find_jmp_hir_idx", return_value=1), \
              patch("pseudo8051.passes.jmptable._get_table_ea", return_value=0x1326), \
-             patch("pseudo8051.passes.jmptable._read_jump_table", return_value=([], 0)):
+             patch("pseudo8051.passes.jmptable._read_jump_table", return_value=([], 0, [])):
             fixup_jmptable_edges(func)
 
         assert jmp_block.successors == []
@@ -165,10 +165,11 @@ class TestFixupJmptableEdges:
         func, jmp_block, sjmp_blocks = self._make_func(0x713c3, sjmp_eas)
 
         cases = [([i], f"label_{i}") for i in range(3)]
+        entry_eas = [table_ea + i * stride for i in range(3)]
         with patch("pseudo8051.passes.jmptable._find_jmp_hir_idx", return_value=1), \
              patch("pseudo8051.passes.jmptable._get_table_ea", return_value=table_ea), \
              patch("pseudo8051.passes.jmptable._read_jump_table",
-                   return_value=(cases, stride)):
+                   return_value=(cases, stride, entry_eas)):
             fixup_jmptable_edges(func)
 
         # Only the one present block gets wired

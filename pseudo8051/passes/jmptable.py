@@ -37,7 +37,7 @@ from pseudo8051.ir.hir         import (HIRNode, Label, Assign,
 from pseudo8051.ir.expr        import Reg, Regs, Const, BinOp, Expr
 from pseudo8051.ir.function    import Function
 from pseudo8051.ir.basicblock  import BasicBlock
-from pseudo8051.passes         import OptimizationPass
+from pseudo8051.passes         import BlockStructurer
 from pseudo8051.constants      import dbg
 
 
@@ -186,34 +186,38 @@ def _read_jump_table(table_ea: int, page_base: int, func: Function,
         ea += size
 
     if len(entries) < 2:
-        return [], 0
+        return [], 0, []
 
     stride = expected_stride or 1
 
     cases: List[Tuple[List[int], str]] = []
-    for i, (_entry_ea, lbl) in enumerate(entries):
+    entry_eas: List[int] = []
+    for i, (entry_ea, lbl) in enumerate(entries):
         cases.append(([i], lbl))
+        entry_eas.append(entry_ea)
 
-    return cases, stride
+    return cases, stride, entry_eas
 
 
 # ── CFG-based case extraction ─────────────────────────────────────────────────
 
-def _cases_from_cfg(block: BasicBlock) -> Tuple[Optional[List], Optional[int]]:
+def _cases_from_cfg(block: BasicBlock) -> Tuple[Optional[List], Optional[int], Optional[List[int]]]:
     """
     Use block.successors (SJMP dispatch entries) to build cases.
 
-    Returns (cases, stride) or (None, None) on failure.
+    Returns (cases, stride, entry_eas) or (None, None, None) on failure.
+    entry_eas[i] is the start_ea of the i-th SJMP dispatch block.
     """
     succs = [s for s in block.successors
              if not getattr(s, "_absorbed", False)]
     if len(succs) < 2:
-        return None, None
+        return None, None, None
 
     succs_sorted = sorted(succs, key=lambda b: b.start_ea)
     stride = succs_sorted[1].start_ea - succs_sorted[0].start_ea
 
     cases: List[Tuple[List[int], str]] = []
+    entry_eas: List[int] = []
     for i, sjmp_blk in enumerate(succs_sorted):
         inner = [s for s in sjmp_blk.successors
                  if not getattr(s, "_absorbed", False)]
@@ -221,11 +225,12 @@ def _cases_from_cfg(block: BasicBlock) -> Tuple[Optional[List], Optional[int]]:
             dbg("switch", f"JmpTableStructurer(CFG): SJMP block "
                           f"{hex(sjmp_blk.start_ea)} has {len(inner)} "
                           f"inner successors — aborting CFG path")
-            return None, None
+            return None, None, None
         lbl = _label_for(inner[0])
         cases.append(([i], lbl))
+        entry_eas.append(sjmp_blk.start_ea)
 
-    return cases, stride
+    return cases, stride, entry_eas
 
 
 # ── Main detection ────────────────────────────────────────────────────────────
@@ -240,7 +245,7 @@ def _try_jmptable(func: Function, block: BasicBlock) -> bool:
         return False
 
     # ── Strategy 1: CFG successors ────────────────────────────────────────
-    cases, stride = _cases_from_cfg(block)
+    cases, stride, entry_eas = _cases_from_cfg(block)
 
     if cases is None:
         dbg("switch", f"JmpTableStructurer: block {hex(block.start_ea)} "
@@ -255,7 +260,7 @@ def _try_jmptable(func: Function, block: BasicBlock) -> bool:
             return False
 
         page_base = block.start_ea & ~0xFFFF
-        cases, stride = _read_jump_table(table_ea, page_base, func)
+        cases, stride, entry_eas = _read_jump_table(table_ea, page_base, func)
         if len(cases) < 2:
             dbg("switch", f"JmpTableStructurer: block {hex(block.start_ea)} "
                           f"memory read at {hex(table_ea)} found "
@@ -270,8 +275,7 @@ def _try_jmptable(func: Function, block: BasicBlock) -> bool:
         # block.successors is empty when IDA did not create CFG edges from
         # the JMP block, so we must look up the entries directly.
         for i in range(len(cases)):
-            entry_ea = table_ea + i * stride
-            sjmp_blk = func._block_map.get(entry_ea)
+            sjmp_blk = func._block_map.get(entry_eas[i])
             if sjmp_blk is not None:
                 sjmp_blk._absorbed = True
     else:
@@ -305,6 +309,12 @@ def _try_jmptable(func: Function, block: BasicBlock) -> bool:
     sw = SwitchNode(sw_ea, subject, cases)
     sw.ann = block.hir[jmp_idx].ann  # carry forward annotation (reg_exprs, etc.)
 
+    # src_eas: the MOV DPTR + JMP @A+DPTR instructions (the whole dispatch)
+    consumed = block.hir[start : jmp_idx + 1]
+    sw.src_eas = frozenset().union(*(n.src_eas for n in consumed))
+    # Per-case src_eas: each jump-table entry (SJMP/LJMP) EA
+    sw.case_src_eas = [frozenset({ea}) for ea in entry_eas]
+
     dbg("switch", f"JmpTableStructurer: block {hex(block.start_ea)} → "
                   f"SwitchNode subj={subject.render()!r} "
                   f"{len(cases)} cases stride={stride}")
@@ -331,36 +341,26 @@ def fixup_jmptable_edges(func: Function) -> None:
         if table_ea is None:
             continue
         page_base = block.start_ea & ~0xFFFF
-        cases, stride = _read_jump_table(table_ea, page_base, func)
+        cases, stride, entry_eas = _read_jump_table(table_ea, page_base, func)
         if not cases:
             continue
         dbg("switch", f"fixup_jmptable_edges: block {hex(block.start_ea)} "
                       f"table @ {hex(table_ea)} → {len(cases)} edges stride={stride}")
-        for i in range(len(cases)):
-            entry_ea = table_ea + i * stride
+        for i, entry_ea in enumerate(entry_eas):
             sjmp_blk = func._block_map.get(entry_ea)
             if sjmp_blk is not None:
                 block._add_successor(sjmp_blk)
                 dbg("switch", f"  {hex(block.start_ea)} → {hex(sjmp_blk.start_ea)}")
 
 
-class JmpTableStructurer(OptimizationPass):
+class JmpTableStructurer(BlockStructurer):
     """
     Detect JMP @A+DPTR indirect-jump switch dispatch and replace with SwitchNode.
     Runs before SwitchStructurer so the SJMP blocks are absorbed first.
     """
 
-    def run(self, func: Function) -> None:
-        changed = True
-        while changed:
-            changed = False
-            for block in func.blocks:
-                if getattr(block, "_absorbed", False):
-                    continue
-                if _try_jmptable(func, block):
-                    changed = True
-                    break  # restart — absorbed-set has changed
-        from pseudo8051.passes.debug_dump import dump_pass_hir
-        all_nodes = [n for b in func.blocks
-                     if not getattr(b, "_absorbed", False) for n in b.hir]
-        dump_pass_hir("04.jmptable", all_nodes, func.name)
+    block_order = "forward"
+    pass_name   = "04.jmptable"
+
+    def try_block(self, func: Function, block: BasicBlock) -> bool:
+        return _try_jmptable(func, block)

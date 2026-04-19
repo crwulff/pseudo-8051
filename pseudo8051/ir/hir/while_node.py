@@ -21,9 +21,7 @@ class WhileNode(HIRNode):
         self.body_nodes = body_nodes
 
     def map_bodies(self, fn: Callable[[List[HIRNode]], List[HIRNode]]) -> "WhileNode":
-        n = WhileNode(self.ea, self.condition, fn(self.body_nodes))
-        n.ann = self.ann
-        return n
+        return self.copy_meta_to(WhileNode(self.ea, self.condition, fn(self.body_nodes)))
 
     def definitely_killed(self) -> frozenset:
         """Body may execute zero times, so no register is guaranteed killed."""
@@ -34,7 +32,7 @@ class WhileNode(HIRNode):
         return _possibly_killed_by_seq(self.body_nodes)
 
     def replace_condition(self, new_cond) -> "WhileNode":
-        return WhileNode(self.ea, new_cond, self.body_nodes)
+        return self.copy_meta_to(WhileNode(self.ea, new_cond, self.body_nodes))
 
     def render(self, indent: int = 0) -> List[Tuple[int, str]]:
         ind = self._ind(indent)
