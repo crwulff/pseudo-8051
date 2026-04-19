@@ -344,6 +344,9 @@ def _propagate_register_copies(live: List[HIRNode],
 
             new_node = _subst_reg_in_node(live[use_idx], r, replacement)
             if new_node is not None:
+                # Union src_eas from the eliminated source node: the use site now
+                # represents the combined effect of both instructions.
+                new_node.src_eas = new_node.src_eas | live[i].src_eas
                 live[use_idx] = new_node
                 live[i] = None
                 dbg("typesimp", f"  [{hex(node.ea)}] prop-values: folded {r} into node {use_idx}")
@@ -384,7 +387,10 @@ def _propagate_register_copies(live: List[HIRNode],
                         break
                     tentative[j] = new_node
             if all_ok and tentative:
+                src_src_eas = live[i].src_eas
                 for j, new_node in tentative.items():
+                    # Union the defining node's src_eas into every use site.
+                    new_node.src_eas = new_node.src_eas | src_src_eas
                     live[j] = new_node
                 remaining = _collect_hir_name_refs(live[i + 1:end])
                 if r not in remaining:
@@ -442,7 +448,7 @@ def _subst_group_in_call_node(node: HIRNode, regs_tuple: tuple,
         if new_cond is not node.condition:
             result = IfNode(node.ea, new_cond, node.then_nodes, node.else_nodes)
     if result is not None:
-        result.ann = node.ann
+        node.copy_meta_to(result)
     return result
 
 

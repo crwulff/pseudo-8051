@@ -76,8 +76,6 @@ def _subst_xram_in_hir(nodes, reg_map):
         if isinstance(patched, Assign) and isinstance(patched.lhs, XRAMRef):
             new_lhs = _subst_fn(patched.lhs)
             if new_lhs is not patched.lhs:
-                new_node = Assign(patched.ea, new_lhs, patched.rhs)
-                new_node.ann = node.ann
-                patched = new_node
+                patched = patched.copy_meta_to(Assign(patched.ea, new_lhs, patched.rhs))
         result.append(patched.map_bodies(_visit))
     return result

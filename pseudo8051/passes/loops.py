@@ -205,25 +205,19 @@ def _replace_exits_and_continues(nodes: List[HIRNode],
     for node in nodes:
         if isinstance(node, GotoStatement):
             if node.label in exit_labels:
-                n = BreakStmt(node.ea)
-                n.ann = node.ann
-                result.append(n)
+                result.append(node.copy_meta_to(BreakStmt(node.ea)))
                 continue
             if node.label in continue_labels:
-                n = ContinueStmt(node.ea)
-                n.ann = node.ann
-                result.append(n)
+                result.append(node.copy_meta_to(ContinueStmt(node.ea)))
                 continue
         elif isinstance(node, IfGoto):
             if node.label in exit_labels:
-                bs = BreakStmt(node.ea)
-                bs.ann = node.ann
-                result.append(IfNode(node.ea, node.cond, [bs], []))
+                bs = node.copy_meta_to(BreakStmt(node.ea))
+                result.append(node.copy_meta_to(IfNode(node.ea, node.cond, [bs], [])))
                 continue
             if node.label in continue_labels:
-                cs = ContinueStmt(node.ea)
-                cs.ann = node.ann
-                result.append(IfNode(node.ea, node.cond, [cs], []))
+                cs = node.copy_meta_to(ContinueStmt(node.ea))
+                result.append(node.copy_meta_to(IfNode(node.ea, node.cond, [cs], [])))
                 continue
         result.append(node)
     return result

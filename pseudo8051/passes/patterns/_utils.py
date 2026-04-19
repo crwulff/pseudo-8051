@@ -629,23 +629,21 @@ def _apply_expr_subst_to_node(node: HIRNode,
         return Assign(node.ea, node.lhs, new_rhs) if new_rhs is not node.rhs else node
     if isinstance(node, CompoundAssign):
         new_rhs = expr_fn(node.rhs)
-        return CompoundAssign(node.ea, node.lhs, node.op, new_rhs) if new_rhs is not node.rhs else node
+        return node.copy_meta_to(CompoundAssign(node.ea, node.lhs, node.op, new_rhs)) if new_rhs is not node.rhs else node
     if isinstance(node, ExprStmt):
         new_expr = expr_fn(node.expr)
-        return ExprStmt(node.ea, new_expr) if new_expr is not node.expr else node
+        return node.copy_meta_to(ExprStmt(node.ea, new_expr)) if new_expr is not node.expr else node
     if isinstance(node, ReturnStmt) and node.value is not None:
         new_val = expr_fn(node.value)
-        return ReturnStmt(node.ea, new_val) if new_val is not node.value else node
+        return node.copy_meta_to(ReturnStmt(node.ea, new_val)) if new_val is not node.value else node
     if isinstance(node, IfGoto):
         new_cond = expr_fn(node.cond)
-        return IfGoto(node.ea, new_cond, node.label) if new_cond is not node.cond else node
+        return node.copy_meta_to(IfGoto(node.ea, new_cond, node.label)) if new_cond is not node.cond else node
     if isinstance(node, IfNode):
         new_cond = expr_fn(node.condition)
         if new_cond is node.condition:
             return node
-        new_node = IfNode(node.ea, new_cond, node.then_nodes, node.else_nodes)
-        new_node.ann = node.ann
-        return new_node
+        return node.copy_meta_to(IfNode(node.ea, new_cond, node.then_nodes, node.else_nodes))
     return node
 
 
@@ -661,15 +659,10 @@ def _fold_exprs_in_node(node: HIRNode) -> HIRNode:
         new_subj = fn(node.subject)
         if new_subj is node.subject:
             return node
-        new_node = SwitchNode(node.ea, new_subj, node.cases,
-                              node.default_label, node.default_body,
-                              case_comments=list(node.case_comments))
-        new_node.ann = node.ann
-        return new_node
-    new_node = _apply_expr_subst_to_node(node, fn)
-    if new_node is not node:
-        new_node.ann = node.ann
-    return new_node
+        return node.copy_meta_to(SwitchNode(node.ea, new_subj, node.cases,
+                                             node.default_label, node.default_body,
+                                             case_comments=list(node.case_comments)))
+    return _apply_expr_subst_to_node(node, fn)
 
 
 def _replace_pairs_in_node(node: HIRNode,
@@ -744,8 +737,7 @@ def _subst_reg_in_node(node: HIRNode, r: str,
         return _fold_unary_const(e)
 
     def _out(new_node: HIRNode) -> HIRNode:
-        new_node.ann = node.ann
-        return new_node
+        return node.copy_meta_to(new_node)
 
     if isinstance(node, Assign):
         new_rhs = _walk_expr(node.rhs, _fn)
@@ -788,19 +780,15 @@ def _subst_reg_in_node(node: HIRNode, r: str,
         new_cond = _walk_expr(node.condition, _fn)
         if new_cond is node.condition:
             return None
-        new_node = IfNode(node.ea, new_cond, node.then_nodes, node.else_nodes)
-        new_node.ann = node.ann
-        return new_node
+        return node.copy_meta_to(IfNode(node.ea, new_cond, node.then_nodes, node.else_nodes))
 
     if isinstance(node, SwitchNode):
         new_subject = _walk_expr(node.subject, _fn)
         if new_subject is node.subject:
             return None
-        new_node = SwitchNode(node.ea, new_subject, node.cases,
-                              node.default_label, node.default_body,
-                              case_comments=list(node.case_comments))
-        new_node.ann = node.ann
-        return new_node
+        return node.copy_meta_to(SwitchNode(node.ea, new_subject, node.cases,
+                                             node.default_label, node.default_body,
+                                             case_comments=list(node.case_comments)))
 
     return None
 
@@ -826,9 +814,7 @@ def _fold_into_node(node: HIRNode, name_expr: Expr,
         return e
 
     def _finalize(new_node: HIRNode) -> HIRNode:
-        result = _replace_pairs_in_node(new_node, reg_map)
-        result.ann = node.ann
-        return result
+        return node.copy_meta_to(_replace_pairs_in_node(new_node, reg_map))
 
     if isinstance(node, Assign):
         new_rhs = _walk_expr(node.rhs, _subst_fn)
