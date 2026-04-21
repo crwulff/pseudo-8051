@@ -13,25 +13,16 @@ _DBG_DIR = "/tmp/pseudo8051"
 
 def _collect_line_chains(nodes: list, node_map: dict,
                           offset: int, ancestors: tuple) -> int:
-    """Map every rendered-line index to its full HIR containment chain (deepest last).
-
-    Mirrors pseudo8051.__init__._collect_line_chains but adds DoWhileNode.
-    """
+    """Map every rendered-line index to its full HIR containment chain (deepest last)."""
     for node in nodes:
         node_lines = node.render(indent=0)
         chain = ancestors + (node,)
         for k in range(len(node_lines)):
             node_map[offset + k] = chain
-        name = type(node).__name__
         sub = offset + 1
-        if name == 'IfNode':
-            sub = _collect_line_chains(node.then_nodes, node_map, sub, chain)
-            if node.else_nodes:
-                sub += 1   # "} else {"
-                sub = _collect_line_chains(node.else_nodes, node_map, sub, chain)
-        elif name in ('WhileNode', 'ForNode', 'DoWhileNode'):
-            _collect_line_chains(node.body_nodes, node_map, sub, chain)
-        # SwitchNode: no child HIR lists to recurse into
+        for _extra, _child_nodes in node.child_body_groups():
+            sub += _extra
+            sub = _collect_line_chains(_child_nodes, node_map, sub, chain)
         offset += len(node_lines)
     return offset
 

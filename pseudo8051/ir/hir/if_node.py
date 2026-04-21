@@ -22,6 +22,12 @@ class IfNode(HIRNode):
         self.then_nodes = then_nodes
         self.else_nodes = else_nodes or []
 
+    def child_body_groups(self):
+        groups = [(0, self.then_nodes)]
+        if self.else_nodes:
+            groups.append((1, self.else_nodes))   # 1 for "} else {"
+        return groups
+
     def map_bodies(self, fn: Callable[[List[HIRNode]], List[HIRNode]]) -> "IfNode":
         return self.copy_meta_to(IfNode(self.ea, self.condition, fn(self.then_nodes), fn(self.else_nodes)))
 

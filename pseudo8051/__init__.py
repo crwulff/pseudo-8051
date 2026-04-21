@@ -168,14 +168,10 @@ def _collect_line_chains(nodes, node_map: dict, offset: int, ancestors: tuple) -
         # Recurse into child lists (overwrites interior lines with deeper chain)
         name = type(node).__name__
         sub = offset + 1   # first line after opening line
-        if name == 'IfNode':
-            sub = _collect_line_chains(node.then_nodes, node_map, sub, chain)
-            if node.else_nodes:
-                sub += 1   # "} else {"
-                sub = _collect_line_chains(node.else_nodes, node_map, sub, chain)
-        elif name in ('WhileNode', 'ForNode'):
-            _collect_line_chains(node.body_nodes, node_map, sub, chain)
-        elif name == 'SwitchNode':
+        for _extra, _child_nodes in node.child_body_groups():
+            sub += _extra
+            sub = _collect_line_chains(_child_nodes, node_map, sub, chain)
+        if name == 'SwitchNode':
             # sub = first line after "switch (...) {"
             for ci, (_, body) in enumerate(node.cases):
                 case_chain = ancestors + (node, _SwitchCaseView(node, ci))

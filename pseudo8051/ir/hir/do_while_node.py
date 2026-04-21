@@ -19,6 +19,9 @@ class DoWhileNode(HIRNode):
         self.condition  = condition
         self.body_nodes = body_nodes
 
+    def child_body_groups(self):
+        return [(0, self.body_nodes)]
+
     def map_bodies(self, fn: Callable[[List[HIRNode]], List[HIRNode]]) -> "DoWhileNode":
         return self.copy_meta_to(DoWhileNode(self.ea, self.condition, fn(self.body_nodes)))
 

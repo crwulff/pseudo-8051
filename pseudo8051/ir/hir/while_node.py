@@ -20,6 +20,9 @@ class WhileNode(HIRNode):
         self.condition  = condition
         self.body_nodes = body_nodes
 
+    def child_body_groups(self):
+        return [(0, self.body_nodes)]
+
     def map_bodies(self, fn: Callable[[List[HIRNode]], List[HIRNode]]) -> "WhileNode":
         return self.copy_meta_to(WhileNode(self.ea, self.condition, fn(self.body_nodes)))
 

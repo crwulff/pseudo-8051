@@ -38,6 +38,9 @@ class ForNode(HIRNode):
             return self.init.render()
         return str(self.init)
 
+    def child_body_groups(self):
+        return [(0, self.body_nodes)]
+
     def map_bodies(self, fn: Callable[[List[HIRNode]], List[HIRNode]]) -> "ForNode":
         return self.copy_meta_to(ForNode(self.ea, self.init, self.condition, self.update, fn(self.body_nodes)))
 

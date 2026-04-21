@@ -224,6 +224,18 @@ class HIRNode(ABC):
         dst.source_nodes = self.source_nodes
         return dst
 
+    def child_body_groups(self) -> "List[Tuple[int, List['HIRNode']]]":
+        """Return the ordered list of child body lists for line-map building.
+
+        Each entry is (extra_header_lines, body_nodes) where extra_header_lines
+        is the number of structural lines to skip before this body begins
+        (0 for the first body, 1 for '} else {', etc.).
+
+        Leaf nodes return [].  SwitchNode also returns [] — it is handled
+        specially by the viewer because it needs the _SwitchCaseView sentinel.
+        """
+        return []
+
     def map_bodies(self, fn: "Callable[[List[HIRNode]], List[HIRNode]]") -> "HIRNode":
         """Return a copy of this node with fn applied to every child body list.
 
