@@ -193,11 +193,12 @@ class DetailViewer(ida_kernwin.simplecustviewer_t):
                 self.AddLine("  [no source nodes — leaf from IDA]")
             else:
                 for depth, sn in source_tree:
-                    pad   = "  " * (depth + 1)
-                    stype = type(sn).__name__
-                    first = sn.render(indent=0)
-                    stext = first[0][1].strip() if first else ""
-                    self.AddLine(f"{pad}[depth={depth}]  {stype}  EA: {hex(sn.ea)}")
+                    pad     = "  " * (depth + 1)
+                    stype   = type(sn).__name__
+                    first   = sn.render(indent=0)
+                    stext   = first[0][1].strip() if first else ""
+                    creator = getattr(sn, '_creator', '?')
+                    self.AddLine(f"{pad}[depth={depth}]  {stype}  EA: {hex(sn.ea)}  // {creator}")
                     self._add_insn_line(sn.ea, f"{pad}  {stext!r}")
 
         # Optional annotations

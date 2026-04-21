@@ -27,6 +27,26 @@ from pseudo8051.constants import dbg
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+def _has_xram_const_addr(node: HIRNode, val: int) -> bool:
+    """True if node or a direct source_node has XRAMRef(Const(val)) as lhs.
+
+    Used to link DPTR=Const(k) nodes to downstream XRAM writes whose address
+    was folded from DPTR's constant value at lift time (XRAMRef(Const(k))
+    instead of XRAMRef(Reg('DPTR'))).
+    """
+    def _check(n: HIRNode) -> bool:
+        return (isinstance(n, Assign)
+                and isinstance(n.lhs, XRAMRef)
+                and isinstance(n.lhs.inner, Const)
+                and n.lhs.inner.value == val)
+    if _check(node):
+        return True
+    for sn in getattr(node, 'source_nodes', []):
+        if _check(sn):
+            return True
+    return False
+
+
 def _expr_name_refs(expr: Expr) -> frozenset:
     """Collect register/name identities referenced in an expression tree.
 
@@ -418,6 +438,26 @@ def _propagate_register_copies(live: List[HIRNode],
                     f"  [{hex(node.ea)}] prop-values-multi: {r} = {replacement.render()!r}"
                     f" into {len(tentative)} site(s)")
                 changed = True
+        elif (total_uses == 0 and is_reg_lhs
+                and isinstance(replacement, Const)
+                and r == 'DPTR'):
+            # DPTR = Const(k) with no downstream name-uses: the XRAM handler may
+            # have already folded DPTR's address into XRAMRef(Const(k)) at lift
+            # time, so the XRAM write node doesn't reference 'DPTR' by name.
+            # Link this node as a provenance source of the first downstream
+            # XRAMRef(Const(k)) node so the original mov DPTR instruction is
+            # traceable in the detail viewer.
+            dptr_val = replacement.value
+            end = (kill_idx + 1) if kill_idx is not None else len(live)
+            for j in range(i + 1, end):
+                lj = live[j]
+                if lj is not None and _has_xram_const_addr(lj, dptr_val):
+                    if node not in lj.source_nodes:
+                        lj.source_nodes = [node] + list(lj.source_nodes or [lj])
+                    dbg("typesimp",
+                        f"  [{hex(node.ea)}] prop-dptr-const: linked {hex(dptr_val)}"
+                        f" provenance into node {j}")
+                    break
 
         i += 1
 

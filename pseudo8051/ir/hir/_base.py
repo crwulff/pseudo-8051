@@ -2,11 +2,77 @@
 ir/hir/_base.py — NodeAnnotation, HIRNode ABC, and shared helpers.
 """
 
+import os as _os
+import sys as _sys
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, Dict, FrozenSet, List, Optional, Tuple, Union
 
 from pseudo8051.ir.expr import Expr, Regs as _RegsExpr, Name as _NameExpr
+
+# Directory containing this file (ir/hir/); used to skip subclass __init__ frames.
+_HIR_DIR = _os.path.normpath(_os.path.abspath(_os.path.dirname(__file__))) + _os.sep
+
+
+def _pass_name(short: str) -> str:
+    """Derive a human-readable pass label from a pseudo8051-relative file path."""
+    s = short
+    if "handlers/" in s:
+        return "Lift"
+    if "passes/annotate" in s:
+        return "Annotation"
+    if "passes/rmw" in s:
+        return "RMW"
+    if "passes/chunk_inline" in s:
+        return "ChunkInline"
+    if "passes/switch" in s:
+        return "Switch"
+    if "passes/ifelse" in s:
+        return "IfElse"
+    if "passes/jmptable" in s:
+        return "JmpTable"
+    if "typesimplify/_propagate" in s:
+        return "Propagation"
+    if "typesimplify/_setup_fold" in s:
+        return "SetupFold"
+    if "typesimplify/_simplify" in s:
+        return "Simplifier"
+    if "typesimplify/_post" in s:
+        return "PostProcess"
+    if "typesimplify/_return_fold" in s:
+        return "ReturnFold"
+    if "typesimplify/" in s:
+        return "Simplifier"
+    if "passes/patterns/" in s:
+        base = s.rsplit("/", 1)[-1].replace(".py", "")
+        return f"Pattern:{base}"
+    if "ir/basicblock" in s:
+        return "InitialHIR"
+    if "ir/function" in s:
+        return "Function"
+    return ""
+
+
+def _node_creator() -> str:
+    """Return 'pass @ pseudo8051/…/file.py:lineno' for the first call-stack frame outside ir/hir/.
+
+    Called from HIRNode.__init__; walks up past any subclass __init__ chains that
+    live inside ir/hir/ to find the first external creator (handler, pattern, pass, …).
+    """
+    frame = _sys._getframe(2)   # skip _node_creator → HIRNode.__init__ → start here
+    while frame is not None:
+        fn = _os.path.normpath(_os.path.abspath(frame.f_code.co_filename)) + _os.sep
+        if not fn.startswith(_HIR_DIR):
+            break
+        frame = frame.f_back
+    if frame is None:
+        return "unknown"
+    fn = frame.f_code.co_filename.replace("\\", "/")
+    idx = fn.rfind("pseudo8051/")
+    short = fn[idx:] if idx >= 0 else _os.path.basename(fn)
+    loc = f"{short}:{frame.f_lineno}"
+    label = _pass_name(short)
+    return f"{label} @ {loc}" if label else loc
 
 if TYPE_CHECKING:
     from pseudo8051.passes.patterns._utils import VarInfo, TypeGroup
@@ -83,6 +149,7 @@ class HIRNode(ABC):
         self.ea           = ea
         self.source_nodes: List["HIRNode"] = []   # immediate inputs; empty = leaf from IDA
         self.ann: Optional[NodeAnnotation] = None
+        self._creator: str = _node_creator()
 
     @property
     def src_eas(self) -> frozenset:

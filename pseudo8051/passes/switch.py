@@ -1167,7 +1167,7 @@ class SwitchBodyAbsorber(OptimizationPass):
                     if merge_blk and not getattr(merge_blk, "_absorbed", False):
                         merge_hir = [n for n in merge_blk.hir
                                      if not isinstance(n, Label)]
-                        ext_body = ext_body + merge_hir
+                        ext_body = ext_body + _copy.deepcopy(merge_hir)
                         dbg("switch", f"  _get_body: appended merge {arm_ml!r} "
                                       f"to ext copy of {label!r}")
                 ext_copy_cache[label] = ext_body
@@ -1232,9 +1232,10 @@ class SwitchBodyAbsorber(OptimizationPass):
                     if arm_ml and _needs_break(sub_hir):
                         merge_blk = label_to_block.get(arm_ml)
                         if merge_blk and not getattr(merge_blk, "_absorbed", False):
+                            import copy as _copy
                             merge_hir = [n for n in merge_blk.hir
                                          if not isinstance(n, Label)]
-                            sub_hir = sub_hir + merge_hir
+                            sub_hir = sub_hir + _copy.deepcopy(merge_hir)
                             dbg("switch", f"  SwitchBodyAbsorber: appended merge "
                                           f"{arm_ml!r} to ext copy of {blk_label!r}")
                     ext_copy_cache[blk_label] = sub_hir

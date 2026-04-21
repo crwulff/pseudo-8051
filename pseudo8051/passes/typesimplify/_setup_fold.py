@@ -13,7 +13,7 @@ from pseudo8051.ir.hir import (HIRNode, Assign, CompoundAssign, ExprStmt,
                                 ReturnStmt, IfGoto, IfNode, WhileNode, ForNode,
                                 DoWhileNode, SwitchNode, TypedAssign,
                                 GotoStatement, Label, BreakStmt, ContinueStmt)
-from pseudo8051.ir.expr import (Expr, Const, Call, BinOp, Paren,
+from pseudo8051.ir.expr import (Expr, Const, Call, BinOp, Paren, XRAMRef,
                                  Reg as RegExpr, Regs as RegsExpr,
                                  RegGroup as RegGroupExpr, Name as NameExpr)
 from pseudo8051.passes.patterns._utils import TypeGroup, VarInfo, _count_reg_uses_in_node, _subst_reg_in_node, _const_str
@@ -36,6 +36,26 @@ def _resolve_const(expr: Expr, node: HIRNode) -> Expr:
 
 
 # ── Predicates ────────────────────────────────────────────────────────────────
+
+def _references_xram_const(node: HIRNode, val: int) -> bool:
+    """True if node (or a direct source_node) has XRAMRef(Const(val)) as lhs.
+
+    Used to link pruned DPTR=Const(k) nodes back to XRAM writes whose address
+    was folded from DPTR's constant value at lift time (so the XRAM node uses
+    XRAMRef(Const(k)) directly rather than XRAMRef(Reg('DPTR'))).
+    """
+    def _check(n: HIRNode) -> bool:
+        return (isinstance(n, Assign)
+                and isinstance(n.lhs, XRAMRef)
+                and isinstance(n.lhs.inner, Const)
+                and n.lhs.inner.value == val)
+    if _check(node):
+        return True
+    for sn in getattr(node, 'source_nodes', []):
+        if _check(sn):
+            return True
+    return False
+
 
 def _is_call_setup_assign(node: HIRNode) -> bool:
     """True for Assign(Reg/RegGroup, Name/Const) — a consolidated register-setup node."""
@@ -187,6 +207,22 @@ def _fold_and_prune_setups(nodes: List[HIRNode],
                         if rhs_name in _collect_hir_name_refs([work[j]]):
                             work[j].source_nodes = [node] + list(
                                 work[j].source_nodes or [work[j]])
+                            break
+                elif (isinstance(node.rhs, Const)
+                        and isinstance(node.lhs, RegsExpr)
+                        and node.lhs.name == 'DPTR'):
+                    # DPTR = Const(k): the XRAM handler may have already folded
+                    # DPTR's value into XRAMRef(Const(k)) at lift time, so the
+                    # XRAM node no longer references 'DPTR' by name.  Find the
+                    # first downstream node whose lhs (or a direct source lhs)
+                    # is XRAMRef(Const(k)) and attach this node as provenance.
+                    dptr_val = node.rhs.value
+                    for j in range(i + 1, len(work)):
+                        wj = work[j]
+                        if _references_xram_const(wj, dptr_val):
+                            if node not in wj.source_nodes:
+                                wj.source_nodes = [node] + list(
+                                    wj.source_nodes or [wj])
                             break
                 continue
             live_lhs = lhs_regs & all_downstream

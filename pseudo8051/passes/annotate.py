@@ -9,11 +9,13 @@ Annotates each HIR node with:
   - callee_args:  callee TypeGroup list stored on the call node itself
 """
 
+import copy
 from typing import Dict, List, Optional, Tuple
 
 from pseudo8051.ir.hir     import (HIRNode, NodeAnnotation, Assign, CompoundAssign,
                                     ExprStmt)
-from pseudo8051.ir.expr    import Reg, Regs as RegExpr, XRAMRef, Name as NameExpr
+from pseudo8051.ir.expr    import (Reg, Regs as RegExpr, XRAMRef, IRAMRef, CROMRef,
+                                    Name as NameExpr, Const as ConstExpr)
 from pseudo8051.passes     import OptimizationPass
 from pseudo8051.constants  import PARAM_REG_ORDER, DEBUG, dbg
 from pseudo8051.passes.patterns._utils import _canonicalize_expr
@@ -114,6 +116,24 @@ def _meet_exprs(pred_exits: List[dict]) -> dict:
         exprs = [d[k] for d in pred_exits]
         if all(e == exprs[0] for e in exprs[1:]):
             result[k] = exprs[0]
+    return result
+
+
+def _meet_reg_defs(pred_exits: List[Dict]) -> Dict:
+    """Intersect predecessor reg_def_nodes: keep r→node only when all preds agree (same object).
+
+    Unprocessed predecessors (back edges on first fixpoint pass) are skipped —
+    they are treated as "top" (agree with everything) so the first pass
+    propagates information optimistically.  Subsequent passes include them,
+    dropping any register whose last-writer differs across paths.
+    """
+    if not pred_exits:
+        return {}
+    result = {}
+    first = pred_exits[0]
+    for reg, node in first.items():
+        if all(pe.get(reg) is node for pe in pred_exits[1:]):
+            result[reg] = node
     return result
 
 
@@ -369,6 +389,36 @@ def _dump_annotated_hir(func) -> None:
                 print(f"[pseudo8051:annotate]       callee:   {parts}")
 
 
+def _folded_addr_consts(node: HIRNode) -> List[int]:
+    """Return the list of constant values used as folded-in addresses in this node.
+
+    Scans lhs and rhs of Assign/CompoundAssign and expr of ExprStmt for
+    XRAMRef/IRAMRef/CROMRef nodes whose inner expression is a Const.
+    Each such Const value is returned so the caller can look up which register
+    had that value and link the defining node as a provenance source.
+    """
+    results: List[int] = []
+
+    def _scan(expr) -> None:
+        if expr is None:
+            return
+        if isinstance(expr, (XRAMRef, IRAMRef, CROMRef)):
+            if isinstance(expr.inner, ConstExpr):
+                results.append(expr.inner.value)
+            else:
+                _scan(expr.inner)
+            return
+        for child in getattr(expr, 'children', lambda: [])():
+            _scan(child)
+
+    if isinstance(node, (Assign, CompoundAssign)):
+        _scan(node.lhs)
+        _scan(node.rhs)
+    elif isinstance(node, ExprStmt):
+        _scan(node.expr)
+    return results
+
+
 # ── Pass ───────────────────────────────────────────────────────────────────────
 
 class AnnotationPass(OptimizationPass):
@@ -424,7 +474,38 @@ class AnnotationPass(OptimizationPass):
         xram_call_sites: List[Tuple] = []         # (nodes, idx, xp_map)
         retval_count = 0                          # number of seeded return values so far
 
-        for block in _rpo(func):
+        # ── Phase 0: compute stable reg_def_nodes entry/exit states via fixpoint ──
+        # At CFG merge points, only keep reg_def_nodes entries that are identical
+        # (same HIR node object, is-comparison) on ALL processed incoming paths.
+        # Unprocessed back-edge predecessors are treated as "top" (skipped) on the
+        # first pass so information propagates optimistically; subsequent passes
+        # include them and drop any register whose last-writer differs across paths.
+        # Iteration terminates because the meet only removes entries (monotone).
+        rpo_order = _rpo(func)
+        block_exit_reg_defs: Dict[int, Dict[str, HIRNode]] = {}
+        _fixpt_changed = True
+        while _fixpt_changed:
+            _fixpt_changed = False
+            for _blk in rpo_order:
+                _preds = _blk.predecessors
+                _pred_exits = [block_exit_reg_defs[p.start_ea]
+                               for p in _preds if p.start_ea in block_exit_reg_defs]
+                if _blk.start_ea == func.entry_block.start_ea:
+                    _entry_defs: Dict[str, HIRNode] = {}
+                elif _pred_exits:
+                    _entry_defs = _meet_reg_defs(_pred_exits)
+                else:
+                    _entry_defs = {}
+                _exit_defs = dict(_entry_defs)
+                for _node in _blk.hir:
+                    for _r in _node.written_regs | _node.possibly_killed():
+                        _exit_defs[_r] = _node
+                _old = block_exit_reg_defs.get(_blk.start_ea)
+                if _old is None or _old != _exit_defs:
+                    block_exit_reg_defs[_blk.start_ea] = _exit_defs
+                    _fixpt_changed = True
+
+        for block in rpo_order:
             # Compute entry groups from predecessor exits
             preds = block.predecessors
             pred_exits = [block_exit_groups[p.start_ea]
@@ -436,6 +517,18 @@ class AnnotationPass(OptimizationPass):
                 groups = _meet_groups(pred_exits)
             else:
                 groups = []
+
+            # reg_def_nodes: per-block entry state from stable fixpoint meet.
+            # Only registers whose last-writer is identical on every processed
+            # predecessor path survive to this block; the rest are dropped.
+            _pred_def_exits = [block_exit_reg_defs[p.start_ea]
+                               for p in preds if p.start_ea in block_exit_reg_defs]
+            if block.start_ea == func.entry_block.start_ea:
+                reg_def_nodes: Dict[str, HIRNode] = {}
+            elif _pred_def_exits:
+                reg_def_nodes = _meet_reg_defs(_pred_def_exits)
+            else:
+                reg_def_nodes = {}
 
             # Initial const_state from block-entry CP state
             cp = getattr(block, "cp_entry", None)
@@ -453,6 +546,7 @@ class AnnotationPass(OptimizationPass):
 
             nodes = block.hir
             for idx, node in enumerate(nodes):
+
                 # (a) Inject custom register annotations at this instruction EA
                 user_tgs = []
                 for ra in _reg_anns.get(getattr(node, 'ea', None) or 0, []):
@@ -462,6 +556,42 @@ class AnnotationPass(OptimizationPass):
                         groups = _kill_groups(groups, r)
                     groups.append(tg)
                     user_tgs.append(tg)
+
+                # Register provenance: link the defining node for any register whose
+                # value is no longer directly visible in the output expression.
+                #
+                # Case 1 — constant-folded address: a register's value was folded
+                #   into a XRAMRef/IRAMRef/CROMRef Const inner, so the register
+                #   name is gone from the expression.  Link whatever last defined
+                #   that register so the address computation stays traceable.
+                #
+                # Case 2 — ExprStmt register reads: ExprStmt nodes (e.g. DPTR++)
+                #   both read and write a register.  The old value is consumed
+                #   (merged) to produce the new value, and no downstream fusion
+                #   pattern will capture the previous-writer provenance.  For Assign
+                #   nodes we skip this: explicit register reads are either still
+                #   visible in the rendered expression or will be captured by the
+                #   fusion pattern that consumes them (e.g. MOV A + MOVX → fused).
+                _linked: set = set()
+                for _addr_val in _folded_addr_consts(node):
+                    for _reg, _val in const_state.items():
+                        if _val == _addr_val and _reg in reg_def_nodes:
+                            _src = reg_def_nodes[_reg]
+                            if id(_src) not in _linked:
+                                # Shallow-copy to freeze source_nodes at this point:
+                                # later passes may prepend to _src.source_nodes via
+                                # assignment, but the copy retains the current list.
+                                node.source_nodes = [copy.copy(_src)] + list(node.source_nodes)
+                                _linked.add(id(_src))
+
+                if isinstance(node, ExprStmt):
+                    for _reg in node.name_refs():
+                        if _reg in reg_def_nodes:
+                            _src = reg_def_nodes[_reg]
+                            if id(_src) not in _linked:
+                                node.source_nodes = [copy.copy(_src)] + list(node.source_nodes)
+                                _linked.add(id(_src))
+
 
                 # (b) Snapshot annotation
                 ann = NodeAnnotation()
@@ -637,6 +767,11 @@ class AnnotationPass(OptimizationPass):
 
                 # (e) Forward-propagate new constant produced by this node
                 _propagate_const(node, const_state)
+
+                # Update register provenance tracker for all registers written
+                # or side-effected by this node.
+                for _reg in node.written_regs | node.possibly_killed():
+                    reg_def_nodes[_reg] = node
 
                 # (f) Track defining expression for single-register assigns/compound-assigns
                 if (isinstance(node, Assign)
