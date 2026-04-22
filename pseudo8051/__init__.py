@@ -67,6 +67,38 @@ _DP_INSIDE = getattr(ida_kernwin, 'DP_INSIDE', 5)
 
 _BASE_TITLE = "8051 Pseudocode"
 
+def _get_insn_comment(ea: int) -> str:
+    """Return the user-visible comment for instruction ea, or '' if none.
+
+    Tries in order:
+      1. idc.get_cmt(ea, 0) — regular comment directly at ea
+      2. idc.get_cmt(ea, 1) — repeatable comment directly at ea
+      3. If ea has a code reference to a function start, the callee's
+         repeatable comment — this surfaces comments written on function
+         definitions that IDA shows at call sites in the disassembly view.
+    """
+    cmt0 = idc.get_cmt(ea, 0)
+    cmt1 = idc.get_cmt(ea, 1)
+    print(f"[cmt] ea={hex(ea)} cmt0={cmt0!r} cmt1={cmt1!r}")
+    cmt = cmt0 or cmt1
+    if cmt:
+        print(f"[cmt] -> direct comment at {hex(ea)}: {cmt!r}")
+        return cmt
+    try:
+        import ida_xref, ida_funcs, idautils
+        for callee_ea in idautils.CodeRefsFrom(ea, flow=False):
+            print(f"[cmt] ea={hex(ea)} callee_ea={hex(callee_ea)}")
+            fn = ida_funcs.get_func(callee_ea)
+            print(f"[cmt] fn={fn} fn.start_ea={hex(fn.start_ea) if fn else 'None'}")
+            if fn is not None and fn.start_ea == callee_ea:
+                cmt = idc.get_func_cmt(callee_ea, 1) or idc.get_cmt(callee_ea, 1)
+                print(f"[cmt] callee repeatable comment: {cmt!r}")
+                if cmt:
+                    return cmt
+    except Exception as e:
+        print(f"[cmt] exception: {e}")
+    return ''
+
 from pseudo8051.ir.function import Function
 from pseudo8051.locals      import set_local, del_local, list_locals          # noqa: F401
 from pseudo8051.xram_params import set_xram_param, del_xram_param, list_xram_params  # noqa: F401
@@ -227,10 +259,38 @@ class PseudocodeViewer(ida_kernwin.simplecustviewer_t):
 
         annotate = getattr(self, '_annotate_nodes', False)
         vline = 0   # actual viewer line counter (differs from i when annotating)
+        _cmt_shown: set = set()   # EAs whose IDA comment has already been emitted
         for i, (ea, text) in enumerate(lines):
             self._ea_map[vline] = ea
-            self.AddLine(text)
-            vline += 1
+            # Append IDA comment (regular or repeatable) to the first line for
+            # this EA.  Multi-line comments produce extra indented viewer lines.
+            # Also check src_eas of the HIR node so that folded instructions
+            # (e.g. lcall absorbed into an assignment) surface their comments.
+            cmt_lines = []
+            chain = self._node_map.get(i)
+            _eas_to_check = [ea]
+            if chain:
+                _node = chain[-1]
+                for _src_ea in sorted(getattr(_node, 'src_eas', frozenset())):
+                    if _src_ea not in _eas_to_check:
+                        _eas_to_check.append(_src_ea)
+            for _check_ea in _eas_to_check:
+                if _check_ea not in _cmt_shown:
+                    raw = _get_insn_comment(_check_ea)
+                    if raw:
+                        _cmt_shown.add(_check_ea)
+                        cmt_lines = raw.splitlines()
+                        break
+            if cmt_lines:
+                self.AddLine(f"{text}  // {cmt_lines[0]}")
+                vline += 1
+                for extra in cmt_lines[1:]:
+                    self._ea_map[vline] = ea
+                    self.AddLine(f"  // {extra}")
+                    vline += 1
+            else:
+                self.AddLine(text)
+                vline += 1
             if annotate:
                 chain = self._node_map.get(i)
                 if chain:
