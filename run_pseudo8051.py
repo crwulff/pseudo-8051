@@ -20,6 +20,7 @@ if _scripts_dir not in sys.path:
 # Reload order: leaves → roots (each module reloaded after its dependencies).
 _RELOAD_ORDER = [
     "pseudo8051.constants",
+    "pseudo8051.colorize",
     "pseudo8051.locals",
     "pseudo8051.xram_params",
     "pseudo8051.prototypes",

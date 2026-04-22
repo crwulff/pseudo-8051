@@ -100,6 +100,7 @@ def _get_insn_comment(ea: int) -> str:
     return ''
 
 from pseudo8051.ir.function import Function
+from pseudo8051.colorize    import colorize
 from pseudo8051.locals      import set_local, del_local, list_locals          # noqa: F401
 from pseudo8051.xram_params import set_xram_param, del_xram_param, list_xram_params  # noqa: F401
 from pseudo8051.reganns     import set_regann, del_regann, list_reganns       # noqa: F401
@@ -282,14 +283,14 @@ class PseudocodeViewer(ida_kernwin.simplecustviewer_t):
                         cmt_lines = raw.splitlines()
                         break
             if cmt_lines:
-                self.AddLine(f"{text}  // {cmt_lines[0]}")
+                self.AddLine(colorize(f"{text}  // {cmt_lines[0]}"))
                 vline += 1
                 for extra in cmt_lines[1:]:
                     self._ea_map[vline] = ea
-                    self.AddLine(f"  // {extra}")
+                    self.AddLine(colorize(f"  // {extra}"))
                     vline += 1
             else:
-                self.AddLine(text)
+                self.AddLine(colorize(text))
                 vline += 1
             if annotate:
                 chain = self._node_map.get(i)
