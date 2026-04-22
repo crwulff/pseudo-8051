@@ -128,6 +128,10 @@ class Function:
         # ── Fix return statements using prototype ─────────────────────────
         self._fix_return_statements()
 
+        # ── CJNE chain → switch (runs on assembled func.hir) ─────────────
+        from pseudo8051.passes.cjne_switch import CJNEChainToSwitch
+        CJNEChainToSwitch().run(self)
+
         # ── Type-aware simplification (runs on assembled func.hir) ────────
         from pseudo8051.passes.typesimplify import TypeAwareSimplifier
         TypeAwareSimplifier().run(self)

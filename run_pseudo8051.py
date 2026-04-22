@@ -77,6 +77,7 @@ _RELOAD_ORDER = [
     "pseudo8051.passes.jmptable",
     "pseudo8051.passes.switch",
     "pseudo8051.passes.ifelse",
+    "pseudo8051.passes.cjne_switch",
     "pseudo8051.passes.patterns.base",
     "pseudo8051.passes.patterns._utils",
     "pseudo8051.passes.patterns.sign_bit",
