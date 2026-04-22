@@ -283,11 +283,12 @@ class PseudocodeViewer(ida_kernwin.simplecustviewer_t):
                         cmt_lines = raw.splitlines()
                         break
             if cmt_lines:
+                cmt_indent = ' ' * (len(text) + 2)
                 self.AddLine(colorize(f"{text}  // {cmt_lines[0]}"))
                 vline += 1
                 for extra in cmt_lines[1:]:
                     self._ea_map[vline] = ea
-                    self.AddLine(colorize(f"  // {extra}"))
+                    self.AddLine(colorize(f"{cmt_indent}// {extra}"))
                     vline += 1
             else:
                 self.AddLine(colorize(text))
