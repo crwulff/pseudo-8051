@@ -594,7 +594,7 @@ def _simplify(nodes: List[HIRNode], reg_map: Dict[str, VarInfo]) -> List[HIRNode
     # Update reg_map in-place with final extra_groups state so that downstream
     # passes (_simplify_once, _fold_call_arg_pairs, etc.) see retval/param names.
     for k in [k for k, v in reg_map.items()
-              if isinstance(v, VarInfo) and not v.xram_sym]:
+              if isinstance(v, VarInfo) and not v.xram_sym and not v.iram_addr]:
         del reg_map[k]
     for tg in extra_groups:
         if tg.xram_sym:

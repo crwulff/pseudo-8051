@@ -13,10 +13,11 @@ from pseudo8051.constants import PARAM_REG_ORDER
 from pseudo8051.passes.typesimplify._regmap   import (
     _build_reg_map, _augment_with_local_vars, _augment_with_callee_regs,
     _augment_with_xram_params, _augment_with_callee_xram_params,
+    _augment_with_iram_local_vars,
 )
 from pseudo8051.passes.typesimplify._simplify import _simplify, _simplify_once
 from pseudo8051.passes.typesimplify._post     import (
-    _consolidate_xram_local_loads, _collapse_dpl_dph,
+    _consolidate_xram_local_loads, _collapse_dpl_dph, _subst_iram_in_hir,
     _collapse_dpl_dph_arithmetic,
     _fold_and_prune_setups, _fold_call_arg_pairs, _propagate_values,
     _simplify_carry_comparison, _simplify_cjne_jnc,
@@ -68,6 +69,7 @@ class TypeAwareSimplifier(OptimizationPass):
 
         reg_map = _augment_with_local_vars(func.ea, reg_map)
         reg_map = _augment_with_xram_params(func.ea, reg_map)
+        reg_map = _augment_with_iram_local_vars(func.ea, reg_map)
 
         # Fall back to global callee-reg/XRAM scan when AnnotationPass hasn't run
         # (e.g. unit tests that call TypeAwareSimplifier directly).
@@ -95,6 +97,7 @@ class TypeAwareSimplifier(OptimizationPass):
         # type substitution in _simplify.
         func.hir = _collapse_dpl_dph_arithmetic(func.hir)
         func.hir = _subst_xram_in_hir(func.hir, reg_map)
+        func.hir = _subst_iram_in_hir(func.hir, reg_map)
         func.hir = _fold_and_prune_setups(func.hir, reg_map)
         # Remove cross-block nop-gotos in the assembled HIR (IfGoto whose target label
         # is the immediately following node in the flat list).  Must run before
@@ -117,26 +120,37 @@ class TypeAwareSimplifier(OptimizationPass):
         func.hir = _simplify_arithmetic(func.hir)
         func.hir = _collapse_dpl_dph_arithmetic(func.hir)
         func.hir = _subst_xram_in_hir(func.hir, reg_map)
+        func.hir = _subst_iram_in_hir(func.hir, reg_map)
         func.hir = _simplify_acc_bit_test(func.hir)
 
         func.hir = collapse_mb_assigns(func.hir)
 
-        # Prepend C-style declarations for any XRAM local variables.
+        # Prepend C-style declarations for XRAM and IRAM local variables.
         seen: set = set()
-        local_decls = []
+        xram_decls = []
+        iram_decls = []
         for vinfo in reg_map.values():
-            if (isinstance(vinfo, VarInfo)
-                    and vinfo.xram_sym and not vinfo.is_byte_field
-                    and not vinfo.is_param
-                    and vinfo.name not in seen):
+            if not isinstance(vinfo, VarInfo) or vinfo.is_byte_field or vinfo.is_param:
+                continue
+            if vinfo.name in seen:
+                continue
+            if vinfo.xram_sym:
                 seen.add(vinfo.name)
-                local_decls.append(vinfo)
-        if local_decls:
-            local_decls.sort(key=lambda v: v.xram_sym)
-            func.hir = [
-                VarDecl(func.ea, v.type, v.name, v.xram_sym, v.xram_addr)
-                for v in local_decls
-            ] + func.hir
+                xram_decls.append(vinfo)
+            elif vinfo.iram_addr:
+                seen.add(vinfo.name)
+                iram_decls.append(vinfo)
+        decl_nodes = []
+        if xram_decls:
+            xram_decls.sort(key=lambda v: v.xram_sym)
+            decl_nodes += [VarDecl(func.ea, v.type, v.name, v.xram_sym, v.xram_addr)
+                           for v in xram_decls]
+        if iram_decls:
+            iram_decls.sort(key=lambda v: v.iram_addr)
+            decl_nodes += [VarDecl(func.ea, v.type, v.name, iram_addr=v.iram_addr)
+                           for v in iram_decls]
+        if decl_nodes:
+            func.hir = decl_nodes + func.hir
 
         # Fold Assign(ret_reg, expr); ReturnStmt(ret_reg) → ReturnStmt(expr) (issue 1)
         from pseudo8051.prototypes import expand_regs as _expand_regs

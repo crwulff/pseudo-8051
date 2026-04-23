@@ -77,31 +77,25 @@ def _get_insn_comment(ea: int) -> str:
          repeatable comment — this surfaces comments written on function
          definitions that IDA shows at call sites in the disassembly view.
     """
-    cmt0 = idc.get_cmt(ea, 0)
-    cmt1 = idc.get_cmt(ea, 1)
-    print(f"[cmt] ea={hex(ea)} cmt0={cmt0!r} cmt1={cmt1!r}")
-    cmt = cmt0 or cmt1
+    cmt = idc.get_cmt(ea, 0) or idc.get_cmt(ea, 1)
     if cmt:
-        print(f"[cmt] -> direct comment at {hex(ea)}: {cmt!r}")
         return cmt
     try:
-        import ida_xref, ida_funcs, idautils
+        import ida_funcs, idautils
         for callee_ea in idautils.CodeRefsFrom(ea, flow=False):
-            print(f"[cmt] ea={hex(ea)} callee_ea={hex(callee_ea)}")
             fn = ida_funcs.get_func(callee_ea)
-            print(f"[cmt] fn={fn} fn.start_ea={hex(fn.start_ea) if fn else 'None'}")
             if fn is not None and fn.start_ea == callee_ea:
                 cmt = idc.get_func_cmt(callee_ea, 1) or idc.get_cmt(callee_ea, 1)
-                print(f"[cmt] callee repeatable comment: {cmt!r}")
                 if cmt:
                     return cmt
-    except Exception as e:
-        print(f"[cmt] exception: {e}")
+    except Exception:
+        pass
     return ''
 
 from pseudo8051.ir.function import Function
 from pseudo8051.colorize    import colorize
 from pseudo8051.locals      import set_local, del_local, list_locals          # noqa: F401
+from pseudo8051.iram_locals import set_iram_local, del_iram_local, list_iram_locals  # noqa: F401
 from pseudo8051.xram_params import set_xram_param, del_xram_param, list_xram_params  # noqa: F401
 from pseudo8051.reganns     import set_regann, del_regann, list_reganns       # noqa: F401
 from pseudo8051.locals_ui import setup_popup, _register_local_actions

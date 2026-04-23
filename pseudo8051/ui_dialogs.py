@@ -215,6 +215,84 @@ class LocalsTableDialog(_TableDialog):
         return None
 
 
+# ── IRAM Locals dialog ────────────────────────────────────────────────────────
+
+class IRAMLocalsTableDialog(_TableDialog):
+    """
+    Editable table of IRAM local variables for one function.
+
+    Columns: Address | Type | Name
+    """
+
+    def __init__(self, func_ea: int, locals_list, parent=None):
+        try:
+            import ida_funcs
+            fn = ida_funcs.get_func(func_ea)
+            fname = ida_funcs.get_func_name(fn.start_ea) if fn else hex(func_ea)
+        except Exception:
+            fname = hex(func_ea)
+
+        self._func_ea = func_ea
+        super().__init__(f"IRAM Locals — {fname}", parent)
+        self._original = list(locals_list)
+        self._populate(locals_list)
+
+    def _get_column_headers(self) -> List[str]:
+        return ["Address", "Type", "Name"]
+
+    def _populate(self, data) -> None:
+        self._table.setRowCount(0)
+        for lv in data:
+            row = self._table.rowCount()
+            self._table.insertRow(row)
+            self._table.setItem(row, 0, QTableWidgetItem(f"{lv.addr:#04x}"))
+            self._table.setItem(row, 1, QTableWidgetItem(lv.type))
+            self._table.setItem(row, 2, QTableWidgetItem(lv.name))
+        self._table.resizeColumnsToContents()
+
+    def _validate_row(self, row_data: List[str]) -> Optional[str]:
+        addr_s, type_s, name_s = row_data
+        if not addr_s:
+            return "Address is required."
+        try:
+            addr = int(addr_s, 0)
+        except ValueError:
+            return f"Invalid address: {addr_s!r} (use hex like 0x34 or decimal)."
+        if not (0x00 <= addr <= 0xFF):
+            return f"IRAM address must be 0x00–0xFF, got {addr_s!r}."
+        if not type_s:
+            return "Type is required."
+        if not name_s:
+            return "Name is required."
+        return None
+
+    def _sync_changes(self, original, current_rows) -> Optional[str]:
+        from pseudo8051.iram_locals import set_iram_local, del_iram_local
+
+        orig_by_addr: Dict[int, object] = {lv.addr: lv for lv in original}
+
+        new_by_addr: Dict[int, Tuple[str, str]] = {}
+        for addr_s, type_s, name_s in current_rows:
+            try:
+                addr = int(addr_s, 0)
+            except ValueError:
+                return f"Invalid address: {addr_s!r}"
+            if addr in new_by_addr:
+                return f"Duplicate address: {addr_s}"
+            new_by_addr[addr] = (name_s, type_s)
+
+        for old_addr in orig_by_addr:
+            if old_addr not in new_by_addr:
+                del_iram_local(self._func_ea, old_addr)
+
+        for addr, (name, type_str) in new_by_addr.items():
+            old = orig_by_addr.get(addr)
+            if old is None or old.name != name or old.type != type_str:
+                set_iram_local(self._func_ea, addr, name, type_str)
+
+        return None
+
+
 # ── XRAM Parameters dialog ────────────────────────────────────────────────────
 
 class XRAMParamsTableDialog(_TableDialog):

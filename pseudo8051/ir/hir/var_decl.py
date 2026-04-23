@@ -11,12 +11,14 @@ class VarDecl(HIRNode):
     """type name;  — forward declaration of a local variable."""
 
     def __init__(self, ea: int, type_str: str, name: str,
-                 xram_sym: Optional[str] = None, xram_addr: Optional[int] = None):
+                 xram_sym: Optional[str] = None, xram_addr: Optional[int] = None,
+                 iram_addr: Optional[int] = None):
         super().__init__(ea)
         self.type_str  = type_str
         self.name      = name
         self.xram_sym  = xram_sym
         self.xram_addr = xram_addr
+        self.iram_addr = iram_addr
 
     def render(self, indent: int = 0) -> List[Tuple[int, str]]:
         from pseudo8051.passes.patterns._utils import _parse_array_type, _type_bytes
@@ -28,7 +30,14 @@ class VarDecl(HIRNode):
         else:
             type_decl = f"{self.type_str} {self.name}"
             total_bytes = _type_bytes(self.type_str)
-        if self.xram_addr:
+        if self.iram_addr:
+            if total_bytes > 1:
+                end_addr = self.iram_addr + total_bytes - 1
+                comment = (f"  /* IRAM[{hex(self.iram_addr)}"
+                           f"-{hex(end_addr)}] */")
+            else:
+                comment = f"  /* IRAM[{hex(self.iram_addr)}] */"
+        elif self.xram_addr:
             if total_bytes > 1:
                 end_addr = self.xram_addr + total_bytes - 1
                 comment = f"  /* {self.xram_sym} @ {hex(self.xram_addr)}-{hex(end_addr)} */"
@@ -42,4 +51,6 @@ class VarDecl(HIRNode):
         out = ["VarDecl", f"  type: {self.type_str!r}", f"  name: {self.name!r}"]
         if self.xram_sym:
             out.append(f"  xram: {self.xram_sym!r}")
+        if self.iram_addr:
+            out.append(f"  iram: {hex(self.iram_addr)}")
         return out

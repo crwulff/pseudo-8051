@@ -61,6 +61,27 @@ class _RegAnnManageAction(ida_kernwin.action_handler_t):
         return ida_kernwin.AST_ENABLE_ALWAYS
 
 
+class _IRAMLocalManageAction(ida_kernwin.action_handler_t):
+    """Open a table dialog to add/edit/delete IRAM local variables."""
+
+    def activate(self, ctx) -> int:
+        from pseudo8051.iram_locals import get_iram_locals
+        from pseudo8051.ui_dialogs  import IRAMLocalsTableDialog
+        from PyQt5.QtWidgets        import QApplication, QDialog
+        func_ea = _popup_ctx["func_ea"]
+        viewer  = _popup_ctx["viewer"]
+        if not func_ea:
+            return 1
+        dlg = IRAMLocalsTableDialog(func_ea, get_iram_locals(func_ea),
+                                    parent=QApplication.activeWindow())
+        if dlg.exec_() == QDialog.Accepted and viewer is not None:
+            viewer.Show(func_ea)
+        return 1
+
+    def update(self, ctx) -> int:
+        return ida_kernwin.AST_ENABLE_ALWAYS
+
+
 class _XRAMParamManageAction(ida_kernwin.action_handler_t):
     """Open a table dialog to add/edit/delete XRAM parameters."""
 
@@ -142,6 +163,9 @@ def setup_popup(form, popup_handle,
                                        "pseudo8051:local_manage",
                                        "XRAM locals/")
     ida_kernwin.attach_action_to_popup(form, popup_handle,
+                                       "pseudo8051:iram_local_manage",
+                                       "IRAM locals/")
+    ida_kernwin.attach_action_to_popup(form, popup_handle,
                                        "pseudo8051:xram_param_manage",
                                        "XRAM parameters/")
     ida_kernwin.attach_action_to_popup(form, popup_handle,
@@ -170,6 +194,7 @@ def _register_local_actions() -> None:
     """Register (or re-register after a reload) the UI actions."""
     _defs = [
         ("pseudo8051:local_manage",      "Manage\u2026",          _LocalManageAction()),
+        ("pseudo8051:iram_local_manage", "Manage\u2026",          _IRAMLocalManageAction()),
         ("pseudo8051:xram_param_manage", "Manage\u2026",          _XRAMParamManageAction()),
         ("pseudo8051:regann_manage",     "Manage\u2026",          _RegAnnManageAction()),
         ("pseudo8051:toggle_hex",        "View constants as decimal", _HexToggleAction()),

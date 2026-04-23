@@ -79,3 +79,30 @@ def _subst_xram_in_hir(nodes, reg_map):
                 patched = patched.copy_meta_to(Assign(patched.ea, new_lhs, patched.rhs))
         result.append(patched.map_bodies(_visit))
     return result
+
+
+def _subst_iram_in_hir(nodes, reg_map):
+    """Walk the HIR and apply _subst_iram_in_expr to every expression.
+
+    Handles both RHS reads and IRAMRef LHS write positions so that
+    IRAM[addr] = expr becomes local_name = expr as well.
+    """
+    from pseudo8051.passes.patterns._utils import _subst_iram_in_expr, _apply_expr_subst_to_node
+    from pseudo8051.ir.hir import Assign
+    from pseudo8051.ir.expr import IRAMRef
+
+    def _subst_fn(e):
+        return _subst_iram_in_expr(e, reg_map)
+
+    def _visit(ns):
+        return _subst_iram_in_hir(ns, reg_map)
+
+    result = []
+    for node in nodes:
+        patched = _apply_expr_subst_to_node(node, _subst_fn)
+        if isinstance(patched, Assign) and isinstance(patched.lhs, IRAMRef):
+            new_lhs = _subst_fn(patched.lhs)
+            if new_lhs is not patched.lhs:
+                patched = patched.copy_meta_to(Assign(patched.ea, new_lhs, patched.rhs))
+        result.append(patched.map_bodies(_visit))
+    return result

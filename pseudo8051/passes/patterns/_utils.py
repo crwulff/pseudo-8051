@@ -15,7 +15,7 @@ from typing import Callable, Dict, FrozenSet, List, Optional, Tuple
 from pseudo8051.ir.hir import (HIRNode, Assign, TypedAssign, CompoundAssign,  # noqa: F401
                                ExprStmt, ReturnStmt, IfGoto, IfNode, SwitchNode)
 from pseudo8051.ir.expr import (  # noqa: F401
-    Expr, Reg, Regs, Const, Name, XRAMRef, RegGroup, ArrayRef, BinOp, UnaryOp,
+    Expr, Reg, Regs, Const, Name, XRAMRef, IRAMRef, RegGroup, ArrayRef, BinOp, UnaryOp,
 )
 
 
@@ -136,14 +136,16 @@ class VarInfo:
     def __init__(self, name: str, type_str: str, regs: Tuple[str, ...],
                  xram_sym: str = "", is_byte_field: bool = False,
                  xram_addr: int = 0, is_param: bool = False,
-                 array_size: int = 0, elem_type: str = ""):
+                 array_size: int = 0, elem_type: str = "",
+                 iram_addr: int = 0):
         self.name          = name
         self.type          = type_str
-        self.regs          = regs              # high → low order, e.g. ('R6', 'R7'); () for XRAM locals
-        self.pair_name     = "".join(regs)     # e.g. 'R6R7'; '' for XRAM locals
+        self.regs          = regs              # high → low order, e.g. ('R6', 'R7'); () for XRAM/IRAM locals
+        self.pair_name     = "".join(regs)     # e.g. 'R6R7'; '' for XRAM/IRAM locals
         self.xram_sym      = xram_sym          # XRAM base address symbol, e.g. 'EXT_DC8A'; '' for reg vars
-        self.is_byte_field = is_byte_field     # True for per-byte entries of multi-byte XRAM locals
-        self.xram_addr     = xram_addr         # raw integer XRAM address (0 for register vars)
+        self.is_byte_field = is_byte_field     # True for per-byte entries of multi-byte locals
+        self.xram_addr     = xram_addr         # raw integer XRAM address (0 for non-XRAM vars)
+        self.iram_addr     = iram_addr         # raw integer IRAM address (0 for non-IRAM vars)
         self.is_param      = is_param          # True only for params from the current function's proto
         self.array_size    = array_size        # >0 for array locals (e.g. uint8_t[6] → 6)
         self.elem_type     = elem_type         # element type for arrays (e.g. 'uint8_t')
@@ -608,9 +610,31 @@ def _subst_xram_in_expr(expr: Expr, reg_map: Dict[str, "VarInfo"]) -> Expr:
     return _walk_expr(expr, _fn)
 
 
+def _subst_iram_in_expr(expr: Expr, reg_map: Dict[str, "VarInfo"]) -> Expr:
+    """Replace IRAMRef(Const(addr)) → Name(local_var_name)."""
+    addr_map: Dict[int, str] = {}
+    for vinfo in reg_map.values():
+        if not isinstance(vinfo, VarInfo) or not vinfo.iram_addr:
+            continue
+        addr_map[vinfo.iram_addr] = vinfo.name
+
+    if not addr_map:
+        return expr
+
+    def _fn(e: Expr) -> Expr:
+        if isinstance(e, IRAMRef) and isinstance(e.inner, Const):
+            name = addr_map.get(e.inner.value)
+            if name is not None:
+                return Name(name)
+        return e
+
+    return _walk_expr(expr, _fn)
+
+
 def _subst_all_expr(expr: Expr, reg_map: Dict[str, "VarInfo"]) -> Expr:
-    """Apply all three substitutions to an Expr tree."""
+    """Apply all substitutions to an Expr tree."""
     expr = _subst_xram_in_expr(expr, reg_map)
+    expr = _subst_iram_in_expr(expr, reg_map)
     expr = _subst_pairs_in_expr(expr, reg_map)
     expr = _subst_single_regs_in_expr(expr, reg_map)
     return expr

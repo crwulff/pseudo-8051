@@ -25,7 +25,7 @@ def _build_type_groups(proto: FuncProto,
     seen: dict = {}  # id(vi) -> TypeGroup
     result = []
     for vi in reg_map.values():
-        if not isinstance(vi, VarInfo) or vi.xram_sym:
+        if not isinstance(vi, VarInfo) or vi.xram_sym or vi.iram_addr:
             continue
         if id(vi) not in seen:
             tg = TypeGroup(vi.name, vi.type, vi.regs,
@@ -355,6 +355,32 @@ def _augment_with_callee_xram_params(hir: List[HIRNode],
                     if bkey not in result:
                         result[bkey] = VarInfo(byte_name, "uint8_t", (),
                                                xram_sym=byte_sym, is_byte_field=True)
+    return result
+
+
+def _augment_with_iram_local_vars(func_ea: int,
+                                   reg_map: Dict[str, VarInfo]) -> Dict[str, VarInfo]:
+    """Add VarInfo entries for IRAM local variables declared for this function."""
+    from pseudo8051.iram_locals import get_iram_locals
+    iram_list = get_iram_locals(func_ea)
+    if not iram_list:
+        return reg_map
+    result = dict(reg_map)
+    for lv in iram_list:
+        key = f"_iram_{lv.addr:#04x}"
+        if key not in result:
+            result[key] = VarInfo(lv.name, lv.type, (), iram_addr=lv.addr)
+            dbg("typesimp", f"  iram local: {lv.name} ({lv.type}) @ IRAM[{lv.addr:#04x}]")
+        n = _type_bytes(lv.type)
+        if n > 1:
+            bnames = _byte_names(lv.name, n)
+            for k, byte_name in enumerate(bnames):
+                byte_addr = lv.addr + k
+                bkey = f"_iram_{byte_addr:#04x}_byte"
+                if bkey not in result:
+                    result[bkey] = VarInfo(byte_name, "uint8_t", (),
+                                           iram_addr=byte_addr, is_byte_field=True)
+                    dbg("typesimp", f"  iram local byte: {byte_name} @ IRAM[{byte_addr:#04x}]")
     return result
 
 
