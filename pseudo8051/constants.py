@@ -105,3 +105,29 @@ def resolve_ext_addr(dptr_val: int) -> str:
     ea = seg.start_ea + (dptr_val & 0xFFFF)
     name = ida_name.get_name(ea)
     return name if name else hex(dptr_val)
+
+
+# Common IDA names for the 8051 internal-RAM segment.
+_IRAM_SEG_NAMES = ("INT", "RAM", "IRAM", "INT_MEM")
+
+def _iram_segment():
+    """Return the IDA segment object for internal RAM, or None."""
+    for sname in _IRAM_SEG_NAMES:
+        seg = ida_segment.get_segm_by_name(sname)
+        if seg is not None:
+            return seg
+    return None
+
+
+def resolve_iram_addr(addr: int) -> str:
+    """
+    Map an 8-bit IRAM address to a name in the internal-RAM segment.
+    Returns the IDA symbol name if one exists in the IRAM segment,
+    otherwise None (caller should fall back to a hex literal).
+    """
+    seg = _iram_segment()
+    if seg is None:
+        return None
+    ea = seg.start_ea + (addr & 0xFF)
+    name = ida_name.get_name(ea)
+    return name if name else None

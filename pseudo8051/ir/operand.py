@@ -14,7 +14,7 @@ import idc
 from pseudo8051.constants import (
     SFR_NAMES, REG_DPTR,
     PHRASE_AT_R0, PHRASE_AT_R1, PHRASE_AT_DPTR, PHRASE_AT_A_DPTR,
-    PARAM_REGS, resolve_ext_addr,
+    PARAM_REGS, resolve_ext_addr, resolve_iram_addr,
 )
 from pseudo8051.ir.expr import (
     Expr, Reg, Const, Name, XRAMRef, IRAMRef, CROMRef, BinOp,
@@ -141,7 +141,7 @@ class Operand:
                 return Reg(sfr)
             if addr <= 7:
                 return Reg(f"R{addr}")
-            iname = ida_name.get_name(op.addr) or None
+            iname = resolve_iram_addr(addr)
             return IRAMRef(Const(addr, alias=iname))
 
         if op.type == ida_ua.o_phrase:
