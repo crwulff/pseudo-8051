@@ -51,6 +51,55 @@ def _invert_cond(cond):
     return _invert_condition(cond)
 
 
+def _promote_while1_nodes(nodes: list) -> list:
+    """
+    Recursively walk a HIR node list and promote:
+        while (1) { if (exit_cond) break; ...body... }
+    to:
+        while (!exit_cond) { ...body... }
+
+    Only fires when the first body statement is an IfNode with a single
+    BreakStmt then-branch and no else-branch (i.e. exactly the guard
+    pattern emitted by LoopStructurer for header_stmts loops).
+    """
+    result = []
+    for node in nodes:
+        # Recurse into child bodies first
+        node = _promote_while1_in_node(node)
+        result.append(node)
+    return result
+
+
+def _promote_while1_in_node(node: HIRNode) -> HIRNode:
+    """Apply the while(1){if(cond)break;body} → while(!cond){body} promotion
+    recursively through a single node's child bodies."""
+    from pseudo8051.ir.hir import WhileNode, IfNode, BreakStmt
+
+    # Recurse into child bodies (IfNode branches, nested loops, etc.)
+    for _extra, body in node.child_body_groups():
+        promoted = _promote_while1_nodes(body)
+        body[:] = promoted
+
+    # Apply promotion to this node if it matches
+    if (isinstance(node, WhileNode)
+            and node.condition == "1"
+            and node.body_nodes
+            and isinstance(node.body_nodes[0], IfNode)):
+        guard = node.body_nodes[0]
+        if (len(guard.then_nodes) == 1
+                and isinstance(guard.then_nodes[0], BreakStmt)
+                and not guard.else_nodes):
+            node.condition = _invert_cond(guard.condition)
+            node.body_nodes = node.body_nodes[1:]
+
+    return node
+
+
+def promote_while1_to_while(func) -> None:
+    """Post-simplification pass: promote while(1){if(cond)break;...} loops."""
+    func.hir = _promote_while1_nodes(func.hir)
+
+
 def _is_djnz_node(node: HIRNode) -> Optional[str]:
     """Return the register name if node is a DJNZ-style conditional, else None."""
     if isinstance(node, IfGoto):
@@ -432,15 +481,30 @@ class LoopStructurer(OptimizationPass):
             label_map = {b.label: b.start_ea for b in func._block_map.values() if b.label}
             target_ea = label_map.get(branch_target)
             is_exit = (target_ea is not None) and (target_ea not in body_eas)
-            if is_exit:
-                cond = _invert_cond(cond)
-            dbg("loops", f"  → WhileNode  cond={cond!r}  exit_inverted={is_exit}")
-            # Body HIR = header_stmts body + loop body
-            loop_node: HIRNode = WhileNode(
-                loop_ea,
-                condition=cond,
-                body_nodes=header_stmts + body_hir,
-            )
+            dbg("loops", f"  → WhileNode  cond={cond!r}  exit={is_exit}  header_stmts={len(header_stmts)}")
+            if is_exit and header_stmts:
+                # Header block contains statements that COMPUTE the exit condition
+                # (e.g. mov/clr/subb before jnc).  The branch tests the result of
+                # those statements, so the while condition is not available at loop
+                # entry — emit  while (1) { header_stmts; if (exit_cond) break; body }
+                break_node = BreakStmt(branch_node.ea)
+                branch_node.copy_meta_to(break_node)
+                guard = IfNode(branch_node.ea, condition=cond,
+                               then_nodes=[break_node], else_nodes=[])
+                loop_node: HIRNode = WhileNode(
+                    loop_ea,
+                    condition="1",
+                    body_nodes=header_stmts + [guard] + body_hir,
+                )
+            else:
+                if is_exit:
+                    cond = _invert_cond(cond)
+                # Body HIR = header_stmts body + loop body
+                loop_node = WhileNode(
+                    loop_ea,
+                    condition=cond,
+                    body_nodes=header_stmts + body_hir,
+                )
             header_stmts = []
             # Try to promote to ForNode if body ends with a condition update
             loop_node = _try_promote_to_for(loop_node)

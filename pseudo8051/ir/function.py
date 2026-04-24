@@ -136,6 +136,10 @@ class Function:
         from pseudo8051.passes.typesimplify import TypeAwareSimplifier
         TypeAwareSimplifier().run(self)
 
+        # ── Promote while(1){if(cond)break;...} → while(!cond){...} ──────
+        from pseudo8051.passes.loops import promote_while1_to_while
+        promote_while1_to_while(self)
+
         # ── Switch case enum annotations ──────────────────────────────────
         from pseudo8051.passes.switchcomment import SwitchCaseAnnotator
         SwitchCaseAnnotator().run(self)
