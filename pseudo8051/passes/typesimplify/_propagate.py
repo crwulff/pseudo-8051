@@ -47,6 +47,28 @@ def _has_xram_const_addr(node: HIRNode, val: int) -> bool:
     return False
 
 
+def _name_possibly_written_in(name: str, node: HIRNode) -> bool:
+    """Return True if any node inside node's bodies may assign to Name(name).
+
+    Used to prevent propagating a Name-lhs value past a structured node
+    (IfNode, WhileNode, etc.) whose branches may redefine that name.
+    """
+    def _check_seq(nodes) -> bool:
+        for n in nodes:
+            lhs = getattr(n, 'lhs', None)
+            if isinstance(lhs, NameExpr) and lhs.name == name:
+                return True
+            for _extra, body in n.child_body_groups():
+                if _check_seq(body):
+                    return True
+        return False
+
+    for _extra, body in node.child_body_groups():
+        if _check_seq(body):
+            return True
+    return False
+
+
 def _expr_name_refs(expr: Expr) -> frozenset:
     """Collect register/name identities referenced in an expression tree.
 
@@ -324,9 +346,15 @@ def _propagate_register_copies(live: List[HIRNode],
                     kill_idx = j
                     break
             else:
-                # Name-lhs kill: another assign to the same Name (re-definition).
+                # Name-lhs kill: another assign to the same Name (re-definition),
+                # either at this level or inside a structured node's bodies.
                 lhs_j = getattr(live[j], 'lhs', None)
                 if isinstance(lhs_j, NameExpr) and lhs_j.name == r:
+                    kill_idx = j
+                    break
+                # Structured nodes (IfNode, WhileNode, etc.) may write the Name
+                # in a branch body — treat as a kill barrier.
+                if _name_possibly_written_in(r, live[j]):
                     kill_idx = j
                     break
 
