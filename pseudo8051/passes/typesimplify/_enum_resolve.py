@@ -62,6 +62,66 @@ def _get_var_type(name: str, reg_map: dict) -> Optional[str]:
     return None
 
 
+def _get_expr_enum_type(expr: Expr, reg_map: dict) -> Optional[str]:
+    """Return the enum type for an expression, handling struct field paths.
+
+    For a Reg node with alias "ptr.ptrType" (where ptrType is a field of struct
+    Ptr with enum type PtrType), walks the struct field path from the parent
+    VarInfo to find the field's enum type.
+    Also handles direct Name/Reg nodes whose own type is already an enum.
+    """
+    reg_name = expr.name          # register name for Regs, variable name for Name
+    alias = getattr(expr, 'alias', None)
+    display = alias or reg_name
+
+    # Direct lookup by register/variable name
+    direct = _get_var_type(reg_name, reg_map)
+    if direct:
+        return direct
+
+    # Direct lookup by display name (covers Name("ptr.ptrType") from XRAM locals)
+    if display != reg_name:
+        direct = _get_var_type(display, reg_map)
+        if direct:
+            return direct
+
+    # Struct field path: "ptr.ptrType" → find "ptr" VarInfo, walk fields to "ptrType"
+    if '.' not in display:
+        return None
+
+    try:
+        from pseudo8051.prototypes import get_struct
+    except ImportError:
+        return None
+
+    parts = display.split('.')
+    for split in range(len(parts) - 1, 0, -1):
+        parent_nm = '.'.join(parts[:split])
+        parent_type = None
+        for v in reg_map.values():
+            if isinstance(v, VarInfo) and v.name == parent_nm:
+                parent_type = v.type
+                break
+        if parent_type is None:
+            continue
+        current_type = parent_type
+        for field_name in parts[split:]:
+            sd = get_struct(current_type)
+            if sd is None:
+                current_type = None
+                break
+            field = next((f for f in sd.fields if f.name == field_name), None)
+            if field is None:
+                current_type = None
+                break
+            current_type = field.type
+        if current_type and is_enum_type(current_type):
+            dbg("enum", f"  _get_expr_enum_type({display!r}): field path → {current_type!r}")
+            return current_type
+
+    return None
+
+
 def _resolve_binop_const(expr: Expr, reg_map: dict) -> Expr:
     """
     For BinOp(Name|Reg, op, Const) or BinOp(Const, op, Name|Reg) where the
@@ -72,14 +132,14 @@ def _resolve_binop_const(expr: Expr, reg_map: dict) -> Expr:
     lhs, op, rhs = expr.lhs, expr.op, expr.rhs
 
     if isinstance(lhs, (NameExpr, RegExpr)) and isinstance(rhs, Const):
-        type_str = _get_var_type(lhs.name, reg_map)
+        type_str = _get_expr_enum_type(lhs, reg_map)
         if type_str:
             new_rhs = _resolve_in_expr(rhs, type_str)
             if new_rhs is not rhs:
                 return BinOp(lhs, op, new_rhs)
 
     if isinstance(rhs, (NameExpr, RegExpr)) and isinstance(lhs, Const):
-        type_str = _get_var_type(rhs.name, reg_map)
+        type_str = _get_expr_enum_type(rhs, reg_map)
         if type_str:
             new_lhs = _resolve_in_expr(lhs, type_str)
             if new_lhs is not lhs:
