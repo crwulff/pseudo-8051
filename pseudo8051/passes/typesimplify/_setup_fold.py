@@ -181,7 +181,7 @@ def _fold_and_prune_setups(nodes: List[HIRNode],
                 continue
             new_nj = _subst_reg_in_call_node(nj, reg, val)
             if new_nj is not nj:
-                new_nj.source_nodes = [node] + list(nj.source_nodes or [nj])
+                new_nj.source_nodes = [node] + list(nj.source_nodes)
                 work[j] = new_nj
                 work[i] = None
                 dbg("typesimp", f"  [{hex(node.ea)}] fold-const: {reg}={val.render()} into call")
@@ -206,7 +206,7 @@ def _fold_and_prune_setups(nodes: List[HIRNode],
                     for j in range(i + 1, len(work)):
                         if rhs_name in _collect_hir_name_refs([work[j]]):
                             work[j].source_nodes = [node] + list(
-                                work[j].source_nodes or [work[j]])
+                                work[j].source_nodes)
                             break
                 elif (isinstance(node.rhs, Const)
                         and isinstance(node.lhs, RegsExpr)
@@ -222,7 +222,7 @@ def _fold_and_prune_setups(nodes: List[HIRNode],
                         if _references_xram_const(wj, dptr_val):
                             if node not in wj.source_nodes:
                                 wj.source_nodes = [node] + list(
-                                    wj.source_nodes or [wj])
+                                    wj.source_nodes)
                             break
                 continue
             live_lhs = lhs_regs & all_downstream

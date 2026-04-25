@@ -154,11 +154,17 @@ class HIRNode(ABC):
     @property
     def src_eas(self) -> frozenset:
         """Recursively union EAs from all source nodes; leaf nodes return {self.ea}."""
+        return self._src_eas_inner(set())
+
+    def _src_eas_inner(self, seen: set) -> frozenset:
+        if id(self) in seen:
+            return frozenset()
+        seen.add(id(self))
         if not self.source_nodes:
             return frozenset({self.ea})
         result: frozenset = frozenset()
         for sn in self.source_nodes:
-            result |= sn.src_eas
+            result |= sn._src_eas_inner(seen)
         return result
 
     @abstractmethod

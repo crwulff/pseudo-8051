@@ -497,7 +497,7 @@ def _propagate_register_copies(live: List[HIRNode],
                 lj = live[j]
                 if lj is not None and _has_xram_const_addr(lj, dptr_val):
                     if node not in lj.source_nodes:
-                        lj.source_nodes = [node] + list(lj.source_nodes or [lj])
+                        lj.source_nodes = [node] + list(lj.source_nodes)
                     dbg("typesimp",
                         f"  [{hex(node.ea)}] prop-dptr-const: linked {hex(dptr_val)}"
                         f" provenance into node {j}")
