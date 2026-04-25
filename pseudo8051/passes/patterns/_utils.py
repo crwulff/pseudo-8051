@@ -48,6 +48,17 @@ def _type_bytes(t: str) -> int:
             return n
     except ImportError:
         pass
+    # Fallback: ask IDA's type system (handles typedefs, enums, etc.)
+    try:
+        import ida_typeinf as _idt
+        _tif = _idt.tinfo_t()
+        if _tif.get_named_type(None, t):
+            sz = _tif.get_size()
+            _BADSIZE = getattr(_idt, 'BADSIZE', 0xFFFFFFFF)
+            if sz and sz != _BADSIZE:
+                return int(sz)
+    except Exception:
+        pass
     return 0
 
 
@@ -163,12 +174,30 @@ class VarInfo:
 
 # ── XRAM byte-field helpers ───────────────────────────────────────────────────
 
-def _byte_names(var_name: str, n: int) -> List[str]:
-    """Per-byte field names for a multi-byte XRAM local.
+def _byte_names(var_name: str, n: int, type_str: str = "") -> List[str]:
+    """Per-byte field names for a multi-byte XRAM local or register.
 
-    Returns ['var.hi', 'var.lo'] for 2-byte vars, ['var.b0'...'var.bn'] for larger.
+    When type_str is a known struct, uses field names recursively.
+    Otherwise: ['var.hi', 'var.lo'] for 2-byte vars, ['var.b0'..'var.bn'] for larger.
     Names are ordered high-byte first (big-endian, matching 8051 XRAM layout).
     """
+    if type_str:
+        try:
+            from pseudo8051.prototypes import get_struct
+            sd = get_struct(type_str)
+            if sd is not None:
+                result: List[str] = []
+                for field in sd.fields:
+                    field_n = _type_bytes(field.type)
+                    if field_n == 1:
+                        result.append(f"{var_name}.{field.name}")
+                    elif field_n > 1:
+                        result.extend(_byte_names(f"{var_name}.{field.name}",
+                                                  field_n, field.type))
+                if len(result) == n:
+                    return result
+        except ImportError:
+            pass
     if n == 2:
         return [f"{var_name}.hi", f"{var_name}.lo"]
     return [f"{var_name}.b{i}" for i in range(n)]
@@ -239,7 +268,7 @@ def _param_byte_name(reg: str, vinfo: "VarInfo") -> str:
         idx = list(vinfo.regs).index(reg)
     except ValueError:
         return vinfo.name
-    return _byte_names(vinfo.name, len(vinfo.regs))[idx]
+    return _byte_names(vinfo.name, len(vinfo.regs), vinfo.type)[idx]
 
 
 def _replace_single_regs(text: str, reg_map: Dict[str, VarInfo]) -> str:

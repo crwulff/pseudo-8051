@@ -90,7 +90,7 @@ def _consolidate_xram_local_loads(nodes: List[HIRNode],
                 parent_vinfo = _find_parent_vinfo(parent_nm)
                 if parent_vinfo is not None:
                     n_bytes = _type_bytes(parent_vinfo.type)
-                    expected_bnames = _byte_names(parent_nm, n_bytes)
+                    expected_bnames = _byte_names(parent_nm, n_bytes, parent_vinfo.type)
                     if bname0 == expected_bnames[0] and n_bytes >= 2:
                         regs = [reg0]
                         j = i + 1

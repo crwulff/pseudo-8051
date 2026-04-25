@@ -259,7 +259,7 @@ def _augment_with_local_vars(func_ea: int,
                                                xram_addr=elem_addr)
                         dbg("typesimp", f"  local array elem: {lv.name}[{k}] @ {elem_sym}")
                         if elem_bytes > 1:
-                            bnames = _byte_names(f"{lv.name}[{k}]", elem_bytes)
+                            bnames = _byte_names(f"{lv.name}[{k}]", elem_bytes, elem_type)
                             for j, byte_name in enumerate(bnames):
                                 byte_sym = resolve_ext_addr(elem_addr + j)
                                 bkey2    = f"_arr_byte_{byte_sym}"
@@ -275,7 +275,7 @@ def _augment_with_local_vars(func_ea: int,
             dbg("typesimp", f"  local: {lv.name} ({lv.type}) @ {base_sym}")
         n = _type_bytes(lv.type)
         if n > 1:
-            bnames = _byte_names(lv.name, n)
+            bnames = _byte_names(lv.name, n, lv.type)
             for k, byte_name in enumerate(bnames):
                 byte_sym = resolve_ext_addr(lv.addr + k)
                 bkey = f"_byte_{byte_sym}"
@@ -308,7 +308,7 @@ def _augment_with_xram_params(func_ea: int,
             dbg("typesimp", f"  xram_param: {p.name} ({p.type}) @ {base_sym}")
         n = _type_bytes(p.type)
         if n > 1:
-            bnames = _byte_names(p.name, n)
+            bnames = _byte_names(p.name, n, p.type)
             for k, byte_name in enumerate(bnames):
                 byte_sym = resolve_ext_addr(p.addr + k)
                 bkey = f"_byte_{byte_sym}"
@@ -348,7 +348,7 @@ def _augment_with_callee_xram_params(hir: List[HIRNode],
                 dbg("typesimp", f"  callee xram_param: {name}.{p.name} @ {sym}")
             n = _type_bytes(p.type)
             if n > 1:
-                bnames = _byte_names(p.name, n)
+                bnames = _byte_names(p.name, n, p.type)
                 for k, byte_name in enumerate(bnames):
                     byte_sym = resolve_ext_addr(p.addr + k)
                     bkey = f"_byte_{byte_sym}"
@@ -373,7 +373,7 @@ def _augment_with_iram_local_vars(func_ea: int,
             dbg("typesimp", f"  iram local: {lv.name} ({lv.type}) @ IRAM[{lv.addr:#04x}]")
         n = _type_bytes(lv.type)
         if n > 1:
-            bnames = _byte_names(lv.name, n)
+            bnames = _byte_names(lv.name, n, lv.type)
             for k, byte_name in enumerate(bnames):
                 byte_addr = lv.addr + k
                 bkey = f"_iram_{byte_addr:#04x}_byte"
