@@ -51,11 +51,22 @@ class MovHandler(MnemonicHandler):
     def lift(self, insn, state=None) -> List[HIRNode]:
         op0, op1 = insn.ops[0], insn.ops[1]
         ea = insn.ea
-        # MOV DPTR, #imm — annotate with EXT symbol
+        # MOV DPTR, #imm — annotate with the best available symbol.
+        # IDA's print_operand already resolves cross-segment references (e.g.
+        # code-segment labels loaded into DPTR for MOVC), so prefer that name.
+        # Only fall back to EXT-segment resolution when IDA has no symbol.
         if (op0.type == ida_ua.o_reg and op0.reg == REG_DPTR
                 and op1.type == ida_ua.o_imm):
             imm = op1.value & 0xFFFF
-            sym = resolve_ext_addr(imm)
+            ida_sym = idc.print_operand(ea, 1)   # e.g. "#osd_table" or "#0F999h"
+            # Strip the leading '#' that IDA adds to immediate operands
+            if ida_sym.startswith('#'):
+                ida_sym = ida_sym[1:]
+            # Use the IDA symbol if it is a real name (not a plain hex/decimal literal)
+            if ida_sym and not ida_sym[0].isdigit() and not ida_sym.startswith('0'):
+                sym = ida_sym
+            else:
+                sym = resolve_ext_addr(imm)
             if sym != hex(imm):
                 return [Assign(ea, Reg("DPTR"), Const(imm, alias=sym))]
         dst = _op_expr(insn, 0, state)
