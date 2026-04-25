@@ -70,6 +70,20 @@ _PROTO_TYPE_BYTES: dict = {
     "int8_t": 1, "uint8_t": 1,
     "int16_t": 2, "uint16_t": 2,
     "int32_t": 4, "uint32_t": 4,
+    "Ptr": 3,   # 3-byte far pointer struct
+}
+
+# Explicit expansions for non-contiguous endpoint pairs that cannot be resolved
+# by simple contiguous range slicing.
+# Key: (type_str, frozenset of the two endpoint registers).
+# Value: ordered register tuple, high-byte first.
+_NON_CONTIGUOUS_EXPANSIONS: dict = {
+    # Ptr layout is non-standard: MSB lives in the higher-indexed register
+    # (opposite of the 8051 norm where lower-indexed = more significant).
+    # R3:R1 → R3=MSB, R2, R1=LSB  (contiguous, but descending not ascending)
+    # R5:R0 → R5=MSB, R4, R0=LSB  (non-contiguous)
+    ("Ptr", frozenset({"R1", "R3"})): ("R3", "R2", "R1"),
+    ("Ptr", frozenset({"R0", "R5"})): ("R5", "R4", "R0"),
 }
 
 
@@ -121,10 +135,17 @@ def expand_regs(regs: Tuple[str, ...], type_str: str) -> Tuple[str, ...]:
     When IDA supplies only two endpoint registers for a multi-byte type
     (e.g. ALOC_REG2 gives ('R4','R7') for int32_t), expand to the full
     contiguous range.  Works for any primitive or struct type.
+    Non-contiguous layouts (e.g. Ptr returned in R5:R0 = R5R4R0) are handled
+    via _NON_CONTIGUOUS_EXPANSIONS.
     """
     nbytes = _PROTO_TYPE_BYTES.get(type_str) or struct_size(type_str)
     dbg("proto", f"  expand_regs({regs!r}, {type_str!r}): nbytes={nbytes} len={len(regs)}")
     if len(regs) == 2 and nbytes > 2:
+        # Non-contiguous override first (e.g. Ptr R5:R0 → R5,R4,R0)
+        override = _NON_CONTIGUOUS_EXPANSIONS.get((type_str, frozenset(regs)))
+        if override is not None:
+            dbg("proto", f"  expand_regs (non-contiguous) → {override!r}")
+            return override
         try:
             lo = min(_PROTO_REG_POOL.index(r) for r in regs)
             hi = max(_PROTO_REG_POOL.index(r) for r in regs)
