@@ -587,6 +587,10 @@ def _simplify(nodes: List[HIRNode], reg_map: Dict[str, VarInfo]) -> List[HIRNode
                 # can reference it as a provenance source.
                 pending_dropped.append(nodes[i])
             written = nodes[i].written_regs | nodes[i].definitely_killed()
+            # For SwitchNode, any case that writes a register invalidates the
+            # pre-switch value on that register — use possibly_killed() too.
+            if isinstance(nodes[i], SwitchNode):
+                written = written | nodes[i].possibly_killed()
             extra_groups, killed_regs = _kill_groups_written(
                 extra_groups, killed_regs, written)
             i += 1

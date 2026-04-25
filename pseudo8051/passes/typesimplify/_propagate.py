@@ -15,7 +15,8 @@ from typing import Dict, List, Optional, Tuple
 from pseudo8051.ir.hir import (HIRNode, Assign, TypedAssign, CompoundAssign,
                                 ExprStmt, ReturnStmt, IfGoto, IfNode,
                                 WhileNode, ForNode, DoWhileNode, NodeAnnotation,
-                                Label, GotoStatement, BreakStmt, ContinueStmt)
+                                Label, GotoStatement, BreakStmt, ContinueStmt,
+                                SwitchNode)
 from pseudo8051.ir.expr import (Expr, BinOp, Call, Const, XRAMRef, UnaryOp,
                                  Regs as RegExpr, Name as NameExpr)
 from pseudo8051.passes.patterns._utils import (
@@ -51,7 +52,7 @@ def _name_possibly_written_in(name: str, node: HIRNode) -> bool:
     """Return True if any node inside node's bodies may assign to Name(name).
 
     Used to prevent propagating a Name-lhs value past a structured node
-    (IfNode, WhileNode, etc.) whose branches may redefine that name.
+    (IfNode, WhileNode, SwitchNode, etc.) whose branches may redefine that name.
     """
     def _check_seq(nodes) -> bool:
         for n in nodes:
@@ -61,10 +62,25 @@ def _name_possibly_written_in(name: str, node: HIRNode) -> bool:
             for _extra, body in n.child_body_groups():
                 if _check_seq(body):
                     return True
+            # SwitchNode.child_body_groups() returns [] (viewer handles it
+            # specially), so check its case bodies explicitly.
+            if isinstance(n, SwitchNode):
+                for _vals, body in n.cases:
+                    if isinstance(body, list) and _check_seq(body):
+                        return True
+                if isinstance(n.default_body, list) and _check_seq(n.default_body):
+                    return True
         return False
 
     for _extra, body in node.child_body_groups():
         if _check_seq(body):
+            return True
+    # Also check if node itself is a SwitchNode (called directly on it)
+    if isinstance(node, SwitchNode):
+        for _vals, body in node.cases:
+            if isinstance(body, list) and _check_seq(body):
+                return True
+        if isinstance(node.default_body, list) and _check_seq(node.default_body):
             return True
     return False
 
