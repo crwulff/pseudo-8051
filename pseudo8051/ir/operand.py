@@ -89,7 +89,9 @@ class Operand:
             page_base = insn.ea & ~0xFFFF
             target_ea = page_base | (op.addr & 0xFFFF)
             name = ida_name.get_name(target_ea)
-            return name if name else hex(op.addr & 0xFFFF)
+            # Fallback format must match _label_for() in passes/ifelse.py and
+            # _assign_labels() in ir/function.py so that IfGoto.label == block.label.
+            return name if name else f"label_{hex(target_ea).removeprefix('0x')}"
 
         # o_bit, o_displ, o_idpspec*, … — IDA fallback
         return idc.print_operand(insn.ea, n)
@@ -166,7 +168,7 @@ class Operand:
             page_base = insn.ea & ~0xFFFF
             target_ea = page_base | (op.addr & 0xFFFF)
             name = ida_name.get_name(target_ea)
-            return Name(name) if name else Name(hex(op.addr & 0xFFFF))
+            return Name(name) if name else Name(f"label_{hex(target_ea).removeprefix('0x')}")
 
         # o_bit, o_displ, o_idpspec*, … — IDA fallback
         return Name(idc.print_operand(insn.ea, n))
