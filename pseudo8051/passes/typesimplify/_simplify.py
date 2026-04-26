@@ -257,16 +257,22 @@ def _build_node_eff(node: HIRNode,
                 eff[tg.pair_name] = vi
         else:
             for r in tg.active_regs:
-                eff.setdefault(r, vi)
+                if r not in killed_regs:
+                    eff.setdefault(r, vi)
 
-    # callee_args — setdefault (lowest priority)
+    # callee_args — setdefault (lowest priority).
+    # Skip registers in killed_regs: a killed reg was overwritten after
+    # function-entry, so the callee_args mapping (caller param → callee param)
+    # is no longer valid for that register at this call site.
     if ann.callee_args is not None:
         for tg in ann.callee_args:
             vi = _tg_to_varinfo(tg)
             for r in tg.active_regs:
-                eff.setdefault(r, vi)
+                if r not in killed_regs:
+                    eff.setdefault(r, vi)
             if len(tg.full_regs) > 1:
-                eff.setdefault(tg.pair_name, vi)
+                if not any(r in killed_regs for r in tg.full_regs):
+                    eff.setdefault(tg.pair_name, vi)
 
     return eff
 

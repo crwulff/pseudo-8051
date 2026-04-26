@@ -38,8 +38,11 @@ def _subst_reg_in_scope(nodes: List[HIRNode], reg: str,
         else:
             result.append(node.map_bodies(
                 lambda ns: _subst_reg_in_scope(ns, reg, replacement)))
-        # If this node writes reg, subsequent nodes see the new value — stop.
-        if reg in node.written_regs:
+        # If this node writes reg on any execution path, subsequent nodes may
+        # see a different value — stop.  Use possibly_killed() so that structured
+        # nodes (IfNode, WhileNode, etc.) whose bodies sometimes write reg are
+        # treated as kill barriers even though their written_regs is frozenset().
+        if reg in node.written_regs or reg in node.possibly_killed():
             result.extend(nodes[i + 1:])
             return result
     return result
