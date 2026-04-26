@@ -71,13 +71,17 @@ class TypeAwareSimplifier(OptimizationPass):
         reg_map = _augment_with_xram_params(func.ea, reg_map)
         reg_map = _augment_with_iram_local_vars(func.ea, reg_map)
 
-        # Fall back to global callee-reg/XRAM scan when AnnotationPass hasn't run
+        # Fall back to global callee-reg scan when AnnotationPass hasn't run
         # (e.g. unit tests that call TypeAwareSimplifier directly).
-        # When AnnotationPass has run, callee XRAM params are handled per-call-site
-        # via _backward_annotate_xram_call → call_arg_ann on the XRAM write node.
         if not getattr(func, "_annotation_pass_ran", False):
             reg_map = _augment_with_callee_regs(func.hir, reg_map)
-            reg_map = _augment_with_callee_xram_params(func.hir, reg_map)
+        # Always augment with callee XRAM params regardless of AnnotationPass:
+        # _subst_xram_in_hir needs these entries in reg_map to rename XRAM writes
+        # (e.g. XRAM[EXT_DC44] → xarg1) before _fold_xram_call_args can fold them
+        # into the call.  When AnnotationPass has run, back-annotation via
+        # call_arg_ann provides per-call-site info; _augment_with_callee_xram_params
+        # provides the reg_map entries needed for the actual renaming.
+        reg_map = _augment_with_callee_xram_params(func.hir, reg_map)
 
         if not reg_map:
             dbg("typesimp", f"{func.name}: no register mappings found, running structural patterns only")
