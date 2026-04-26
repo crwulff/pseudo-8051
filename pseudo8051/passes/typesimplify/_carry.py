@@ -182,11 +182,93 @@ def _try_collapse_subb8(body: List[HIRNode]):
     return None
 
 
+def _extract_carry1_operand(subtrahend: Expr):
+    """
+    If subtrahend has the form  k + 1  or  1 + k  or  k + C  (where C is Reg('C')),
+    return (base_operand, carry_value) so that the full subtrahend = base_operand + 1.
+    Returns None if the form is not recognised.
+
+    Used to detect the SETB-C + SUBB A, #k pattern (carry=1) after propagation has
+    folded `C = 1; A -= k + C` into `A = X - (k + 1)`.
+    """
+    if not (isinstance(subtrahend, BinOp) and subtrahend.op == '+'):
+        return None
+    lhs, rhs = subtrahend.lhs, subtrahend.rhs
+    # k + Const(1)  or  k + Reg('C')
+    if isinstance(rhs, Const) and rhs.value == 1:
+        return lhs
+    if isinstance(rhs, RegExpr) and rhs.is_single and rhs.name == 'C':
+        return lhs
+    # Const(1) + k  (less common but possible)
+    if isinstance(lhs, Const) and lhs.value == 1:
+        return rhs
+    return None
+
+
+def _try_collapse_setb_subb8(body: List[HIRNode]):
+    """
+    Scan body for the SETB-C + SUBB pattern that forms the do-while condition.
+
+    Pre-propagate form (CompoundAssign still present):
+      C = 1;
+      A -= operand + C;          ann.reg_consts["C"] == 1
+
+    Post-propagate form (folded into Assign by _propagate_values):
+      A = X - (operand + 1);     structural match, no annotation needed
+
+    Both correspond to: C = (X < operand + 1) = (X <= operand).
+    When the DoWhile condition is !C → while (X > operand).
+
+    Returns (new_cond, new_body) or None.
+    """
+    for k in range(len(body)):
+        node = body[k]
+
+        # ── Pre-propagate: CompoundAssign(A, '-=', operand + C) with C=1 ──
+        if (isinstance(node, CompoundAssign)
+                and node.lhs == Reg("A")
+                and node.op == "-="):
+            ann = getattr(node, 'ann', None)
+            if ann is not None and ann.reg_consts.get("C") == 1:
+                a_name = _get_a_var_name(node)
+                if a_name is not None:
+                    rhs = node.rhs
+                    operand = _extract_carry1_operand(rhs)
+                    if operand is None:
+                        operand = rhs   # rhs is directly the operand
+                    new_cond = BinOp(NameExpr(a_name), ">", operand)
+                    new_body = body[:k] + body[k + 1:]
+                    dbg("typesimp",
+                        f"  [{hex(node.ea)}] setb-subb8 (compound): "
+                        f"{a_name} > {operand.render()!r}")
+                    return (new_cond, new_body)
+
+        # ── Post-propagate: Assign(A, X - (operand + 1)) ──
+        if (isinstance(node, Assign)
+                and isinstance(node.lhs, RegExpr) and node.lhs.is_single
+                and node.lhs.name == 'A'
+                and isinstance(node.rhs, BinOp)
+                and node.rhs.op == '-'):
+            X = node.rhs.lhs
+            operand = _extract_carry1_operand(node.rhs.rhs)
+            if operand is not None and not isinstance(X, Const):
+                new_cond = BinOp(X, ">", operand)
+                new_body = body[:k] + body[k + 1:]
+                dbg("typesimp",
+                    f"  [{hex(node.ea)}] setb-subb8 (assign): "
+                    f"{X.render()} > {operand.render()!r}")
+                return (new_cond, new_body)
+
+    return None
+
+
 def _simplify_carry_comparison(nodes: List[HIRNode]) -> List[HIRNode]:
     """
     For each WhileNode with condition Reg("C"), scan body_nodes for:
       1. The 4-node CLR C + SUBB16 sequence (16-bit comparison), or
       2. A single CLR-C + SUBB8 node (8-bit comparison) identified via annotation.
+    For each DoWhileNode with condition !C, scan body_nodes for:
+      3. The SETB-C + SUBB8 Assign (decrement-while-positive) pattern.
     If found, replace the condition with the appropriate typed BinOp comparison.
     Recurses into nested structured nodes.
     """
@@ -201,6 +283,16 @@ def _simplify_carry_comparison(nodes: List[HIRNode]) -> List[HIRNode]:
                 if transformed is not None:
                     new_cond, new_body = transformed
                     result.append(rebuilt.copy_meta_to(WhileNode(rebuilt.ea, new_cond, new_body)))
+                    continue
+            result.append(rebuilt)
+        elif isinstance(node, DoWhileNode):
+            rebuilt = node.map_bodies(_simplify_carry_comparison)
+            if rebuilt.condition == UnaryOp("!", Reg("C")):
+                transformed = _try_collapse_setb_subb8(rebuilt.body_nodes)
+                if transformed is not None:
+                    new_cond, new_body = transformed
+                    result.append(rebuilt.copy_meta_to(
+                        DoWhileNode(rebuilt.ea, new_cond, new_body)))
                     continue
             result.append(rebuilt)
         else:

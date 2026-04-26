@@ -486,16 +486,30 @@ class LoopStructurer(OptimizationPass):
                 # Header block contains statements that COMPUTE the exit condition
                 # (e.g. mov/clr/subb before jnc).  The branch tests the result of
                 # those statements, so the while condition is not available at loop
-                # entry — emit  while (1) { header_stmts; if (exit_cond) break; body }
+                # entry.
+                #
+                # If the primary tail ends with a conditional back-edge (e.g. JNC),
+                # prefer  do { header_stmts; if (exit_cond) break; body } while (tail_cond)
+                # over  while (1) { header_stmts; if (exit_cond) break; body }.
                 break_node = BreakStmt(branch_node.ea)
                 branch_node.copy_meta_to(break_node)
                 guard = IfNode(branch_node.ea, condition=cond,
                                then_nodes=[break_node], else_nodes=[])
-                loop_node: HIRNode = WhileNode(
-                    loop_ea,
-                    condition="1",
-                    body_nodes=header_stmts + [guard] + body_hir,
-                )
+                do_cond = _extract_dowhile_cond(primary_tail, header, body_eas, func)
+                if do_cond is not None:
+                    dbg("loops", f"  → DoWhileNode (tail back-edge + header exit)  "
+                                 f"tail_cond={do_cond!r}  header_stmts={len(header_stmts)}")
+                    loop_node: HIRNode = DoWhileNode(
+                        loop_ea,
+                        condition=do_cond,
+                        body_nodes=header_stmts + [guard] + body_hir,
+                    )
+                else:
+                    loop_node = WhileNode(
+                        loop_ea,
+                        condition="1",
+                        body_nodes=header_stmts + [guard] + body_hir,
+                    )
             else:
                 if is_exit:
                     cond = _invert_cond(cond)
