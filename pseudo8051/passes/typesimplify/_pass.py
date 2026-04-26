@@ -153,10 +153,15 @@ class TypeAwareSimplifier(OptimizationPass):
             func.hir = decl_nodes + func.hir
 
         # Fold Assign(ret_reg, expr); ReturnStmt(ret_reg) → ReturnStmt(expr) (issue 1)
+        # When we have a prototype, use its return registers exclusively.
+        # For void functions (return_regs is empty), skip folding entirely —
+        # do NOT fall back to func.return_registers, which may contain parameter regs.
         from pseudo8051.prototypes import expand_regs as _expand_regs
-        ret_regs = (_expand_regs(tuple(proto.return_regs), proto.return_type)
-                    if proto and proto.return_regs
-                    else tuple(getattr(func, "return_registers", [])))
+        if proto:
+            ret_regs = (_expand_regs(tuple(proto.return_regs), proto.return_type)
+                        if proto.return_regs else ())
+        else:
+            ret_regs = tuple(getattr(func, "return_registers", []))
         if ret_regs:
             func.hir = _fold_return_chains(func.hir, ret_regs, reg_map)
 
