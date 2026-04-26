@@ -4,8 +4,8 @@ ir/hir/expr_stmt.py — ExprStmt node.
 
 from typing import List, Tuple
 
-from pseudo8051.ir.hir._base import HIRNode, _render_expr, _ann_field, _refs_from_expr
-from pseudo8051.ir.expr import Expr
+from pseudo8051.ir.hir._base import HIRNode, _render_expr, _render_call_with_comments, _ann_field, _refs_from_expr
+from pseudo8051.ir.expr import Expr, Call as CallExpr
 
 
 class ExprStmt(HIRNode):
@@ -16,7 +16,11 @@ class ExprStmt(HIRNode):
         self.expr = expr
 
     def render(self, indent: int = 0) -> List[Tuple[int, str]]:
-        return [(self.ea, f"{self._ind(indent)}{_render_expr(self.expr)};")]
+        if isinstance(self.expr, CallExpr):
+            text = _render_call_with_comments(self.expr, self.ann)
+        else:
+            text = _render_expr(self.expr)
+        return [(self.ea, f"{self._ind(indent)}{text};")]
 
     @property
     def written_regs(self) -> frozenset:

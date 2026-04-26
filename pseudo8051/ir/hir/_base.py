@@ -328,6 +328,39 @@ def _render_expr(val: Union[str, Expr]) -> str:
     return str(val)
 
 
+def _render_call_with_comments(call_expr: "Expr", ann: "Optional[object]") -> str:
+    """Render a Call expression, annotating each arg with the callee param name.
+
+    If ann.callee_args provides names for the call's positional arguments,
+    renders as: func(arg0 /* param0 */, arg1 /* param1 */, ...)
+    Falls back to plain rendering when no annotation is available.
+    """
+    from pseudo8051.ir.expr import Call as _Call
+    if not isinstance(call_expr, _Call):
+        return _render_expr(call_expr)
+
+    callee_args = getattr(ann, "callee_args", None) if ann is not None else None
+    if not callee_args:
+        return call_expr.render()
+
+    # Build ordered list of param names from callee_args TypeGroups.
+    # callee_args is ordered by the prototype parameter list.
+    param_names = [tg.name for tg in callee_args]
+
+    parts = []
+    for i, arg in enumerate(call_expr.args):
+        rendered = arg.render()
+        if i < len(param_names):
+            name = param_names[i]
+            # Suppress comment when the rendered arg already contains the param name
+            # (e.g. Name("glyphIndex") renders as "glyphIndex" — no comment needed).
+            if name and name not in rendered:
+                rendered = f"{rendered} /* {name} */"
+        parts.append(rendered)
+
+    return f"{call_expr.func_name}({', '.join(parts)})"
+
+
 # ── HIR annotation helpers ────────────────────────────────────────────────────
 
 def _expr_lines(expr: Expr, indent: str = "") -> List[str]:

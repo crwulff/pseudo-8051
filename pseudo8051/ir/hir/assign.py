@@ -4,8 +4,8 @@ ir/hir/assign.py — Assign and TypedAssign nodes.
 
 from typing import List, Tuple
 
-from pseudo8051.ir.hir._base import HIRNode, _render_expr, _ann_field, _lhs_written_regs, _refs_from_expr
-from pseudo8051.ir.expr import Expr, Regs as RegsExpr
+from pseudo8051.ir.hir._base import HIRNode, _render_expr, _render_call_with_comments, _ann_field, _lhs_written_regs, _refs_from_expr
+from pseudo8051.ir.expr import Expr, Regs as RegsExpr, Call as CallExpr
 
 
 class Assign(HIRNode):
@@ -30,7 +30,10 @@ class Assign(HIRNode):
         return _refs_from_expr(self.rhs)
 
     def render(self, indent: int = 0) -> List[Tuple[int, str]]:
-        return [(self.ea, f"{self._ind(indent)}{_render_expr(self.lhs)} = {_render_expr(self.rhs)};")]
+        rhs_str = (_render_call_with_comments(self.rhs, self.ann)
+                   if isinstance(self.rhs, CallExpr)
+                   else _render_expr(self.rhs))
+        return [(self.ea, f"{self._ind(indent)}{_render_expr(self.lhs)} = {rhs_str};")]
 
     def name_refs(self) -> frozenset:
         refs = _refs_from_expr(self.rhs)
@@ -50,7 +53,10 @@ class TypedAssign(Assign):
         self.type_str = type_str
 
     def render(self, indent: int = 0) -> List[Tuple[int, str]]:
-        return [(self.ea, f"{self._ind(indent)}{self.type_str} {_render_expr(self.lhs)} = {_render_expr(self.rhs)};")]
+        rhs_str = (_render_call_with_comments(self.rhs, self.ann)
+                   if isinstance(self.rhs, CallExpr)
+                   else _render_expr(self.rhs))
+        return [(self.ea, f"{self._ind(indent)}{self.type_str} {_render_expr(self.lhs)} = {rhs_str};")]
 
     def ann_lines(self) -> List[str]:
         return ["TypedAssign", f"  type: {self.type_str!r}"] + _ann_field("lhs", self.lhs) + _ann_field("rhs", self.rhs)

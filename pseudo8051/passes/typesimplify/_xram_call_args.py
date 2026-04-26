@@ -36,12 +36,15 @@ def _fold_xram_call_args(nodes: List[HIRNode]) -> List[HIRNode]:
 
     def _patch_call_node(node: HIRNode, new_call: Call) -> HIRNode:
         if isinstance(node, ExprStmt):
-            return ExprStmt(node.ea, new_call)
-        if isinstance(node, TypedAssign):
-            return TypedAssign(node.ea, node.type_str, node.lhs, new_call)
-        if isinstance(node, Assign):
-            return Assign(node.ea, node.lhs, new_call)
-        return node
+            new_node = ExprStmt(node.ea, new_call)
+        elif isinstance(node, TypedAssign):
+            new_node = TypedAssign(node.ea, node.type_str, node.lhs, new_call)
+        elif isinstance(node, Assign):
+            new_node = Assign(node.ea, node.lhs, new_call)
+        else:
+            return node
+        node.copy_meta_to(new_node)
+        return new_node
 
     try:
         import ida_name
@@ -103,6 +106,16 @@ def _fold_xram_call_args(nodes: List[HIRNode]) -> List[HIRNode]:
         extra_args = [collected[name][1] for name in param_names]
         new_call = Call(call_expr.func_name, list(call_expr.args) + extra_args)
         work[i] = _patch_call_node(node, new_call)
+
+        # Extend callee_args annotation so render() can show param name comments
+        # for the newly appended xram arguments.
+        patched = work[i]
+        if patched.ann is not None:
+            from pseudo8051.passes.patterns._utils import TypeGroup
+            existing = patched.ann.callee_args or []
+            extra_tgs = [TypeGroup(p.name, p.type, (), xram_sym=None, is_param=True)
+                         for p in xps]
+            patched.ann.callee_args = list(existing) + extra_tgs
 
         for name in param_names:
             idx = collected[name][0]
