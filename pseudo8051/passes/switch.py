@@ -765,6 +765,13 @@ def _absorb_switch_in_body_list(nodes: List[HIRNode]) -> tuple:
                         sibling_nodes, case_labels)
 
                     # ── Pre-structuring ───────────────────────────────────────
+                    # First absorb any nested switches whose arm labels appear as
+                    # siblings within an arm body.  This must happen BEFORE
+                    # _structure_flat_ifelse, which would otherwise consume those
+                    # Labels into IfNodes and leave them unreachable by absorption.
+                    for _lbl in arm_groups:
+                        arm_groups[_lbl], _ = _absorb_switch_in_body_list(arm_groups[_lbl])
+
                     # Structure flat if/else patterns in each arm BEFORE merge-
                     # point detection and cleanup.  This is required because:
                     #   1. Merge-point detection uses arm gotos to identify the
@@ -879,10 +886,9 @@ def _absorb_switch_in_body_list(nodes: List[HIRNode]) -> tuple:
                                         and n.name in embedded_tails)
                             ]
 
-                    # Structure flat if/else within each arm body before adding
-                    # breaks.  The arm HIR is assembled from raw basic-block HIR
-                    # that was never through if/else structuring (IfElseStructurer
-                    # ran before SwitchBodyAbsorber).
+                    # Structure flat if/else within each arm body, then recursively
+                    # absorb any nested switches (whose arm labels appear as
+                    # siblings of the inner SwitchNode in the same arm body).
                     from pseudo8051.passes.ifelse import _structure_flat_ifelse
 
                     # Build case bodies
