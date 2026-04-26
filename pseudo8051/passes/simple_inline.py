@@ -163,6 +163,12 @@ def _lift_simple_callee(callee_ea: int) -> Optional[List]:
     callee_name = ida_name.get_name(callee_ea) or f"sub_{hex(callee_ea).removeprefix('0x')}"
     if get_proto(callee_name) is not None:
         return None   # has a type signature — keep as a named call
+    try:
+        from pseudo8051.trampolines import get_trampoline_target
+        if get_trampoline_target(callee_ea) is not None:
+            return None  # cross-page trampoline — already resolved by call handlers, don't inline
+    except Exception:
+        pass
 
     state = CPState()
     nodes: List = []

@@ -609,6 +609,8 @@ def _subst_xram_in_expr(expr: Expr, reg_map: Dict[str, "VarInfo"]) -> Expr:
             arr_addr_map[vinfo.xram_addr] = vinfo
         elif vinfo.xram_sym not in sym_map:
             sym_map[vinfo.xram_sym] = vinfo.name
+            if vinfo.xram_addr > 0:
+                addr_map[vinfo.xram_addr] = vinfo.name
 
     if not sym_map and not arr_addr_map:
         return expr

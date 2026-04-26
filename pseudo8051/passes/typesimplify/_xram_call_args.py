@@ -100,27 +100,28 @@ def _fold_xram_call_args(nodes: List[HIRNode]) -> List[HIRNode]:
             else:
                 j -= 1
 
-        if len(collected) != len(param_names):
-            continue
+        # Fold whatever xargs were collected immediately before this call.
+        if collected:
+            folded_params = [p for p in xps if p.name in collected]
+            extra_args = [collected[p.name][1] for p in folded_params]
+            new_call = Call(call_expr.func_name, list(call_expr.args) + extra_args)
+            work[i] = _patch_call_node(node, new_call)
+            for p in folded_params:
+                removed.add(collected[p.name][0])
+                dbg("typesimp",
+                    f"  [{hex(work[i].ea)}] fold-xram-call-args: folded {p.name} into {call_expr.func_name}")
 
-        extra_args = [collected[name][1] for name in param_names]
-        new_call = Call(call_expr.func_name, list(call_expr.args) + extra_args)
-        work[i] = _patch_call_node(node, new_call)
-
-        # Extend callee_args annotation so render() can show param name comments
-        # for the newly appended xram arguments.
-        patched = work[i]
-        if patched.ann is not None:
+        # Always extend callee_args with ALL xram params so that the renderer
+        # can show placeholder comments (/* name */) for any params not yet folded.
+        # Deduplicate: skip params whose names are already in callee_args.
+        final_node = work[i]
+        if final_node.ann is not None:
             from pseudo8051.passes.patterns._utils import TypeGroup
-            existing = patched.ann.callee_args or []
-            extra_tgs = [TypeGroup(p.name, p.type, (), xram_sym=None, is_param=True)
-                         for p in xps]
-            patched.ann.callee_args = list(existing) + extra_tgs
-
-        for name in param_names:
-            idx = collected[name][0]
-            removed.add(idx)
-            dbg("typesimp",
-                f"  [{hex(work[i].ea)}] fold-xram-call-args: folded {name} into {call_expr.func_name}")
+            existing = final_node.ann.callee_args or []
+            existing_names = {tg.name for tg in existing}
+            new_tgs = [TypeGroup(p.name, p.type, (), xram_sym=None, is_param=True)
+                       for p in xps if p.name not in existing_names]
+            if new_tgs:
+                final_node.ann.callee_args = list(existing) + new_tgs
 
     return [n for i, n in enumerate(work) if i not in removed]

@@ -50,6 +50,11 @@ class LcallHandler(MnemonicHandler):
         from pseudo8051.prototypes import get_proto, param_regs, expand_regs
         callee_expr = _op_expr(insn, 0, state)
         callee = callee_expr.name if isinstance(callee_expr, Name) else callee_expr.render()
+        try:
+            from pseudo8051.trampolines import resolve_callee as _rc
+            callee = _rc(callee)
+        except Exception:
+            pass
         proto  = get_proto(callee)
         ea     = insn.ea
         if proto:

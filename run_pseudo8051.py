@@ -24,6 +24,7 @@ _RELOAD_ORDER = [
     "pseudo8051.locals",
     "pseudo8051.iram_locals",
     "pseudo8051.xram_params",
+    "pseudo8051.trampolines",
     "pseudo8051.prototypes",
     "pseudo8051.ir.expr._prec",
     "pseudo8051.ir.expr._base",

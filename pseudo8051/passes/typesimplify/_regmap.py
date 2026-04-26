@@ -6,7 +6,7 @@ import re
 from typing import Dict, List, Tuple
 
 from pseudo8051.ir.hir    import (HIRNode, Assign, ExprStmt, ReturnStmt,
-                                   IfNode, WhileNode, ForNode, DoWhileNode)
+                                   IfNode, WhileNode, ForNode, DoWhileNode, SwitchNode)
 from pseudo8051.constants import dbg
 from pseudo8051.passes.patterns._utils import (
     VarInfo, _type_bytes, _byte_names, _parse_array_type,
@@ -208,6 +208,12 @@ def _collect_call_names(hir: List[HIRNode]) -> set:
             names.update(_collect_call_names(node.else_nodes))
         elif isinstance(node, (WhileNode, ForNode, DoWhileNode)):
             names.update(_collect_call_names(node.body_nodes))
+        elif isinstance(node, SwitchNode):
+            for _, body in node.cases:
+                if isinstance(body, list):
+                    names.update(_collect_call_names(body))
+            if isinstance(node.default_body, list):
+                names.update(_collect_call_names(node.default_body))
     return names
 
 

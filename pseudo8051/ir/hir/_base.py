@@ -358,6 +358,13 @@ def _render_call_with_comments(call_expr: "Expr", ann: "Optional[object]") -> st
                 rendered = f"{rendered} /* {name} */"
         parts.append(rendered)
 
+    # Append placeholder comments for any expected params beyond the actual arg list
+    # (xram params that weren't folded in because they were set in an outer scope).
+    for i in range(len(call_expr.args), len(param_names)):
+        name = param_names[i]
+        if name:
+            parts.append(f"/* {name} */")
+
     return f"{call_expr.func_name}({', '.join(parts)})"
 
 

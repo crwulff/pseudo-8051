@@ -125,6 +125,11 @@ class TypeAwareSimplifier(OptimizationPass):
         func.hir = _collapse_dpl_dph_arithmetic(func.hir)
         func.hir = _subst_xram_in_hir(func.hir, reg_map)
         func.hir = _subst_iram_in_hir(func.hir, reg_map)
+        # Second fold: catches xram params that were only renamed by the second
+        # _subst_xram_in_hir above (e.g. ++DPTR writes resolved by _simplify_arithmetic),
+        # or that became adjacent to the call after earlier pruning passes removed
+        # intervening nodes.
+        func.hir = _fold_xram_call_args(func.hir)
         func.hir = _simplify_acc_bit_test(func.hir)
 
         func.hir = collapse_mb_assigns(func.hir)

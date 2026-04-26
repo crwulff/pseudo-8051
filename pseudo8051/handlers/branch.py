@@ -50,6 +50,11 @@ class SjmpHandler(MnemonicHandler):
     def use(self, insn) -> frozenset:
         tail = _tail_call_target(insn)
         if tail:
+            try:
+                from pseudo8051.trampolines import resolve_callee as _rc
+                tail = _rc(tail)
+            except Exception:
+                pass
             from pseudo8051.prototypes import get_proto, param_regs
             proto = get_proto(tail)
             if proto:
@@ -65,6 +70,11 @@ class SjmpHandler(MnemonicHandler):
     def lift(self, insn, state=None) -> List[HIRNode]:
         tail = _tail_call_target(insn)
         if tail:
+            try:
+                from pseudo8051.trampolines import resolve_callee as _rc
+                tail = _rc(tail)
+            except Exception:
+                pass
             from pseudo8051.prototypes import get_proto, param_regs, expand_regs
             from pseudo8051.ir.expr import RegGroup, Reg as RegExpr
             proto = get_proto(tail)
