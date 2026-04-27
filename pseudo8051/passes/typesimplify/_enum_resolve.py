@@ -237,6 +237,41 @@ def _resolve_in_condition(cond: Expr, reg_map: dict) -> Expr:
 
 # ── Main pass ─────────────────────────────────────────────────────────────────
 
+def _inject_callee_arg_types(nodes: List[HIRNode], reg_map: dict) -> None:
+    """
+    Scan HIR annotations for callee_args / user_anns TypeGroups and add their
+    type info to reg_map under the variable *name* key (not the register key).
+    Only fills gaps — does not overwrite existing entries.
+
+    This restores type context that _simplify may have discarded when a register
+    was killed (written), so _resolve_enum_consts can still look up enum types.
+    """
+    from pseudo8051.passes.patterns._utils import TypeGroup as _TypeGroup
+
+    def _visit(nds: List[HIRNode]) -> None:
+        for nd in nds:
+            ann = nd.ann
+            if ann is not None:
+                for tg in list(ann.callee_args or []) + list(ann.user_anns or []):
+                    if (isinstance(tg, _TypeGroup)
+                            and tg.name and tg.type
+                            and not tg.xram_sym
+                            and tg.name not in reg_map):
+                        reg_map[tg.name] = VarInfo(tg.name, tg.type, tg.full_regs)
+            # Recurse into structured bodies
+            for attr in ('then_nodes', 'else_nodes', 'body_nodes', 'default_body'):
+                body = getattr(nd, attr, None)
+                if isinstance(body, list):
+                    _visit(body)
+            cases = getattr(nd, 'cases', None)
+            if cases:
+                for _, body in cases:
+                    if isinstance(body, list):
+                        _visit(body)
+
+    _visit(nodes)
+
+
 def _resolve_enum_consts(nodes: List[HIRNode], reg_map: dict) -> List[HIRNode]:
     """
     Walk HIR and replace Const values with enum member Names where the type

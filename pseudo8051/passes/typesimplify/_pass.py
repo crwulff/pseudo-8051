@@ -30,7 +30,7 @@ from pseudo8051.passes.typesimplify._post     import (
     _simplify_acc_bit_test,
     _subst_xram_in_hir,
 )
-from pseudo8051.passes.typesimplify._enum_resolve import _resolve_enum_consts
+from pseudo8051.passes.typesimplify._enum_resolve import _resolve_enum_consts, _inject_callee_arg_types
 from pseudo8051.constants import dbg
 
 
@@ -88,6 +88,14 @@ class TypeAwareSimplifier(OptimizationPass):
             dbg("typesimp", f"{func.name}: no register mappings found, running structural patterns only")
 
         dbg("typesimp", f"{func.name}: final reg_map={list(reg_map.keys())}")
+        # Snapshot caller param VarInfo entries by name before _simplify kills them.
+        # _simplify updates reg_map in-place keyed by register; by the end, killed
+        # registers are removed.  We restore name-keyed entries so _resolve_enum_consts
+        # can still find enum types for params (e.g. specialFunction: Win7SpecialFunction).
+        param_by_name: dict = {}
+        for v in reg_map.values():
+            if isinstance(v, VarInfo) and v.is_param and v.name:
+                param_by_name[v.name] = v
         reg_map["__n__"] = [0]
         func.hir = _simplify(func.hir, reg_map)
         _drain_pending_removed(func)
@@ -177,6 +185,11 @@ class TypeAwareSimplifier(OptimizationPass):
             func.hir = _fold_return_chains(func.hir, ret_regs, reg_map)
 
         # Replace Const values with enum member names where the type context is an IDA enum.
+        # Restore param name→VarInfo entries that _simplify may have discarded when
+        # their registers were killed, so _resolve_enum_consts can find enum types.
+        for k, v in param_by_name.items():
+            reg_map.setdefault(k, v)
+        _inject_callee_arg_types(func.hir, reg_map)
         func.hir = _resolve_enum_consts(func.hir, reg_map)
 
         # Remove Label nodes in the assembled HIR that are no longer referenced
