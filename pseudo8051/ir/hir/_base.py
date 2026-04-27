@@ -345,7 +345,10 @@ def _render_call_with_comments(call_expr: "Expr", ann: "Optional[object]") -> st
 
     # Build ordered list of param names from callee_args TypeGroups.
     # callee_args is ordered by the prototype parameter list.
-    param_names = [tg.name for tg in callee_args]
+    # Exclude byte-field expansions (e.g. offset.hi, offset.lo) and return-value
+    # TypeGroups (is_param=False) — only top-level parameters should appear.
+    param_names = [tg.name for tg in callee_args
+                   if tg.is_param and not getattr(tg, 'is_byte_field', False)]
 
     parts = []
     for i, arg in enumerate(call_expr.args):

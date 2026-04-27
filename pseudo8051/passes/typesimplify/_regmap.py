@@ -29,7 +29,8 @@ def _build_type_groups(proto: FuncProto,
             continue
         if id(vi) not in seen:
             tg = TypeGroup(vi.name, vi.type, vi.regs,
-                           is_param=vi.is_param)
+                           is_param=vi.is_param,
+                           is_byte_field=vi.is_byte_field)
             seen[id(vi)] = tg
             result.append(tg)
     return result

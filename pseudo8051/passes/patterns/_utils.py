@@ -81,22 +81,24 @@ class TypeGroup:
     """
 
     __slots__ = ('name', 'type', 'full_regs', 'active_regs',
-                 'xram_sym', 'is_param', 'xram_addr')
+                 'xram_sym', 'is_param', 'xram_addr', 'is_byte_field')
 
     def __init__(self, name: str, type_str: str,
                  full_regs: Tuple[str, ...],
                  active_regs: Optional[FrozenSet[str]] = None,
                  xram_sym: str = "",
                  is_param: bool = False,
-                 xram_addr: int = 0):
-        self.name        = name
-        self.type        = type_str
-        self.full_regs   = full_regs
-        self.active_regs = (active_regs if active_regs is not None
-                            else frozenset(full_regs))
-        self.xram_sym    = xram_sym
-        self.is_param    = is_param
-        self.xram_addr   = xram_addr
+                 xram_addr: int = 0,
+                 is_byte_field: bool = False):
+        self.name         = name
+        self.type         = type_str
+        self.full_regs    = full_regs
+        self.active_regs  = (active_regs if active_regs is not None
+                             else frozenset(full_regs))
+        self.xram_sym     = xram_sym
+        self.is_param     = is_param
+        self.xram_addr    = xram_addr
+        self.is_byte_field = is_byte_field
 
     # ── Derived properties ────────────────────────────────────────────────────
 
@@ -132,7 +134,8 @@ class TypeGroup:
                          active_regs=new_active,
                          xram_sym=self.xram_sym,
                          is_param=self.is_param,
-                         xram_addr=self.xram_addr)
+                         xram_addr=self.xram_addr,
+                         is_byte_field=self.is_byte_field)
 
     def __repr__(self) -> str:
         return (f"TypeGroup({self.name!r}, {self.type!r}, "

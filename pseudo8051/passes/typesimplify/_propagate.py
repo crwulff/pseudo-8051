@@ -105,6 +105,33 @@ def _expr_name_refs(expr: Expr) -> frozenset:
     return frozenset(refs)
 
 
+def _count_group_uses_in_node(regs_tuple: tuple, node: HIRNode) -> int:
+    """Count occurrences of Regs(regs_tuple) appearing as a full-group expression.
+
+    Unlike _count_reg_uses_in_node, this only counts the multi-register expression
+    used as a unit — individual uses of constituent registers don't count.
+    E.g. for regs_tuple=('B','A'): 'DPTR = BA' counts as 1; 'R2 = R2 + B' counts 0.
+    """
+    count = [0]
+
+    def _fn(e: Expr) -> Expr:
+        if isinstance(e, RegExpr) and not e.is_single and e.names == regs_tuple:
+            count[0] += 1
+        return e
+
+    if isinstance(node, Assign):
+        _walk_expr(node.rhs, _fn)
+        if not isinstance(node.lhs, (RegExpr, NameExpr)):
+            _walk_expr(node.lhs, _fn)
+    elif isinstance(node, (CompoundAssign, ExprStmt)):
+        _walk_expr(getattr(node, 'rhs', None) or node.expr, _fn)
+    elif isinstance(node, ReturnStmt) and node.value is not None:
+        _walk_expr(node.value, _fn)
+    elif isinstance(node, (IfGoto, IfNode)):
+        _walk_expr(getattr(node, 'cond', None) or node.condition, _fn)
+    return count[0]
+
+
 def _xram_pre_incr_delta(node: HIRNode, r: str) -> Optional[int]:
     """If node is Assign(XRAMRef(++/-- r or r++/r--), ...), return +1 or -1.
 
@@ -536,6 +563,12 @@ def _subst_group_in_call_node(node: HIRNode, regs_tuple: tuple,
         new_call = _patch(node.rhs)
         if new_call is not None:
             result = Assign(node.ea, node.lhs, new_call)
+    elif (isinstance(node, Assign)
+          and isinstance(node.rhs, RegExpr)
+          and not node.rhs.is_single
+          and node.rhs.names == regs_tuple):
+        # Direct group-to-register copy: DPTR = BA → DPTR = replacement
+        result = Assign(node.ea, node.lhs, replacement)
     elif isinstance(node, ExprStmt) and isinstance(node.expr, Call):
         new_call = _patch(node.expr)
         if new_call is not None:
@@ -576,22 +609,31 @@ def _inline_group_setups(live: List[HIRNode],
         node = live[i]
         if not (isinstance(node, Assign)
                 and isinstance(node.lhs, RegExpr)
-                and not node.lhs.is_single
-                and isinstance(node.rhs, (Const, NameExpr))):
+                and not node.lhs.is_single):
             i += 1
             continue
 
         regs_tuple = node.lhs.names
         regs_set = set(regs_tuple)
         rhs = node.rhs
+        # Canonicalize rhs using the source node's annotation so that constant
+        # registers are folded in before substitution.  E.g. {B,A} = _var2 * B
+        # with ann.reg_consts B=3 → rhs becomes _var2 * 3.
+        if node.ann is not None:
+            rhs = _canonicalize_expr(rhs,
+                                     node.ann.reg_consts or {},
+                                     node.ann.reg_groups or [],
+                                     node.ann.reg_exprs or {})
 
-        # Find first downstream use of any register in the group.
-        # Stop scanning at the first kill (write) of any group register.
+        # Find first downstream use of the group as a unit (all registers together
+        # as a Regs(regs_tuple) expression), not individual register uses.
+        # Individual uses of group registers (e.g. B after {B,A} = MUL) don't
+        # prevent folding the group into its single group-use site.
         use_idx = None
         conflict = False
         for j in range(i + 1, len(live)):
             nd = live[j]
-            uses = sum(_count_reg_uses_in_node(r, nd) for r in regs_tuple)
+            uses = _count_group_uses_in_node(regs_tuple, nd)
             writes = nd.possibly_killed() & regs_set
             if uses > 0:
                 if use_idx is not None:

@@ -30,7 +30,7 @@ import re
 from typing import List, Optional, Tuple
 
 from pseudo8051.ir.hir   import HIRNode, Assign, ExprStmt
-from pseudo8051.ir.expr  import Reg, Regs, UnaryOp, Name, Const
+from pseudo8051.ir.expr  import Reg, Regs, UnaryOp, Name, Const, BinOp, Cast
 from pseudo8051.constants import dbg
 
 # Match a bare integer constant (used to parse Name("0x12") from XRAMLocalWritePattern)
@@ -62,7 +62,7 @@ def _is_dptr_inc(node: HIRNode) -> bool:
 
 def _valid_suffix_sequence(suffixes: List[str]) -> bool:
     """True if suffixes form a valid ordered byte-field sequence."""
-    if suffixes == ["hi", "lo"]:
+    if suffixes == ["hi", "lo"] or suffixes == ["lo", "hi"]:
         return True
     return suffixes == [f"b{i}" for i in range(len(suffixes))]
 
@@ -129,7 +129,7 @@ def _try_collapse(nodes: List[HIRNode], i: int):
         return None, i
 
     field0 = _split_field(n0.lhs.name)
-    if field0 is None or field0[1] not in ("hi", "b0"):
+    if field0 is None or field0[1] not in ("hi", "lo", "b0"):
         return None, i
 
     lhs_parent, first_suffix = field0
@@ -191,7 +191,113 @@ def _try_collapse(nodes: List[HIRNode], i: int):
         dbg("typesimp", f"  mb_assign: {lhs_parent} = {hex(value)} (const)")
         return Assign(n0.ea, Name(lhs_parent), Const(value)), j
 
+    # Try: 16-bit RMW add-with-carry from 8051 MUL result.
+    # Pattern (lo first or hi first):
+    #   var.lo = var.lo + Cast('uint8_t', full_expr)
+    #   var.hi = var.hi + mul_hi_expr [+ C]
+    # where mul_hi_expr is typically B (MUL high byte) and full_expr is the
+    # complete 16-bit MUL expression (e.g. _var2 * 3).
+    # → var = var + full_expr  (CompoundAssign var += full_expr)
+    #
+    # Only handles the 2-byte case.
+    if set(suffixes) == {"hi", "lo"} and len(rhs_exprs) == 2:
+        if suffixes == ["lo", "hi"]:
+            lo_rhs, hi_rhs = rhs_exprs
+        else:
+            hi_rhs, lo_rhs = rhs_exprs
+        full_expr = _extract_mul_addc_pair(lhs_parent, hi_rhs, lo_rhs)
+        if full_expr is not None:
+            from pseudo8051.ir.hir import CompoundAssign
+            dbg("typesimp",
+                f"  mb_assign: {lhs_parent} += {full_expr.render()} (mul-addc)")
+            node = CompoundAssign(n0.ea, Name(lhs_parent), "+=", full_expr)
+            return node, j
+
     return None, i
+
+
+def _extract_mul_addc_pair(var_name: str, hi_rhs, lo_rhs) -> Optional['Expr']:
+    """
+    Detect the 8051 16-bit add-with-carry RMW pattern from a MUL result:
+
+      var.hi = var.hi + <hi_expr> [+ C]
+      var.lo = var.lo + Cast('uint8_t', full_expr)
+
+    Returns full_expr if the pattern matches, else None.
+
+    Rules:
+      - lo_rhs must be BinOp('+', Name(var.lo)_or_alias, Cast('uint8_t', full_expr))
+        or BinOp('+', Cast('uint8_t', full_expr), Name(var.lo)_or_alias)
+      - hi_rhs must be BinOp('+', Name(var.hi)_or_alias, hi_addend)
+        where hi_addend contains Reg('B') (the MUL high-byte register) with
+        optional Reg('C') carry
+      - The cast-stripped full_expr in lo_rhs matches the value that B would
+        hold (same expression tree, or B is the only non-C non-var addend in hi)
+    """
+    # Unwrap lo: var.lo + Cast('uint8_t', full_expr)
+    full_expr = _unwrap_rmw_add(f"{var_name}.lo", lo_rhs, _is_uint8_cast)
+    if full_expr is None:
+        return None
+
+    # Unwrap hi: var.hi + <hi_addend [+ C]>
+    hi_addend = _unwrap_rmw_add(f"{var_name}.hi", hi_rhs, None)
+    if hi_addend is None:
+        return None
+
+    # hi_addend must be B, or B+C, or C+B (C is the carry from the lo add)
+    if not _is_b_plus_carry(hi_addend):
+        return None
+
+    return full_expr
+
+
+def _name_matches(expr, field_name: str) -> bool:
+    """True if expr is Name(field_name) or Regs with alias==field_name."""
+    if isinstance(expr, Name) and expr.name == field_name:
+        return True
+    if isinstance(expr, Regs) and expr.alias == field_name:
+        return True
+    return False
+
+
+def _unwrap_rmw_add(field_name: str, rhs, inner_pred) -> Optional['Expr']:
+    """
+    Match  rhs == field_name + inner  (or inner + field_name).
+    If inner_pred is given, apply it to inner and return its result.
+    If inner_pred is None, return inner directly.
+    Returns None on mismatch.
+    """
+    if not isinstance(rhs, BinOp) or rhs.op != '+':
+        return None
+    if _name_matches(rhs.lhs, field_name):
+        inner = rhs.rhs
+    elif _name_matches(rhs.rhs, field_name):
+        inner = rhs.lhs
+    else:
+        return None
+    if inner_pred is not None:
+        return inner_pred(inner)
+    return inner
+
+
+def _is_uint8_cast(expr) -> Optional['Expr']:
+    """If expr is Cast('uint8_t', inner), return inner; else None."""
+    if isinstance(expr, Cast) and expr.type_str == 'uint8_t':
+        return expr.inner
+    return None
+
+
+def _is_b_plus_carry(expr) -> bool:
+    """True if expr is B, B+C, or C+B (8051 ADDC high-byte pattern)."""
+    if isinstance(expr, Regs) and expr.is_single and expr.name == 'B':
+        return True
+    if isinstance(expr, BinOp) and expr.op == '+':
+        lhs_b = isinstance(expr.lhs, Regs) and expr.lhs.is_single and expr.lhs.name == 'B'
+        rhs_b = isinstance(expr.rhs, Regs) and expr.rhs.is_single and expr.rhs.name == 'B'
+        lhs_c = isinstance(expr.lhs, Regs) and expr.lhs.is_single and expr.lhs.name == 'C'
+        rhs_c = isinstance(expr.rhs, Regs) and expr.rhs.is_single and expr.rhs.name == 'C'
+        return (lhs_b and rhs_c) or (lhs_c and rhs_b)
+    return False
 
 
 def collapse_mb_assigns(nodes: List[HIRNode]) -> List[HIRNode]:

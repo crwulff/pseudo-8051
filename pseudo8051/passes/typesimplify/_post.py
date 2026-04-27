@@ -153,6 +153,49 @@ def _fold_inline_trampolines(hir):
     return result
 
 
+def _rename_byte_field_lhs(hir, byte_field_by_reg: dict):
+    """
+    Rename raw register LHS to their byte-field Name equivalents.
+
+    After TypeAwareSimplifier substitutes RHS reads (e.g. R1 → src.lo) but leaves
+    LHS registers unchanged, this produces mismatched nodes like:
+        R1 = src.lo + expr;
+
+    This pass renames the LHS when the register backs a byte-field variable:
+        src.lo = src.lo + expr;
+
+    This allows collapse_mb_assigns to subsequently collapse hi/lo field pairs.
+    Only runs when byte_field_by_reg is non-empty (i.e. the function has 16-bit
+    parameters whose byte-field VarInfo entries were recorded before _simplify).
+    """
+    if not byte_field_by_reg:
+        return hir
+
+    from pseudo8051.ir.hir import Assign
+    from pseudo8051.ir.expr import Regs as RegExpr, Name as NameExpr
+
+    def _rename(nodes):
+        result = []
+        for node in nodes:
+            mapped = node.map_bodies(_rename)
+            if mapped is not node:
+                result.append(mapped)
+                continue
+            if (isinstance(node, Assign)
+                    and isinstance(node.lhs, RegExpr)
+                    and node.lhs.is_single):
+                vi = byte_field_by_reg.get(node.lhs.name)
+                if vi is not None and vi.name:
+                    new_node = Assign(node.ea, NameExpr(vi.name), node.rhs)
+                    node.copy_meta_to(new_node)
+                    result.append(new_node)
+                    continue
+            result.append(mapped)
+        return result
+
+    return _rename(hir)
+
+
 def recurse_bodies(nodes, fn):
     """Recurse fn into structured node bodies; pass other nodes through."""
     return [node.map_bodies(fn) for node in nodes]

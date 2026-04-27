@@ -62,14 +62,17 @@ class TestCollapseMbAssigns:
         assert len(result) == 1
         assert result[0].render()[0][1] == "var0.hi = count.hi;"
 
-    def test_no_collapse_starts_at_lo(self):
-        """Sequence starting with .lo is not a start of a new sequence → unchanged."""
+    def test_collapse_starts_at_lo(self):
+        """Sequence starting with .lo (lo-first order) also collapses."""
         nodes = [
             Assign(0, Name("var0.lo"), Name("count.lo")),
             Assign(2, Name("var0.hi"), Name("count.hi")),
         ]
         result = collapse_mb_assigns(nodes)
-        assert len(result) == 2
+        assert len(result) == 1
+        assert isinstance(result[0], Assign)
+        assert result[0].lhs == Name("var0")
+        assert result[0].rhs == Name("count")
 
     def test_four_byte_field_var_src(self):
         """b0..b3 sequence collapses to single assignment."""

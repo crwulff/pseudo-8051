@@ -29,6 +29,7 @@ from pseudo8051.passes.typesimplify._post     import (
     _simplify_arithmetic,
     _simplify_acc_bit_test,
     _subst_xram_in_hir,
+    _rename_byte_field_lhs,
 )
 from pseudo8051.passes.typesimplify._enum_resolve import _resolve_enum_consts, _inject_callee_arg_types
 from pseudo8051.constants import dbg
@@ -93,9 +94,27 @@ class TypeAwareSimplifier(OptimizationPass):
         # registers are removed.  We restore name-keyed entries so _resolve_enum_consts
         # can still find enum types for params (e.g. specialFunction: Win7SpecialFunction).
         param_by_name: dict = {}
-        for v in reg_map.values():
-            if isinstance(v, VarInfo) and v.is_param and v.name:
-                param_by_name[v.name] = v
+        # Snapshot byte-field register→Name mapping for LHS renaming after simplify.
+        # Keyed by register name (e.g. 'R1') → byte-field name (e.g. 'src.lo').
+        # Covers two cases:
+        #   1. VarInfo.is_byte_field=True (DPH/DPL for DPTR params)
+        #   2. Register is one byte of a multi-byte VarInfo (e.g. R2 of src: int16_t)
+        from pseudo8051.passes.patterns._utils import _byte_names
+        byte_field_by_reg: dict = {}
+        seen_vi: set = set()
+        for reg, v in reg_map.items():
+            if not isinstance(v, VarInfo) or not v.name or not v.is_param:
+                continue
+            param_by_name[v.name] = v
+            if v.is_byte_field:
+                byte_field_by_reg[reg] = v
+                continue
+            if len(v.regs) > 1 and id(v) not in seen_vi:
+                seen_vi.add(id(v))
+                names = _byte_names(v.name, len(v.regs), v.type)
+                for r, fname in zip(v.regs, names):
+                    byte_field_by_reg[r] = VarInfo(fname, "uint8_t", (r,),
+                                                   is_param=True, is_byte_field=True)
         reg_map["__n__"] = [0]
         func.hir = _simplify(func.hir, reg_map)
         _drain_pending_removed(func)
@@ -141,6 +160,11 @@ class TypeAwareSimplifier(OptimizationPass):
         # intervening nodes.
         func.hir = _fold_xram_call_args(func.hir)
         func.hir = _simplify_acc_bit_test(func.hir)
+
+        # Rename byte-field register LHS to their named equivalents so that
+        # collapse_mb_assigns can collapse hi/lo field pairs.
+        # E.g.  R1 = src.lo + expr  →  src.lo = src.lo + expr
+        func.hir = _rename_byte_field_lhs(func.hir, byte_field_by_reg)
 
         func.hir = collapse_mb_assigns(func.hir)
 
