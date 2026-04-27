@@ -30,13 +30,17 @@ class SwitchNode(HIRNode):
                  default_body: Optional[List['HIRNode']] = None,
                  case_comments: Optional[List[Optional[str]]] = None,
                  case_src_eas: Optional[List[frozenset]] = None,
-                 default_src_eas: Optional[frozenset] = None):
+                 default_src_eas: Optional[frozenset] = None,
+                 case_enum_names: Optional[List[Optional[List[str]]]] = None):
         super().__init__(ea)
         self.subject         = subject
         self.cases           = cases
         self.default_label   = default_label
         self.default_body    = default_body
         self.case_comments:  List[Optional[str]] = case_comments or []
+        # Per-case enum name lists: when set, case labels use enum names instead of
+        # integer constants.  None entry = fall back to integer + comment.
+        self.case_enum_names: Optional[List[Optional[List[str]]]] = case_enum_names
         # Per-case instruction EAs: one frozenset per entry in self.cases (same order).
         # None means "not tracked" — fall back to the whole-switch src_eas.
         self.case_src_eas:   Optional[List[frozenset]] = case_src_eas
@@ -52,7 +56,8 @@ class SwitchNode(HIRNode):
         return self.copy_meta_to(SwitchNode(self.ea, self.subject, new_cases, self.default_label, new_default_body,
                                              case_comments=list(self.case_comments),
                                              case_src_eas=self.case_src_eas,
-                                             default_src_eas=self.default_src_eas))
+                                             default_src_eas=self.default_src_eas,
+                                             case_enum_names=list(self.case_enum_names) if self.case_enum_names is not None else None))
 
     def render(self, indent: int = 0) -> List[Tuple[int, str]]:
         ind  = self._ind(indent)
@@ -60,15 +65,29 @@ class SwitchNode(HIRNode):
         lines: List[Tuple[int, str]] = []
         lines.append((self.ea, f"{ind}switch ({_render_expr(self.subject)}) {{"))
         # Pre-compute case prefixes and find max width for comment alignment.
-        prefixes = [" ".join(f"case {v}:" for v in values)
-                    for values, _ in self.cases]
+        def _case_prefix(i: int, values: List[int]) -> str:
+            enum_names = (self.case_enum_names[i]
+                          if self.case_enum_names is not None and i < len(self.case_enum_names)
+                          else None)
+            if enum_names:
+                return " ".join(f"case {n}:" for n in enum_names)
+            return " ".join(f"case {v}:" for v in values)
+
+        prefixes = [_case_prefix(i, values) for i, (values, _) in enumerate(self.cases)]
+        # Only add comments for cases that don't already use enum name labels.
         commented = [i for i in range(len(self.cases))
-                     if i < len(self.case_comments) and self.case_comments[i]]
+                     if i < len(self.case_comments) and self.case_comments[i]
+                     and (self.case_enum_names is None
+                          or i >= len(self.case_enum_names)
+                          or not self.case_enum_names[i])]
         comment_col = (max(len(prefixes[i]) for i in commented) + 2
                        if commented else 0)
         for i, (values, body) in enumerate(self.cases):
             case_prefix = prefixes[i]
-            if i < len(self.case_comments) and self.case_comments[i]:
+            has_enum_labels = (self.case_enum_names is not None
+                               and i < len(self.case_enum_names)
+                               and self.case_enum_names[i])
+            if not has_enum_labels and i < len(self.case_comments) and self.case_comments[i]:
                 pad = " " * (comment_col - len(case_prefix))
                 comment = f"{pad}// {self.case_comments[i]}"
             else:

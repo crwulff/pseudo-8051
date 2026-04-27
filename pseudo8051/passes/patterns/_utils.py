@@ -722,7 +722,8 @@ def _fold_exprs_in_node(node: HIRNode) -> HIRNode:
             return node
         return node.copy_meta_to(SwitchNode(node.ea, new_subj, node.cases,
                                              node.default_label, node.default_body,
-                                             case_comments=list(node.case_comments)))
+                                             case_comments=list(node.case_comments),
+                                             case_enum_names=list(node.case_enum_names) if node.case_enum_names is not None else None))
     return _apply_expr_subst_to_node(node, fn)
 
 
@@ -851,7 +852,8 @@ def _subst_reg_in_node(node: HIRNode, r: str,
             return None
         return node.copy_meta_to(SwitchNode(node.ea, new_subject, node.cases,
                                              node.default_label, node.default_body,
-                                             case_comments=list(node.case_comments)))
+                                             case_comments=list(node.case_comments),
+                                             case_enum_names=list(node.case_enum_names) if node.case_enum_names is not None else None))
 
     return None
 

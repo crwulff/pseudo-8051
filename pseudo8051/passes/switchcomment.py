@@ -309,6 +309,26 @@ class SwitchCaseAnnotator(OptimizationPass):
                 dbg("switch", f"  {reg_name} → param={param_name!r} addend={addend} type={type_str!r}")
                 reg_info[reg_name] = (param_name, addend, type_str)
 
+        # Detect the "simple" case: single component, no shift, no addend.
+        # For simple cases all case values can be shown as enum names directly.
+        is_simple = (len(components) == 1
+                     and components[0][1] == 0   # shift == 0
+                     and next(iter(reg_info.values()))[1] == 0)  # addend == 0
+
+        if is_simple:
+            _, _, type_str = next(iter(reg_info.values()))
+            enum_names_list: List[Optional[List[str]]] = []
+            all_resolved = True
+            for values, _ in sw.cases:
+                names = [get_enum_name(type_str, v) for v in values]
+                if any(n is None for n in names):
+                    all_resolved = False
+                enum_names_list.append(names if all(n is not None for n in names) else None)
+            if all_resolved:
+                dbg("switch", f"  simple enum switch → case_enum_names={enum_names_list}")
+                sw.case_enum_names = enum_names_list
+                return
+
         comments: List[Optional[str]] = []
         for values, _ in sw.cases:
             c = _case_comment(values, components, reg_info, get_enum_name)
