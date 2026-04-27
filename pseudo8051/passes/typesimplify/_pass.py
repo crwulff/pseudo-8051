@@ -19,6 +19,7 @@ from pseudo8051.passes.typesimplify._simplify import _simplify, _simplify_once
 from pseudo8051.passes.typesimplify._post     import (
     _consolidate_xram_local_loads, _collapse_dpl_dph, _subst_iram_in_hir,
     _collapse_dpl_dph_arithmetic,
+    _fold_inline_trampolines,
     _fold_and_prune_setups, _fold_call_arg_pairs, _propagate_values,
     _simplify_carry_comparison, _simplify_cjne_jnc,
     _simplify_orl_zero_check,
@@ -102,6 +103,7 @@ class TypeAwareSimplifier(OptimizationPass):
         func.hir = _collapse_dpl_dph_arithmetic(func.hir)
         func.hir = _subst_xram_in_hir(func.hir, reg_map)
         func.hir = _subst_iram_in_hir(func.hir, reg_map)
+        func.hir = _fold_inline_trampolines(func.hir)
         func.hir = _fold_and_prune_setups(func.hir, reg_map)
         # Remove cross-block nop-gotos in the assembled HIR (IfGoto whose target label
         # is the immediately following node in the flat list).  Must run before

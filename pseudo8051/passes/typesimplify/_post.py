@@ -44,6 +44,115 @@ from pseudo8051.passes.typesimplify._xram_call_args import ( # noqa: F401
 )
 
 
+def _fold_inline_trampolines(hir):
+    """
+    Detect inlined cross-page trampoline patterns that survived as intra-function
+    chunks (IDA owns them as part of the calling function, so resolve_callee is
+    never invoked during lifting).
+
+    Pattern:
+        Assign(Regs(DPTR), Const(offset))
+        GotoStatement(label_Y)              ← label_Y matches *_call_page_N
+
+    Replace both nodes with ExprStmt(Call(real_target)) and remove the now-dead
+    page-switch helper body that follows.
+    Recurses into structured bodies first.
+    """
+    import re
+    from pseudo8051.ir.hir import Assign, GotoStatement, Label, ExprStmt, ReturnStmt
+    from pseudo8051.ir.expr import Regs, Const, Call
+    from pseudo8051.constants import dbg
+
+    # Recurse into structured bodies first
+    hir = [node.map_bodies(_fold_inline_trampolines) for node in hir]
+
+    def _dptr_offset(node):
+        """Return the DPTR constant offset if node is Assign(DPTR..., Const), else None."""
+        if not isinstance(node, Assign):
+            return None
+        if not isinstance(node.rhs, Const):
+            return None
+        lhs = node.lhs
+        if isinstance(lhs, Regs) and set(lhs.names) <= {'DPTR', 'DPL', 'DPH'}:
+            return node.rhs.value & 0xFFFF
+        return None
+
+    def _collect_goto_labels(nodes):
+        """Collect all GotoStatement target labels in a flat node list."""
+        targets = set()
+        for nd in nodes:
+            if isinstance(nd, GotoStatement):
+                targets.add(nd.label)
+        return targets
+
+    result = list(hir)
+    i = 0
+    while i < len(result):
+        offset = _dptr_offset(result[i])
+        if offset is None:
+            i += 1
+            continue
+
+        # Find next non-Label node
+        j = i + 1
+        while j < len(result) and isinstance(result[j], Label):
+            j += 1
+        if j >= len(result) or not isinstance(result[j], GotoStatement):
+            i += 1
+            continue
+
+        target_label = result[j].label
+        # Detect page-switch helper by name pattern: *_call_page_N
+        m = re.match(r'.*_call_page_(\d+)$', target_label)
+        if not m:
+            i += 1
+            continue
+        page_num = int(m.group(1))
+
+        try:
+            import ida_name, ida_funcs
+            from pseudo8051.trampolines import _page_segment_base
+            real_ea = _page_segment_base(page_num) | offset
+            real_name = (ida_funcs.get_func_name(real_ea)
+                         or ida_name.get_name(real_ea)
+                         or hex(real_ea))
+        except Exception:
+            i += 1
+            continue
+
+        dbg("trampolines",
+            f"  fold-inline-trampoline @{hex(result[i].ea)}: "
+            f"DPTR={hex(offset)} → page {page_num} → {real_name}")
+
+        new_node = ExprStmt(result[i].ea, Call(real_name, []))
+        # Replace result[i] (DPTR assign) with new_node; remove result[j] (goto)
+        result = result[:i] + [new_node] + result[i + 1:j] + result[j + 1:]
+        # result[i] = new call node; dead page-switch body starts at i+1
+
+        # Remove the now-dead page-switch helper body.
+        # Collect goto targets from the live portion (everything up to and
+        # including the inserted call) so we know which labels are still needed.
+        live_refs = _collect_goto_labels(result[:i + 1])
+
+        k = i + 1
+        while k < len(result):
+            nd = result[k]
+            # Stop at a Label that is referenced from outside the dead zone
+            if isinstance(nd, Label) and nd.name in live_refs:
+                break
+            was_return = isinstance(nd, ReturnStmt)
+            k += 1
+            if was_return:
+                break  # page-switch chain ends at its RET
+
+        if k > i + 1:
+            result = result[:i + 1] + result[k:]
+
+        i += 1
+
+    return result
+
+
 def recurse_bodies(nodes, fn):
     """Recurse fn into structured node bodies; pass other nodes through."""
     return [node.map_bodies(fn) for node in nodes]
