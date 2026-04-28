@@ -74,6 +74,68 @@ def _collect_hir_name_refs(nodes: List[HIRNode]) -> frozenset:
     return frozenset(result)
 
 
+def _collect_unresolved_reg_refs(nodes: List[HIRNode]) -> frozenset:
+    """Like _collect_hir_name_refs but excludes register names that appear only
+    inside aliased Regs groups.
+
+    An aliased Regs (e.g. Regs(('R2','R1'), alias='src')) means the register
+    values were already resolved to a named variable; the individual register
+    names are not truly 'needed' from upstream setup assigns — the alias is the
+    real reference.  This allows _fold_and_prune_setups to prune setup assigns
+    whose registers only appear as components of fully-aliased multi-byte args.
+    """
+    from pseudo8051.ir.hir._base import _refs_from_expr
+
+    def _unresolved_refs_expr(expr: Expr) -> frozenset:
+        """Walk expr collecting only non-aliased Regs and Name references."""
+        if isinstance(expr, RegsExpr):
+            if expr.alias:
+                # Aliased: treat as a Name reference only (not raw registers)
+                return frozenset({expr.alias})
+            return expr.reg_set()
+        if isinstance(expr, NameExpr):
+            return frozenset({expr.name})
+        children = expr.children()
+        if not children:
+            return frozenset()
+        return frozenset().union(*(_unresolved_refs_expr(c) for c in children))
+
+    result: set = set()
+    for n in nodes:
+        # Reuse the HIR node's traversal but with our expr walker
+        # We replicate the read-position logic by checking node types
+        from pseudo8051.ir.hir import (Assign, TypedAssign, CompoundAssign,
+                                        ExprStmt, ReturnStmt, IfGoto, IfNode, SwitchNode)
+        if isinstance(n, (Assign, TypedAssign)):
+            result |= _unresolved_refs_expr(n.rhs)
+            lhs = n.lhs
+            if not isinstance(lhs, RegsExpr):
+                result |= _unresolved_refs_expr(lhs)
+        elif isinstance(n, CompoundAssign):
+            result |= _unresolved_refs_expr(n.lhs)  # CompoundAssign reads its LHS
+            result |= _unresolved_refs_expr(n.rhs)
+        elif isinstance(n, ExprStmt):
+            result |= _unresolved_refs_expr(n.expr)
+        elif isinstance(n, ReturnStmt) and n.value is not None:
+            result |= _unresolved_refs_expr(n.value)
+        elif isinstance(n, IfGoto):
+            result |= _unresolved_refs_expr(n.cond)
+        elif isinstance(n, IfNode):
+            result |= _unresolved_refs_expr(n.condition)
+            result |= _collect_unresolved_reg_refs(n.then_nodes)
+            result |= _collect_unresolved_reg_refs(n.else_nodes)
+        elif isinstance(n, SwitchNode):
+            result |= _unresolved_refs_expr(n.subject)
+            for _, body in n.cases:
+                if isinstance(body, list):
+                    result |= _collect_unresolved_reg_refs(body)
+            if isinstance(n.default_body, list):
+                result |= _collect_unresolved_reg_refs(n.default_body)
+        else:
+            result |= n.name_refs()
+    return frozenset(result)
+
+
 # ── Setup-fold helpers ────────────────────────────────────────────────────────
 
 def _subst_reg_in_call_node(node: HIRNode, reg: str, replacement: Expr) -> HIRNode:
@@ -146,18 +208,22 @@ def _fold_and_prune_setups(nodes: List[HIRNode],
     for k, node in enumerate(nodes):
         succ_refs = frozenset(_collect_hir_name_refs(nodes[k + 1:])) | _outer_refs
         if isinstance(node, SwitchNode):
-            # Be conservative for switch case bodies: any register written in any
-            # case body is a potential output that might be read after the switch.
-            # Add these to outer_refs so they're not pruned as dead.
-            case_writes: set = set()
-            for _, body in node.cases:
-                if isinstance(body, list):
-                    for bn in body:
-                        case_writes |= bn.written_regs
+            # A register written in one case body and read in another must not be
+            # pruned.  Collect only registers that are written in at least one case
+            # and read in at least one *other* case (or the default body), then
+            # intersect with all case-body reads so only genuinely cross-case live
+            # registers are added to outer_refs.
+            all_bodies = [body for _, body in node.cases if isinstance(body, list)]
             if isinstance(node.default_body, list):
-                for bn in node.default_body:
-                    case_writes |= bn.written_regs
-            extended = succ_refs | frozenset(case_writes)
+                all_bodies.append(node.default_body)
+            body_writes = [frozenset().union(*(bn.written_regs for bn in b)) for b in all_bodies]
+            body_reads  = [_collect_unresolved_reg_refs(b) for b in all_bodies]
+            cross_case: set = set()
+            for idx, (writes, reads) in enumerate(zip(body_writes, body_reads)):
+                # Any register written in this body that is read in any other body
+                other_reads = frozenset().union(*(body_reads[j] for j in range(len(all_bodies)) if j != idx))
+                cross_case |= writes & other_reads
+            extended = succ_refs | cross_case
             result.append(node.map_bodies(
                 lambda ns, refs=extended: _fold_and_prune_setups(ns, reg_map, refs)))
         else:
@@ -166,14 +232,21 @@ def _fold_and_prune_setups(nodes: List[HIRNode],
 
     work: List[HIRNode] = result
 
-    # Phase 1: fold Assign(Reg, Const) into the next call's args.
+    # Phase 1: fold setup assigns into the next call's args.
+    # Handles:
+    #   Assign(single Reg, Const)       → substitute Reg name in call
+    #   TypedAssign(Name(n), Const/Name) → substitute variable name in call
     for i in range(len(work)):
         node = work[i]
-        if not (isinstance(node, Assign)
-                and isinstance(node.lhs, RegsExpr) and node.lhs.is_single
-                and isinstance(node.rhs, Const)):
+        is_reg_const = (isinstance(node, Assign)
+                        and isinstance(node.lhs, RegsExpr) and node.lhs.is_single
+                        and isinstance(node.rhs, Const))
+        is_typed_const = (isinstance(node, TypedAssign)
+                          and isinstance(node.lhs, NameExpr)
+                          and isinstance(node.rhs, (Const, NameExpr)))
+        if not (is_reg_const or is_typed_const):
             continue
-        reg = node.lhs.name
+        reg = node.lhs.name if is_reg_const else node.lhs.name
         val = node.rhs
         for j in range(i + 1, len(work)):
             nj = work[j]
@@ -193,7 +266,9 @@ def _fold_and_prune_setups(nodes: List[HIRNode],
     for i, node in enumerate(work):
         if _is_call_setup_assign(node):
             lhs_regs = node.written_regs
-            all_downstream = _collect_hir_name_refs(work[i + 1:]) | _outer_refs
+            # Use unresolved-ref collection: aliased Regs (e.g. Regs(R2R1, alias='src'))
+            # count as 'src' not as 'R2'/'R1', so setup assigns for those regs can be pruned.
+            all_downstream = _collect_unresolved_reg_refs(work[i + 1:]) | _outer_refs
             if lhs_regs.isdisjoint(all_downstream):
                 dbg("typesimp",
                     f"  [{hex(node.ea)}] prune-setup: {node.lhs.render()} = {node.rhs.render()}")
@@ -266,6 +341,65 @@ def _writes_any_reg(node: HIRNode, regs: set) -> bool:
     return bool(node.written_regs & regs)
 
 
+def _inline_group_into_node(node: HIRNode, regs_key: tuple,
+                             replacement: Expr) -> Optional[HIRNode]:
+    """Replace Regs(names==regs_key) in call args of node with replacement.
+
+    Returns a new node on success, None if the group is not found.
+    """
+    def _patch_call(call: Call) -> Optional[Call]:
+        new_args = []
+        found = False
+        for a in call.args:
+            if isinstance(a, RegsExpr) and not a.is_single and a.names == regs_key:
+                new_args.append(replacement)
+                found = True
+            else:
+                new_args.append(a)
+        return Call(call.func_name, new_args) if found else None
+
+    result = None
+    if isinstance(node, ExprStmt) and isinstance(node.expr, Call):
+        new_call = _patch_call(node.expr)
+        if new_call is not None:
+            result = ExprStmt(node.ea, new_call)
+    elif isinstance(node, TypedAssign) and isinstance(node.rhs, Call):
+        new_call = _patch_call(node.rhs)
+        if new_call is not None:
+            result = TypedAssign(node.ea, node.type_str, node.lhs, new_call)
+    elif isinstance(node, Assign) and isinstance(node.rhs, Call):
+        new_call = _patch_call(node.rhs)
+        if new_call is not None:
+            result = Assign(node.ea, node.lhs, new_call)
+    if result is not None:
+        node.copy_meta_to(result)
+    return result
+
+
+def _harvest_call_arg_pairs(nodes: List[HIRNode],
+                             pair_groups: dict, reg_to_pair: dict) -> None:
+    """Recursively collect multi-byte call_arg_ann TypeGroups from all nodes."""
+    for node in nodes:
+        ann = getattr(node, "ann", None)
+        if ann is not None:
+            for g in ann.call_arg_ann:
+                if len(g.full_regs) > 1:
+                    key = g.full_regs
+                    if key not in pair_groups:
+                        pair_groups[key] = g
+                    for pr in g.full_regs:
+                        reg_to_pair.setdefault(pr, key)
+        # Recurse into structured bodies
+        for _, body in node.child_body_groups():
+            _harvest_call_arg_pairs(body, pair_groups, reg_to_pair)
+        if isinstance(node, SwitchNode):
+            for _, body in node.cases:
+                if isinstance(body, list):
+                    _harvest_call_arg_pairs(body, pair_groups, reg_to_pair)
+            if isinstance(node.default_body, list):
+                _harvest_call_arg_pairs(node.default_body, pair_groups, reg_to_pair)
+
+
 def _fold_call_arg_pairs(nodes: List[HIRNode],
                           reg_map: Dict[str, VarInfo]) -> List[HIRNode]:
     """
@@ -284,18 +418,8 @@ def _fold_call_arg_pairs(nodes: List[HIRNode],
         for r in regs_key:
             reg_to_pair[r] = regs_key
 
-    # Harvest pair entries from per-node call_arg_ann annotations.
-    for node in nodes:
-        ann = getattr(node, "ann", None)
-        if ann is None:
-            continue
-        for g in ann.call_arg_ann:
-            if len(g.full_regs) > 1:
-                key = g.full_regs
-                if key not in pair_groups:
-                    pair_groups[key] = g
-                for pr in g.full_regs:
-                    reg_to_pair.setdefault(pr, key)
+    # Harvest pair entries from call_arg_ann annotations, including nested bodies.
+    _harvest_call_arg_pairs(nodes, pair_groups, reg_to_pair)
 
     if not reg_to_pair:
         return nodes
@@ -398,9 +522,35 @@ def _fold_call_arg_pairs(nodes: List[HIRNode],
         else:
             result_node = Assign(node.ea, RegGroupExpr(regs_key), combined)
         result_node.source_nodes = [nodes[idx] for _, (idx, _) in byte_assigns.items()]
-        out.append(result_node)
         dbg("typesimp",
             f"  [{hex(node.ea)}] fold-call-arg-pair: {''.join(regs_key)} = {combined.render()}")
+
+        # Try to inline combined directly into the downstream call node.
+        # This avoids emitting a TypedAssign(RegGroup, Const) that
+        # _fold_and_prune_setups would prune (because R2/R1 aren't visible
+        # in downstream refs when the call arg uses the alias 'src') before
+        # _inline_group_setups gets a chance to fold it in.
+        inlined = False
+        max_consumed_idx = max(idx for _, (idx, _) in byte_assigns.items())
+        for k in range(max_consumed_idx + 1, len(nodes)):
+            if k in consumed:
+                continue
+            nd = nodes[k]
+            patched = _inline_group_into_node(nd, regs_key, combined)
+            if patched is not None:
+                patched.source_nodes = list(result_node.source_nodes) + list(nd.source_nodes)
+                nodes[k] = patched
+                inlined = True
+                dbg("typesimp",
+                    f"  [{hex(node.ea)}] fold-call-arg-pair: inlined "
+                    f"{''.join(regs_key)}={combined.render()} directly into downstream call")
+                break
+            # Can't patch — stop if this node reads or writes any group register
+            if _reads_any_reg(nd, all_regs) or _writes_any_reg(nd, all_regs):
+                break
+
+        if not inlined:
+            out.append(result_node)
 
         for r, (idx, _) in byte_assigns.items():
             consumed.add(idx)
