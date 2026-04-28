@@ -53,10 +53,18 @@ def _split_field(name: str) -> Optional[Tuple[str, str]]:
     return None
 
 
-def _is_dptr_inc(node: HIRNode) -> bool:
-    """True if node is a DPTR++ increment."""
-    if isinstance(node, ExprStmt) and isinstance(node.expr, UnaryOp):
-        return node.expr.op == "++" and node.expr.operand == Reg("DPTR")
+def _is_skippable(node: HIRNode) -> bool:
+    """True if node can be skipped between byte-field assign pairs.
+
+    Skips DPTR++ increments (normal XRAM traversal side-effect) and bare
+    ExprStmt(Const(...)) nodes (residual XRAM-address constants left over when
+    the surrounding movx pattern wasn't fully folded).
+    """
+    if isinstance(node, ExprStmt):
+        if isinstance(node.expr, UnaryOp):
+            return node.expr.op == "++" and node.expr.operand == Reg("DPTR")
+        if isinstance(node.expr, Const):
+            return True
     return False
 
 
@@ -139,7 +147,7 @@ def _try_collapse(nodes: List[HIRNode], i: int):
     j = i + 1
     while j < len(nodes):
         nd = nodes[j]
-        if _is_dptr_inc(nd):
+        if _is_skippable(nd):
             j += 1
             continue
         if isinstance(nd, Assign) and isinstance(nd.lhs, Name):
@@ -159,12 +167,18 @@ def _try_collapse(nodes: List[HIRNode], i: int):
 
     rhs_exprs = [p[1] for p in pairs]
 
-    # Try: all RHS are Name("rhs_parent.same_suffix") — field copy
+    # Try: all RHS are Name("rhs_parent.same_suffix") or aliased Regs — field copy
     rhs_parent = None
     valid_field = True
     for suf, rhs in zip(suffixes, rhs_exprs):
+        # Accept Name("parent.suffix") or Regs(..., alias="parent.suffix")
+        field_name = None
         if isinstance(rhs, Name):
-            f = _split_field(rhs.name)
+            field_name = rhs.name
+        elif isinstance(rhs, Regs) and rhs.alias:
+            field_name = rhs.alias
+        if field_name is not None:
+            f = _split_field(field_name)
             if f is not None and f[1] == suf:
                 if rhs_parent is None:
                     rhs_parent = f[0]
