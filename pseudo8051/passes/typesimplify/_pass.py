@@ -89,6 +89,15 @@ class TypeAwareSimplifier(OptimizationPass):
             dbg("typesimp", f"{func.name}: no register mappings found, running structural patterns only")
 
         dbg("typesimp", f"{func.name}: final reg_map={list(reg_map.keys())}")
+        # Snapshot name→type for all named locals/params so downstream passes
+        # (e.g. SwitchCaseAnnotator) can resolve types for XRAM local variables
+        # that are not function parameters.
+        xram_name_types: dict = {}
+        for _v in reg_map.values():
+            if isinstance(_v, VarInfo) and _v.name and _v.type:
+                xram_name_types.setdefault(_v.name, _v.type)
+        func.xram_name_types = xram_name_types
+
         # Snapshot caller param VarInfo entries by name before _simplify kills them.
         # _simplify updates reg_map in-place keyed by register; by the end, killed
         # registers are removed.  We restore name-keyed entries so _resolve_enum_consts

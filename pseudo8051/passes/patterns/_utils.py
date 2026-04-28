@@ -708,6 +708,16 @@ def _apply_expr_subst_to_node(node: HIRNode,
         if new_cond is node.condition:
             return node
         return _derive(IfNode(node.ea, new_cond, node.then_nodes, node.else_nodes))
+    if isinstance(node, SwitchNode):
+        new_subj = expr_fn(node.subject)
+        if new_subj is node.subject:
+            return node
+        return _derive(SwitchNode(node.ea, new_subj, node.cases,
+                                   node.default_label, node.default_body,
+                                   case_comments=list(node.case_comments),
+                                   case_enum_names=(list(node.case_enum_names)
+                                                    if node.case_enum_names is not None
+                                                    else None)))
     return node
 
 

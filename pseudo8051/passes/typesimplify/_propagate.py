@@ -412,6 +412,23 @@ def _propagate_register_copies(live: List[HIRNode],
                 dbg("propagate", f"    scan[{_j}]={_dbg_node(live[_j])} uses={_u} kill={_wr}")
 
         if total_uses == 1 and use_idx is not None:
+            # Guard: if the use-site's annotation explicitly records a DIFFERENT
+            # value for r than replacement, a kill (e.g. movx A, @DPTR loading a
+            # fresh XRAM value) happened between our def and the use but was folded
+            # away from the HIR.  Block the substitution to avoid replacing r with
+            # a stale constant.  (A use-site annotation saying r=Const(0) when
+            # replacement is also Const(0) is consistent and allows propagation.)
+            if is_reg_lhs:
+                _use_ann = getattr(live[use_idx], 'ann', None)
+                if _use_ann is not None:
+                    _ann_val = _use_ann.reg_exprs.get(r)
+                    if _ann_val is not None and _ann_val != replacement:
+                        dbg("propagate",
+                            f"  [{hex(node.ea)}] prop-blocked: {r}={replacement.render()!r} "
+                            f"— use-site annotation says {r}={_ann_val.render()!r}")
+                        i += 1
+                        continue
+
             # Guard: don't propagate past nodes that write to names (or their backing
             # registers) used in replacement.
             repl_refs = _expr_name_refs(replacement)
@@ -482,14 +499,28 @@ def _propagate_register_copies(live: List[HIRNode],
         elif total_uses > 1 and is_reg_lhs and _is_reg_free(replacement) and use_idx is not None:
             # Multi-use propagation only for Reg-lhs: Name-lhs replacements may be
             # Call exprs or other side-effecting expressions that cannot be duplicated.
-            # All-or-nothing: every use site must accept the substitution; if any
-            # _subst_reg_in_node call returns None (e.g. because the register is
-            # embedded in a multi-reg group that cannot be split), skip entirely so
-            # that we never emit a partially-substituted inconsistent expression.
+            # All-or-nothing within any hidden-kill boundary: if a use site's
+            # annotation records a DIFFERENT value for r than replacement, a kill
+            # happened between our def and that site but was folded away from the HIR
+            # (e.g. movx A,@DPTR that loaded a new value but was removed because its
+            # only HIR use was already propagated).  Treat that site as a hard boundary
+            # and only substitute use sites before it.
             end = kill_idx if kill_idx is not None else len(live)
+            hidden_kill = end
+            for _hk in range(i + 1, end):
+                if _count_reg_uses_in_node(r, live[_hk]) > 0:
+                    _hk_ann = getattr(live[_hk], 'ann', None)
+                    if _hk_ann is not None:
+                        _hk_val = _hk_ann.reg_exprs.get(r)
+                        if _hk_val is not None and _hk_val != replacement:
+                            hidden_kill = _hk
+                            dbg("propagate",
+                                f"  [{hex(node.ea)}] prop-multi: hidden kill of {r}"
+                                f" at {_hk} (annotation says {r}={_hk_val.render()!r})")
+                            break
             tentative: dict = {}
             all_ok = True
-            for j in range(i + 1, end):
+            for j in range(i + 1, hidden_kill):
                 if _count_reg_uses_in_node(r, live[j]) > 0:
                     new_node = _subst_reg_in_node(live[j], r, replacement)
                     if new_node is None:
@@ -502,6 +533,8 @@ def _propagate_register_copies(live: List[HIRNode],
                     # Record the defining node as a source of every use site.
                     new_node.source_nodes = [src_node] + list(live[j].source_nodes or [live[j]])
                     live[j] = new_node
+                # Use the full end (not hidden_kill) for the remaining check so we
+                # don't remove live[i] if r is still needed beyond the boundary.
                 remaining = _collect_hir_name_refs(live[i + 1:end])
                 if r not in remaining:
                     live[i] = None

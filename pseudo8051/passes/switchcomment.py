@@ -238,6 +238,12 @@ class SwitchCaseAnnotator(OptimizationPass):
             dbg("switch", f"SwitchCaseAnnotator: no proto for {func.name!r}, skipping")
             return
         name_type: Dict[str, str] = {p.name: p.type for p in proto.params}
+        # Also include XRAM locals/callee params that have enum types, so switch
+        # subjects of the form  switch(rotateDir)  get case labels resolved even
+        # when the local is not a function parameter.  TypeAwareSimplifier stores
+        # this snapshot on func.xram_name_types.
+        for _name, _type in getattr(func, "xram_name_types", {}).items():
+            name_type.setdefault(_name, _type)
         dbg("switch", f"SwitchCaseAnnotator: {func.name!r} name_type={name_type}")
         if not name_type:
             return
