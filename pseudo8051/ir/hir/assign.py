@@ -2,7 +2,7 @@
 ir/hir/assign.py — Assign and TypedAssign nodes.
 """
 
-from typing import List, Tuple
+from typing import Callable, List, Tuple
 
 from pseudo8051.ir.hir._base import HIRNode, _render_expr, _render_call_with_comments, _ann_field, _lhs_written_regs, _refs_from_expr
 from pseudo8051.ir.expr import Expr, Regs as RegsExpr, Call as CallExpr
@@ -41,6 +41,16 @@ class Assign(HIRNode):
             refs = refs | _refs_from_expr(self.lhs)
         return refs
 
+    def map_exprs(self, fn: Callable[[Expr], Expr]) -> "Assign":
+        new_rhs = fn(self.rhs)
+        if new_rhs is self.rhs:
+            return self
+        return Assign(self.ea, self.lhs, new_rhs)
+
+    def _rebuild(self, new_lhs: Expr, new_rhs: Expr) -> "Assign":
+        """Return a copy of this node with new_lhs/new_rhs, preserving subclass metadata."""
+        return Assign(self.ea, new_lhs, new_rhs)
+
     def ann_lines(self) -> List[str]:
         return ["Assign"] + _ann_field("lhs", self.lhs) + _ann_field("rhs", self.rhs)
 
@@ -57,6 +67,15 @@ class TypedAssign(Assign):
                    if isinstance(self.rhs, CallExpr)
                    else _render_expr(self.rhs))
         return [(self.ea, f"{self._ind(indent)}{self.type_str} {_render_expr(self.lhs)} = {rhs_str};")]
+
+    def map_exprs(self, fn: Callable[[Expr], Expr]) -> "TypedAssign":
+        new_rhs = fn(self.rhs)
+        if new_rhs is self.rhs:
+            return self
+        return TypedAssign(self.ea, self.type_str, self.lhs, new_rhs)
+
+    def _rebuild(self, new_lhs: Expr, new_rhs: Expr) -> "TypedAssign":
+        return TypedAssign(self.ea, self.type_str, new_lhs, new_rhs)
 
     def ann_lines(self) -> List[str]:
         return ["TypedAssign", f"  type: {self.type_str!r}"] + _ann_field("lhs", self.lhs) + _ann_field("rhs", self.rhs)

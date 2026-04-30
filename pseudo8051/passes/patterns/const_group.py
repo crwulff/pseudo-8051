@@ -12,28 +12,8 @@ from pseudo8051.constants import dbg
 from pseudo8051.passes.patterns.base   import CombineTransform, Match, Simplify
 from pseudo8051.passes.patterns._utils import (
     VarInfo, _replace_pairs, _parse_int, _const_str, _type_bytes,
-    _walk_expr, _fold_into_node,
+    _walk_expr, _fold_into_node, _node_assign_imm, _node_assign_reg,
 )
-
-
-def _node_as_assign_imm(node: HIRNode):
-    """If node assigns an immediate to a register, return (dst_name, int_value)."""
-    if isinstance(node, Assign):
-        lhs = node.lhs
-        rhs = node.rhs
-        if isinstance(lhs, Regs) and lhs.is_single and isinstance(rhs, Const):
-            return (lhs.name, rhs.value)
-    return None
-
-
-def _node_as_assign_reg(node: HIRNode):
-    """Return (dst_name, src_name) if node is a simple reg=reg assignment."""
-    if isinstance(node, Assign):
-        lhs = node.lhs
-        rhs = node.rhs
-        if isinstance(lhs, Regs) and lhs.is_single and isinstance(rhs, Regs) and rhs.is_single:
-            return (lhs.name, rhs.name)
-    return None
 
 
 def _scan_const_group(nodes: List[HIRNode], start: int,
@@ -54,7 +34,7 @@ def _scan_const_group(nodes: List[HIRNode], start: int,
     while i < max_i and len(reg_values) < len(regs_needed):
         node = nodes[i]
 
-        imm_result = _node_as_assign_imm(node)
+        imm_result = _node_assign_imm(node)
         if imm_result is not None:
             dst, val = imm_result
             if dst == "A":
@@ -63,7 +43,7 @@ def _scan_const_group(nodes: List[HIRNode], start: int,
                 reg_values[dst] = val; i += 1; continue
             break
 
-        reg_result = _node_as_assign_reg(node)
+        reg_result = _node_assign_reg(node)
         if reg_result is not None:
             dst, src = reg_result
             if dst in regs_needed and src == "A" and a_value is not None \

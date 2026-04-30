@@ -28,6 +28,7 @@ from pseudo8051.passes.patterns._utils import (
     VarInfo,
     _subst_all_expr,
     _walk_expr,
+    _contains_a,
     _count_reg_uses_in_node,
 )
 
@@ -176,19 +177,6 @@ def _parse_simple_expr(s: str) -> Optional[Expr]:
     if re.match(r'^[A-Za-z_]\w*$', s):
         return Name(s)
     return None
-
-
-def _contains_a(expr: Expr) -> bool:
-    """Return True if Reg("A") appears anywhere in the Expr tree."""
-    found = [False]
-
-    def _fn(e: Expr) -> Expr:
-        if e == Reg("A"):
-            found[0] = True
-        return e
-
-    _walk_expr(expr, _fn)
-    return found[0]
 
 
 def _subst_a(expr: Expr, replacement: Expr) -> Expr:
@@ -423,15 +411,6 @@ class AccumFoldPattern(Pattern):
                 new_node = IfNode(a_start_node.ea, new_cond, new_then, new_else)
                 new_node.source_nodes = [n for n in nodes[i:j + 1] if id(n) not in _skip_ids]
                 return (skipped + [new_node], j + 1)
-            if isinstance(cond, str) and re.search(r'\bA\b', cond):
-                rendered = a_expr_subst.render()
-                new_cond_str = re.sub(r'\bA\b', rendered, cond)
-                new_then = simplify(terminal.then_nodes, reg_map)
-                new_else = simplify(terminal.else_nodes, reg_map) if terminal.else_nodes else []
-                dbg("typesimp", f"  [{hex(a_start_node.ea)}] accum_fold (IfNode str): folded {rendered} into cond")
-                new_node = IfNode(a_start_node.ea, new_cond_str, new_then, new_else)
-                new_node.source_nodes = [n for n in nodes[i:j + 1] if id(n) not in _skip_ids]
-                return (skipped + [new_node], j + 1)
 
         # Assign(target, Reg("A")) where target != A:
         # only fold if there was at least one compound assign or a DPTR prefix
@@ -483,41 +462,36 @@ class AccumFoldPattern(Pattern):
             carry_cond = BinOp(minuend, "<",  subtrahend)
             no_carry   = BinOp(minuend, ">=", subtrahend)
 
-            def _is_carry(c) -> bool:
-                return c == Reg("C")
-
-            def _is_not_carry(c) -> bool:
-                from pseudo8051.ir.expr import UnaryOp
-                return (isinstance(c, UnaryOp) and c.op == "!" and _is_carry(c.operand))
+            def _carry_cond_for(c) -> Optional[BinOp]:
+                """Map a carry/not-carry condition to its comparison form, or None."""
+                if c == Reg("C"):
+                    return carry_cond
+                if isinstance(c, UnaryOp) and c.op == "!" and c.operand == Reg("C"):
+                    return no_carry
+                return None
 
             if isinstance(terminal, IfGoto):
-                if _is_carry(terminal.cond):
+                new_c = _carry_cond_for(terminal.cond)
+                if new_c is not None:
+                    op_str = "<" if new_c is carry_cond else ">="
                     dbg("typesimp",
-                        f"  [{hex(a_start_node.ea)}] accum_fold (carry< IfGoto): {minuend.render()} < {subtrahend.render()}")
-                    new_if = IfGoto(a_start_node.ea, carry_cond, terminal.label)
-                    new_if.source_nodes = [n for n in nodes[i:j + 1] if id(n) not in _skip_ids]
-                    return (skipped + [new_if], j + 1)
-                if _is_not_carry(terminal.cond):
-                    dbg("typesimp",
-                        f"  [{hex(a_start_node.ea)}] accum_fold (carry>= IfGoto): {minuend.render()} >= {subtrahend.render()}")
-                    new_if = IfGoto(a_start_node.ea, no_carry, terminal.label)
+                        f"  [{hex(a_start_node.ea)}] accum_fold (carry{op_str} IfGoto): "
+                        f"{minuend.render()} {op_str} {subtrahend.render()}")
+                    new_if = IfGoto(a_start_node.ea, new_c, terminal.label)
                     new_if.source_nodes = [n for n in nodes[i:j + 1] if id(n) not in _skip_ids]
                     return (skipped + [new_if], j + 1)
 
             if isinstance(terminal, IfNode):
                 cond = terminal.condition
-                new_then = simplify(terminal.then_nodes, reg_map)
-                new_else = simplify(terminal.else_nodes, reg_map) if terminal.else_nodes else []
-                if _is_carry(cond):
+                new_c = _carry_cond_for(cond)
+                if new_c is not None:
+                    op_str = "<" if new_c is carry_cond else ">="
                     dbg("typesimp",
-                        f"  [{hex(a_start_node.ea)}] accum_fold (carry< IfNode): {minuend.render()} < {subtrahend.render()}")
-                    new_node = IfNode(a_start_node.ea, carry_cond, new_then, new_else)
-                    new_node.source_nodes = [n for n in nodes[i:j + 1] if id(n) not in _skip_ids]
-                    return (skipped + [new_node], j + 1)
-                if _is_not_carry(cond):
-                    dbg("typesimp",
-                        f"  [{hex(a_start_node.ea)}] accum_fold (carry>= IfNode): {minuend.render()} >= {subtrahend.render()}")
-                    new_node = IfNode(a_start_node.ea, no_carry, new_then, new_else)
+                        f"  [{hex(a_start_node.ea)}] accum_fold (carry{op_str} IfNode): "
+                        f"{minuend.render()} {op_str} {subtrahend.render()}")
+                    new_then = simplify(terminal.then_nodes, reg_map)
+                    new_else = simplify(terminal.else_nodes, reg_map) if terminal.else_nodes else []
+                    new_node = IfNode(a_start_node.ea, new_c, new_then, new_else)
                     new_node.source_nodes = [n for n in nodes[i:j + 1] if id(n) not in _skip_ids]
                     return (skipped + [new_node], j + 1)
 

@@ -12,20 +12,12 @@ from pseudo8051.ir.expr import Reg, Regs, Const, XRAMRef, UnaryOp, Name, BinOp, 
 from pseudo8051.constants import dbg
 from pseudo8051.passes.patterns.base   import CombineTransform, Match, Simplify
 from pseudo8051.passes.patterns._utils import (
-    VarInfo, _type_bytes, _const_str, _replace_pairs,
+    VarInfo, _type_bytes, _const_str, _replace_pairs, _node_a_from_reg,
 )
 
 
 def _parse_const(s: str) -> int:
     return int(s, 16) if s.lower().startswith('0x') else int(s)
-
-
-def _node_is_a_from_reg(node: HIRNode) -> Optional[str]:
-    """If node is 'A = Rn;', return Rn; else None."""
-    if isinstance(node, Assign):
-        if node.lhs == Reg("A") and isinstance(node.rhs, Regs) and node.rhs.is_single:
-            return node.rhs.name
-    return None
 
 
 def _node_add_const(node: HIRNode) -> Optional[int]:
@@ -129,7 +121,7 @@ class MultiByteAddPattern(CombineTransform):
         def get(k): return nodes[k] if k < n_total else None
 
         # 1. A = Rlo;
-        Rlo = _node_is_a_from_reg(get(j)) if get(j) else None
+        Rlo = _node_a_from_reg(get(j)) if get(j) else None
         if not Rlo: return None
         j += 1
         dbg("mb-add", f"[{i}] step1 ok  Rlo={Rlo!r}")
@@ -146,7 +138,7 @@ class MultiByteAddPattern(CombineTransform):
 
         # 4. A = Rhi;
         node4 = get(j)
-        Rhi = _node_is_a_from_reg(node4) if node4 else None
+        Rhi = _node_a_from_reg(node4) if node4 else None
         if not Rhi or Rhi == Rlo: return None
         j += 1
         dbg("mb-add", f"[{i}] step4 ok  Rhi={Rhi!r}")
@@ -175,7 +167,7 @@ class MultiByteAddPattern(CombineTransform):
 
         # 8. Optional reload: A = Rlo;
         node8 = get(j)
-        if node8 and _node_is_a_from_reg(node8) == Rlo:
+        if node8 and _node_a_from_reg(node8) == Rlo:
             j += 1
 
         # 9. XRAM[sym_lo] = A;

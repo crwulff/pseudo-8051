@@ -4,14 +4,12 @@ ir/hir/if_node.py — IfNode structured control-flow node.
 
 from typing import Callable, List, Optional, Tuple
 
-from pseudo8051.ir.hir._base import HIRNode, _render_cond, _ann_field, _Cond, _killed_by_seq, _possibly_killed_by_seq, _refs_from_expr
+from pseudo8051.ir.hir._base import HIRNode, _render_cond, _ann_field, _Cond, _killed_by_seq, _possibly_killed_by_seq, _cond_refs
 
 
 class IfNode(HIRNode):
     """
     if (condition) { then_nodes } [else { else_nodes }]
-
-    condition may be str (legacy) or Expr (Phase 7+).
     """
 
     def __init__(self, ea: int, condition: _Cond,
@@ -53,10 +51,14 @@ class IfNode(HIRNode):
         return lines
 
     def name_refs(self) -> frozenset:
-        from pseudo8051.ir.expr import Expr
-        cond_refs = _refs_from_expr(self.condition) if isinstance(self.condition, Expr) else frozenset()
         body_refs = frozenset().union(*(n.name_refs() for n in self.then_nodes + self.else_nodes))
-        return cond_refs | body_refs
+        return _cond_refs(self.condition) | body_refs
+
+    def map_exprs(self, fn) -> "IfNode":
+        new_cond = fn(self.condition)
+        if new_cond is self.condition:
+            return self
+        return IfNode(self.ea, new_cond, self.then_nodes, self.else_nodes)
 
     def replace_condition(self, new_cond) -> "IfNode":
         return self.copy_meta_to(IfNode(self.ea, new_cond, self.then_nodes, self.else_nodes))

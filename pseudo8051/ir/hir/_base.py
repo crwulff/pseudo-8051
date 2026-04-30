@@ -14,42 +14,42 @@ from pseudo8051.ir.expr import Expr, Regs as _RegsExpr, Name as _NameExpr
 _HIR_DIR = _os.path.normpath(_os.path.abspath(_os.path.dirname(__file__))) + _os.sep
 
 
+# Ordered list of (path-substring, label) pairs.  First match wins.
+# More-specific entries must precede less-specific ones.
+_PASS_NAME_TABLE = [
+    # typesimplify sub-modules (specific before generic)
+    ("typesimplify/_propagate",   "Propagation"),
+    ("typesimplify/_setup_fold",  "SetupFold"),
+    ("typesimplify/_simplify",    "Simplifier"),
+    ("typesimplify/_post",        "PostProcess"),
+    ("typesimplify/_return_fold", "ReturnFold"),
+    ("typesimplify/",             "Simplifier"),
+    # handlers
+    ("handlers/",                 "Lift"),
+    # pass modules (split sub-modules listed before the public entry point)
+    ("passes/annotate",           "Annotation"),
+    ("passes/rmw",                "RMW"),
+    ("passes/chunk_inline",       "ChunkInline"),
+    ("passes/_switch_detect",     "Switch"),
+    ("passes/_switch_build",      "Switch"),
+    ("passes/switch",             "Switch"),
+    ("passes/_ifelse_helpers",    "IfElse"),
+    ("passes/ifelse",             "IfElse"),
+    ("passes/jmptable",           "JmpTable"),
+    # IR construction
+    ("ir/basicblock",             "InitialHIR"),
+    ("ir/function",               "Function"),
+]
+
+
 def _pass_name(short: str) -> str:
     """Derive a human-readable pass label from a pseudo8051-relative file path."""
-    s = short
-    if "handlers/" in s:
-        return "Lift"
-    if "passes/annotate" in s:
-        return "Annotation"
-    if "passes/rmw" in s:
-        return "RMW"
-    if "passes/chunk_inline" in s:
-        return "ChunkInline"
-    if "passes/switch" in s:
-        return "Switch"
-    if "passes/ifelse" in s:
-        return "IfElse"
-    if "passes/jmptable" in s:
-        return "JmpTable"
-    if "typesimplify/_propagate" in s:
-        return "Propagation"
-    if "typesimplify/_setup_fold" in s:
-        return "SetupFold"
-    if "typesimplify/_simplify" in s:
-        return "Simplifier"
-    if "typesimplify/_post" in s:
-        return "PostProcess"
-    if "typesimplify/_return_fold" in s:
-        return "ReturnFold"
-    if "typesimplify/" in s:
-        return "Simplifier"
-    if "passes/patterns/" in s:
-        base = s.rsplit("/", 1)[-1].replace(".py", "")
+    for key, label in _PASS_NAME_TABLE:
+        if key in short:
+            return label
+    if "passes/patterns/" in short:
+        base = short.rsplit("/", 1)[-1].replace(".py", "")
         return f"Pattern:{base}"
-    if "ir/basicblock" in s:
-        return "InitialHIR"
-    if "ir/function" in s:
-        return "Function"
     return ""
 
 
@@ -247,6 +247,18 @@ class HIRNode(ABC):
 
         Leaf nodes (Assign, ExprStmt, ReturnStmt, etc.) return self unchanged.
         Structured nodes (IfNode, WhileNode, etc.) rebuild with mapped bodies.
+        """
+        return self
+
+    def map_exprs(self, fn: "Callable[[Expr], Expr]") -> "HIRNode":
+        """Return a copy of this node with fn applied to every read-position Expr.
+
+        LHS of assignments is not transformed (it is a write destination, not a
+        read position).  Returns self unchanged if fn changes nothing.
+        Leaf-like nodes with no expression operands return self.
+
+        Callers that need to track provenance should copy metadata after calling
+        this method (map_exprs does not touch ann or source_nodes).
         """
         return self
 
@@ -455,13 +467,15 @@ def _possibly_killed_by_seq(nodes: "List[HIRNode]") -> frozenset:
 
 
 # ── Condition type alias ──────────────────────────────────────────────────────
-# Structural nodes accept str | Expr during migration; Phase 8 removes str.
 
-_Cond = Union[str, Expr]
+_Cond = Expr
 
 
 def _render_cond(c: _Cond) -> str:
-    """Render a condition that is either a plain str or an Expr."""
-    if isinstance(c, Expr):
-        return c.render()
-    return str(c)
+    """Render a condition Expr to a string."""
+    return c.render()
+
+
+def _cond_refs(c: _Cond) -> frozenset:
+    """Return register/name refs from a condition Expr."""
+    return _refs_from_expr(c)

@@ -4,7 +4,7 @@ ir/hir/for_node.py — ForNode structured control-flow node.
 
 from typing import Callable, List, Tuple, Union
 
-from pseudo8051.ir.hir._base import HIRNode, _render_expr, _render_cond, _ann_field, _Cond, _killed_by_seq, _possibly_killed_by_seq, _refs_from_expr
+from pseudo8051.ir.hir._base import HIRNode, _render_expr, _render_cond, _ann_field, _Cond, _killed_by_seq, _possibly_killed_by_seq, _cond_refs
 from pseudo8051.ir.hir.assign import Assign
 from pseudo8051.ir.expr import Expr
 
@@ -13,8 +13,8 @@ class ForNode(HIRNode):
     """
     for (init; condition; update) { body_nodes }
 
-    init/condition/update may be str (legacy) or Assign/Expr (Phase 7+).
-    init may be None for promoted loops where the counter is already set.
+    init may be None (counter set before loop) or Assign.
+    update may be str (CompoundAssign rendered) or Expr (UnaryOp).
     """
 
     def __init__(self, ea: int,
@@ -61,17 +61,16 @@ class ForNode(HIRNode):
         lines.append((self.ea,
                        f"{ind}for ({self._render_init()}; "
                        f"{_render_cond(self.condition)}; "
-                       f"{_render_cond(self.update)}) {{"))
+                       f"{_render_expr(self.update)}) {{"))
         for node in self.body_nodes:
             lines.extend(node.render(indent + 1))
         lines.append((self.ea, f"{ind}}}"))
         return lines
 
     def name_refs(self) -> frozenset:
-        cond_refs = _refs_from_expr(self.condition) if isinstance(self.condition, Expr) else frozenset()
-        upd_refs  = _refs_from_expr(self.update)    if isinstance(self.update,    Expr) else frozenset()
         body_refs = frozenset().union(*(n.name_refs() for n in self.body_nodes))
-        return cond_refs | upd_refs | body_refs
+        update_refs = _cond_refs(self.update) if isinstance(self.update, Expr) else frozenset()
+        return _cond_refs(self.condition) | update_refs | body_refs
 
     def ann_lines(self) -> List[str]:
         return (["ForNode"] + _ann_field("init", self.init)

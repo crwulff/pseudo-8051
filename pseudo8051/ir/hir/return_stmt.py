@@ -2,7 +2,7 @@
 ir/hir/return_stmt.py — ReturnStmt node.
 """
 
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 from pseudo8051.ir.hir._base import HIRNode, _render_expr, _ann_field, _refs_from_expr
 from pseudo8051.ir.expr import Expr
@@ -24,6 +24,14 @@ class ReturnStmt(HIRNode):
 
     def name_refs(self) -> frozenset:
         return _refs_from_expr(self.value) if self.value is not None else frozenset()
+
+    def map_exprs(self, fn: Callable[[Expr], Expr]) -> "ReturnStmt":
+        if self.value is None:
+            return self
+        new_val = fn(self.value)
+        if new_val is self.value:
+            return self
+        return ReturnStmt(self.ea, new_val, self.comment)
 
     def ann_lines(self) -> List[str]:
         return ["ReturnStmt"] + _ann_field("value", self.value)

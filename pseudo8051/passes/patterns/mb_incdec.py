@@ -27,21 +27,7 @@ from pseudo8051.ir.hir import HIRNode, Assign, ExprStmt, IfGoto, Label
 from pseudo8051.ir.expr import Expr, Reg, Regs, Const, Name, XRAMRef, BinOp, UnaryOp
 from pseudo8051.constants import dbg
 from pseudo8051.passes.patterns.base   import CombineTransform, Match, Simplify
-from pseudo8051.passes.patterns._utils import VarInfo
-
-
-def _contains_a(expr: Expr) -> bool:
-    """Return True if Reg("A") appears anywhere in the Expr tree."""
-    from pseudo8051.passes.patterns._utils import _walk_expr
-    found = [False]
-
-    def _fn(e: Expr) -> Expr:
-        if e == Reg("A"):
-            found[0] = True
-        return e
-
-    _walk_expr(expr, _fn)
-    return found[0]
+from pseudo8051.passes.patterns._utils import VarInfo, _contains_a
 
 
 def _try_unit(nodes: List[HIRNode], j: int,

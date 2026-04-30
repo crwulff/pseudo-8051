@@ -2,7 +2,7 @@
 ir/hir/if_goto.py — IfGoto node.
 """
 
-from typing import List, Tuple
+from typing import Callable, List, Tuple
 
 from pseudo8051.ir.hir._base import HIRNode, _render_expr, _ann_field, _refs_from_expr
 from pseudo8051.ir.expr import Expr
@@ -21,6 +21,12 @@ class IfGoto(HIRNode):
 
     def name_refs(self) -> frozenset:
         return _refs_from_expr(self.cond)
+
+    def map_exprs(self, fn: Callable[[Expr], Expr]) -> "IfGoto":
+        new_cond = fn(self.cond)
+        if new_cond is self.cond:
+            return self
+        return IfGoto(self.ea, new_cond, self.label)
 
     def replace_condition(self, new_cond: Expr) -> "IfGoto":
         return self.copy_meta_to(IfGoto(self.ea, new_cond, self.label))

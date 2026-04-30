@@ -2,7 +2,7 @@
 ir/hir/expr_stmt.py — ExprStmt node.
 """
 
-from typing import List, Tuple
+from typing import Callable, List, Tuple
 
 from pseudo8051.ir.hir._base import HIRNode, _render_expr, _render_call_with_comments, _ann_field, _refs_from_expr
 from pseudo8051.ir.expr import Expr, Call as CallExpr
@@ -32,6 +32,12 @@ class ExprStmt(HIRNode):
 
     def name_refs(self) -> frozenset:
         return _refs_from_expr(self.expr)
+
+    def map_exprs(self, fn: Callable[[Expr], Expr]) -> "ExprStmt":
+        new_expr = fn(self.expr)
+        if new_expr is self.expr:
+            return self
+        return ExprStmt(self.ea, new_expr)
 
     def ann_lines(self) -> List[str]:
         return ["ExprStmt"] + _ann_field("expr", self.expr)

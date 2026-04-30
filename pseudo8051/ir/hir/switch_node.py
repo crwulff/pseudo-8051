@@ -47,6 +47,18 @@ class SwitchNode(HIRNode):
         # EAs for the default arm's comparison/branch instruction(s).
         self.default_src_eas: Optional[frozenset] = default_src_eas
 
+    def map_exprs(self, fn: Callable[[Expr], Expr]) -> "SwitchNode":
+        new_subj = fn(self.subject)
+        if new_subj is self.subject:
+            return self
+        return SwitchNode(self.ea, new_subj, self.cases,
+                          self.default_label, self.default_body,
+                          case_comments=list(self.case_comments),
+                          case_src_eas=self.case_src_eas,
+                          default_src_eas=self.default_src_eas,
+                          case_enum_names=(list(self.case_enum_names)
+                                           if self.case_enum_names is not None else None))
+
     def map_bodies(self, fn: Callable[[List[HIRNode]], List[HIRNode]]) -> "SwitchNode":
         new_cases = [
             (vals, fn(body) if isinstance(body, list) else body)

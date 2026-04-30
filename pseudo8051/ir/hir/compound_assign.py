@@ -2,7 +2,7 @@
 ir/hir/compound_assign.py — CompoundAssign node.
 """
 
-from typing import List, Tuple
+from typing import Callable, List, Tuple
 
 from pseudo8051.ir.hir._base import HIRNode, _render_expr, _ann_field, _lhs_written_regs, _refs_from_expr
 from pseudo8051.ir.expr import Expr, Regs as RegsExpr, Name as NameExpr
@@ -30,6 +30,12 @@ class CompoundAssign(HIRNode):
         if isinstance(self.lhs, (RegsExpr, NameExpr)):
             refs = refs | frozenset({self.lhs.name})
         return refs
+
+    def map_exprs(self, fn: Callable[[Expr], Expr]) -> "CompoundAssign":
+        new_rhs = fn(self.rhs)
+        if new_rhs is self.rhs:
+            return self
+        return CompoundAssign(self.ea, self.lhs, self.op, new_rhs)
 
     def ann_lines(self) -> List[str]:
         return (["CompoundAssign"] + _ann_field("lhs", self.lhs)

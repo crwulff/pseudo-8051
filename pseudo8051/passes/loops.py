@@ -16,7 +16,6 @@ Multiple back-edges to the same header are handled as a single loop:
   - Conditional back-edges (IfGoto) become IfNodes gating the tail body.
 """
 
-import re
 from collections import defaultdict
 from typing import List, Set, Optional, Tuple
 
@@ -165,10 +164,6 @@ def _extract_cond_reg(cond) -> Optional[str]:
         return cond.name
     if isinstance(cond, BinOp) and isinstance(cond.lhs, Regs) and cond.lhs.is_single:
         return cond.lhs.name
-    if isinstance(cond, str):
-        m = re.match(r'^(\w+)\s*(?:!=|==|<|>|<=|>=)', cond)
-        if m:
-            return m.group(1)
     return None
 
 
@@ -507,7 +502,7 @@ class LoopStructurer(OptimizationPass):
                 else:
                     loop_node = WhileNode(
                         loop_ea,
-                        condition="1",
+                        condition=Const(1),
                         body_nodes=header_stmts + [guard] + body_hir,
                     )
             else:
@@ -535,7 +530,7 @@ class LoopStructurer(OptimizationPass):
                 header_stmts = []
             else:
                 dbg("loops", f"  → WhileNode (infinite)")
-                loop_node = WhileNode(loop_ea, condition="1",
+                loop_node = WhileNode(loop_ea, condition=Const(1),
                                       body_nodes=body_hir)
 
         # ── Replace header's HIR ─────────────────────────────────────────

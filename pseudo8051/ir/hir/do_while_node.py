@@ -4,14 +4,12 @@ ir/hir/do_while_node.py — DoWhileNode structured control-flow node.
 
 from typing import Callable, List, Tuple
 
-from pseudo8051.ir.hir._base import HIRNode, _render_cond, _ann_field, _Cond, _killed_by_seq, _possibly_killed_by_seq, _refs_from_expr
+from pseudo8051.ir.hir._base import HIRNode, _render_cond, _ann_field, _Cond, _killed_by_seq, _possibly_killed_by_seq, _cond_refs
 
 
 class DoWhileNode(HIRNode):
     """
     do { body_nodes } while (condition);
-
-    condition may be str (legacy) or Expr.
     """
 
     def __init__(self, ea: int, condition: _Cond, body_nodes: List[HIRNode]):
@@ -45,10 +43,8 @@ class DoWhileNode(HIRNode):
         return lines
 
     def name_refs(self) -> frozenset:
-        from pseudo8051.ir.expr import Expr
-        cond_refs = _refs_from_expr(self.condition) if isinstance(self.condition, Expr) else frozenset()
         body_refs = frozenset().union(*(n.name_refs() for n in self.body_nodes))
-        return cond_refs | body_refs
+        return _cond_refs(self.condition) | body_refs
 
     def ann_lines(self) -> List[str]:
         return (["DoWhileNode"] + _ann_field("cond", self.condition)

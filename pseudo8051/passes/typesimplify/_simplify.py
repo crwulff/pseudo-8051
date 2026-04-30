@@ -2,7 +2,6 @@
 passes/typesimplify/_simplify.py — Boolean helpers, default transform, core simplifier.
 """
 
-import re
 from typing import Dict, FrozenSet, List, Optional, Tuple
 
 from pseudo8051.ir.hir    import (HIRNode, Assign, CompoundAssign,
@@ -23,8 +22,6 @@ _NEGATE_OP = {
     "<":  ">=", ">":  "<=",
     "<=": ">",  ">=": "<",
 }
-
-_RE_NOT_CMP = re.compile(r'^!\((.+?)\s+(!=|==|>=|<=|>|<)\s+(.+)\)$')
 
 
 def _simplify_bool_expr(expr: Expr) -> Expr:
@@ -68,19 +65,6 @@ def _simplify_bool_expr(expr: Expr) -> Expr:
                 return BinOp(lhs.lhs, op, lhs.rhs)
         return e
     return _walk_expr(expr, _fn)
-
-
-def _simplify_bool_str(cond: str) -> str:
-    """String-condition version of boolean simplification."""
-    m = _RE_NOT_CMP.match(cond)
-    if m:
-        lhs, op, rhs = m.group(1), m.group(2), m.group(3)
-        if op in _NEGATE_OP:
-            return f"{lhs} {_NEGATE_OP[op]} {rhs}"
-    # !(!(expr)) → expr
-    if cond.startswith("!(!(") and cond.endswith("))"):
-        return cond[2:-1]
-    return cond
 
 
 # ── TypeGroup working-state helpers ──────────────────────────────────────────
@@ -392,11 +376,7 @@ def _transform_default(node: HIRNode,
         return node
 
     if isinstance(node, IfNode):
-        cond = node.condition
-        if isinstance(cond, str):
-            new_cond = _simplify_bool_str(_subst_text(cond, reg_map))
-        else:
-            new_cond = _simplify_bool_expr(_subst_expr(cond, reg_map))
+        new_cond = _simplify_bool_expr(_subst_expr(node.condition, reg_map))
         return _passthrough(IfNode(
             ea         = node.ea,
             condition  = new_cond,
@@ -404,11 +384,7 @@ def _transform_default(node: HIRNode,
             else_nodes = simplify_fn(node.else_nodes, reg_map),
         ))
     if isinstance(node, WhileNode):
-        cond = node.condition
-        if isinstance(cond, str):
-            new_cond = _simplify_bool_str(_subst_text(cond, reg_map))
-        else:
-            new_cond = _simplify_bool_expr(_subst_expr(cond, reg_map))
+        new_cond = _simplify_bool_expr(_subst_expr(node.condition, reg_map))
         return _passthrough(WhileNode(
             ea         = node.ea,
             condition  = new_cond,
@@ -425,10 +401,7 @@ def _transform_default(node: HIRNode,
             new_init = Assign(init.ea, init.lhs, new_rhs) if new_rhs is not init.rhs else init
         else:
             new_init = init
-        if isinstance(cond, str):
-            new_cond = _simplify_bool_str(_subst_text(cond, reg_map))
-        else:
-            new_cond = _simplify_bool_expr(_subst_expr(cond, reg_map))
+        new_cond = _simplify_bool_expr(_subst_expr(cond, reg_map))
         if isinstance(update, str):
             new_update = _subst_text(update, reg_map)
         else:
@@ -441,11 +414,7 @@ def _transform_default(node: HIRNode,
             body_nodes = simplify_fn(node.body_nodes, reg_map),
         ))
     if isinstance(node, DoWhileNode):
-        cond = node.condition
-        if isinstance(cond, str):
-            new_cond = _simplify_bool_str(_subst_text(cond, reg_map))
-        else:
-            new_cond = _simplify_bool_expr(_subst_expr(cond, reg_map))
+        new_cond = _simplify_bool_expr(_subst_expr(node.condition, reg_map))
         return _passthrough(DoWhileNode(
             ea         = node.ea,
             condition  = new_cond,
