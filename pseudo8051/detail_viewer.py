@@ -173,7 +173,8 @@ class DetailViewer(ida_kernwin.simplecustviewer_t):
             first_render = node.render(indent=0)
             line_text    = first_render[0][1].strip() if first_render else ""
             self.AddLine(f"Line {line_no}:  {line_text}")
-            self.AddLine(f"Node: {type(node).__name__}  EA: {hex(node.ea)}")
+            creator = getattr(node, '_creator', '?')
+            self.AddLine(f"Node: {type(node).__name__}  EA: {hex(node.ea)}  [{creator}]")
         self.AddLine(_SEP)
 
         # Instructions for this node (src_eas present on both HIRNode and _SwitchCaseView)

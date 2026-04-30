@@ -124,7 +124,28 @@ def _fold_inline_trampolines(hir):
             f"  fold-inline-trampoline @{hex(result[i].ea)}: "
             f"DPTR={hex(offset)} → page {page_num} → {real_name}")
 
-        new_node = ExprStmt(result[i].ea, Call(real_name, []))
+        # Build call args from the real function's prototype (same as LcallHandler).
+        try:
+            from pseudo8051.prototypes import get_proto, param_regs
+            from pseudo8051.ir.expr import RegGroup, Name as _Name
+            _proto = get_proto(real_name)
+            if _proto:
+                _p_regs = param_regs(_proto)
+                _args = []
+                for _p, _regs in zip(_proto.params, _p_regs):
+                    if _regs:
+                        _args.append(RegGroup(_regs) if len(_regs) > 1 else _Name("".join(_regs)))
+                    else:
+                        _args.append(_Name(_p.name))
+            else:
+                _args = []
+        except Exception:
+            _args = []
+
+        dptr_node  = result[i]
+        goto_node  = result[j]
+        new_node = ExprStmt(result[i].ea, Call(real_name, _args))
+        new_node.source_nodes = [dptr_node, goto_node]
         # Replace result[i] (DPTR assign) with new_node; remove result[j] (goto)
         result = result[:i] + [new_node] + result[i + 1:j] + result[j + 1:]
         # result[i] = new call node; dead page-switch body starts at i+1
@@ -188,6 +209,7 @@ def _rename_byte_field_lhs(hir, byte_field_by_reg: dict):
                 if vi is not None and vi.name:
                     new_node = Assign(node.ea, NameExpr(vi.name), node.rhs)
                     node.copy_meta_to(new_node)
+                    new_node.source_nodes = [node]
                     result.append(new_node)
                     continue
             result.append(mapped)
@@ -228,7 +250,9 @@ def _subst_xram_in_hir(nodes, reg_map):
         if isinstance(patched, Assign) and isinstance(patched.lhs, XRAMRef):
             new_lhs = _subst_fn(patched.lhs)
             if new_lhs is not patched.lhs:
+                prev = patched
                 patched = patched.copy_meta_to(Assign(patched.ea, new_lhs, patched.rhs))
+                patched.source_nodes = [prev]
         result.append(patched.map_bodies(_visit))
     return result
 
@@ -255,6 +279,8 @@ def _subst_iram_in_hir(nodes, reg_map):
         if isinstance(patched, Assign) and isinstance(patched.lhs, IRAMRef):
             new_lhs = _subst_fn(patched.lhs)
             if new_lhs is not patched.lhs:
+                prev = patched
                 patched = patched.copy_meta_to(Assign(patched.ea, new_lhs, patched.rhs))
+                patched.source_nodes = [prev]
         result.append(patched.map_bodies(_visit))
     return result

@@ -418,8 +418,8 @@ def _propagate_register_copies(live: List[HIRNode],
             # away from the HIR.  Block the substitution to avoid replacing r with
             # a stale constant.  (A use-site annotation saying r=Const(0) when
             # replacement is also Const(0) is consistent and allows propagation.)
+            _use_ann = getattr(live[use_idx], 'ann', None)
             if is_reg_lhs:
-                _use_ann = getattr(live[use_idx], 'ann', None)
                 if _use_ann is not None:
                     _ann_val = _use_ann.reg_exprs.get(r)
                     if _ann_val is not None and _ann_val != replacement:
@@ -428,6 +428,54 @@ def _propagate_register_copies(live: List[HIRNode],
                             f"— use-site annotation says {r}={_ann_val.render()!r}")
                         i += 1
                         continue
+            elif is_name_lhs and _use_ann is not None and reg_map:
+                # For Name-lhs: guard against propagating XRAM-backed RMW values
+                # (e.g. osdAddr.hi = osdAddr.hi + R6 + C) into a use site where
+                # the annotation records the original XRAM value for the backing
+                # register — meaning a reload happened between the write and the
+                # use but was folded away from the HIR.
+                # XRAM byte fields are keyed as '_byte_<sym>' not by name, so
+                # search reg_map by VarInfo.name when direct lookup misses.
+                _vinfo = reg_map.get(r)
+                if _vinfo is None:
+                    for _vi in reg_map.values():
+                        if isinstance(_vi, VarInfo) and _vi.name == r:
+                            _vinfo = _vi
+                            break
+                if isinstance(_vinfo, VarInfo):
+                    if _vinfo.regs:
+                        # Register-backed: compare use-site annotation reg value
+                        # against def-site annotation reg value.
+                        _backing_reg = _vinfo.regs[0]
+                        _ann_val = _use_ann.reg_exprs.get(_backing_reg)
+                        if _ann_val is not None:
+                            _def_ann = getattr(node, 'ann', None)
+                            _def_val = _def_ann.reg_exprs.get(_backing_reg) if _def_ann else None
+                            if _def_val != _ann_val:
+                                dbg("propagate",
+                                    f"  [{hex(node.ea)}] prop-blocked: {r}={replacement.render()!r} "
+                                    f"— backing reg {_backing_reg} use-site={_ann_val.render()!r}"
+                                    f" def-site={_def_val!r}")
+                                i += 1
+                                continue
+                    elif _vinfo.xram_sym:
+                        # XRAM-backed name: if the use site's annotation shows any
+                        # register holding the original XRAM value (XRAMRef with the
+                        # same sym), a reload happened after the write — block
+                        # propagation so the call keeps the reloaded value.
+                        _sym = _vinfo.xram_sym
+                        _blocked = any(
+                            isinstance(_rv, XRAMRef)
+                            and isinstance(_rv.inner, Const)
+                            and _rv.inner.alias == _sym
+                            for _rv in _use_ann.reg_exprs.values()
+                        )
+                        if _blocked:
+                            dbg("propagate",
+                                f"  [{hex(node.ea)}] prop-blocked: {r}={replacement.render()!r} "
+                                f"— use-site has register holding {_sym}")
+                            i += 1
+                            continue
 
             # Guard: don't propagate past nodes that write to names (or their backing
             # registers) used in replacement.
@@ -459,11 +507,34 @@ def _propagate_register_copies(live: List[HIRNode],
             if new_node is not None:
                 # Record the eliminated source node: the use site now represents
                 # the combined effect of both instructions.
-                new_node.source_nodes = [live[i]] + list(old_use_node.source_nodes or [old_use_node])
+                define_node = live[i]
+                new_node.source_nodes = [define_node] + list(old_use_node.source_nodes or [old_use_node])
                 live[use_idx] = new_node
                 live[i] = None
                 dbg("typesimp", f"  [{hex(node.ea)}] prop-values: folded {r} into node {use_idx}")
                 changed = True
+
+                # Pre-link: the defining node is now gone from the live list.
+                # Any downstream node that reads r only via its reg_exprs annotation
+                # (not as a direct HIR name reference) will have the value substituted
+                # later by _subst_from_reg_exprs without a source link.  Add the
+                # defining node to those nodes' source_nodes now so the provenance
+                # is preserved.  Only do this for register-lhs defines (Name-lhs
+                # defines stay in the HIR and don't need pre-linking).
+                if is_reg_lhs:
+                    for _k in range(use_idx + 1, len(live)):
+                        _nk = live[_k]
+                        if _nk is None:
+                            continue
+                        _nk_ann = getattr(_nk, 'ann', None)
+                        if (_nk_ann is not None
+                                and r in _nk_ann.reg_exprs
+                                and _count_reg_uses_in_node(r, _nk) > 0
+                                and define_node not in _nk.source_nodes):
+                            _nk.source_nodes = [define_node] + list(_nk.source_nodes)
+                        # Stop if r is re-defined
+                        if r in (_nk.written_regs if _nk is not None else frozenset()):
+                            break
 
                 # If a pre ++/-- r in XRAMRef was folded away, inject a synthetic
                 # Assign(r, K+δ) so subsequent XRAM[++r] nodes continue propagating.
@@ -618,6 +689,7 @@ def _subst_group_in_call_node(node: HIRNode, regs_tuple: tuple,
             result = IfNode(node.ea, new_cond, node.then_nodes, node.else_nodes)
     if result is not None:
         node.copy_meta_to(result)
+        result.source_nodes = [node]
     return result
 
 
@@ -692,11 +764,38 @@ def _inline_group_setups(live: List[HIRNode],
                     i += 1
                     continue
 
+        # Hidden-kill guard: if rhs contains any Regs(r) and the call site's
+        # annotation records r=Const (a pruned-away constant store), it means
+        # a write to r was folded out of the HIR between the def and the call.
+        # Inlining would embed the stale value of r into the call argument.
+        _GP_REGS = {'R0','R1','R2','R3','R4','R5','R6','R7','A','B'}
+        use_ann = getattr(live[use_idx], 'ann', None)
+        if use_ann is not None and use_ann.reg_exprs:
+            _hidden_kill = False
+            for _r in _expr_name_refs(rhs):
+                if _r not in _GP_REGS:
+                    continue
+                _use_val = use_ann.reg_exprs.get(_r)
+                if not isinstance(_use_val, Const):
+                    continue
+                _def_val = node.ann.reg_exprs.get(_r) if node.ann is not None else None
+                if _def_val is None or _def_val != _use_val:
+                    dbg("typesimp",
+                        f"  [{hex(node.ea)}] prop-group: blocked — "
+                        f"hidden kill {_r}: def={_def_val!r} use={_use_val.render()!r}")
+                    _hidden_kill = True
+                    break
+            if _hidden_kill:
+                i += 1
+                continue
+
+        group_node = live[i]
         new_use = _subst_group_in_call_node(live[use_idx], regs_tuple, rhs)
         if new_use is None:
             i += 1
             continue
 
+        new_use.source_nodes = [group_node] + list(new_use.source_nodes)
         live[use_idx] = new_use
         live[i] = None
         dbg("typesimp",
@@ -844,6 +943,7 @@ def _inline_retvals(live: List[HIRNode],
                             and tgt.rhs.name == retval_name):
                         new_node = Assign(tgt.ea, tgt.lhs, call_expr)
                         new_node.ann = NodeAnnotation.merge(src_node, tgt)
+                        new_node.source_nodes = [src_node, tgt]
                         live[abs_j] = new_node
                     else:
                         new_node = _subst_reg_in_node(tgt, retval_name, call_expr)

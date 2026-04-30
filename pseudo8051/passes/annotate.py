@@ -615,6 +615,19 @@ class AnnotationPass(OptimizationPass):
                                 groups.append(tg)
                         call_sites.append((block, nodes, idx, callee_groups))
 
+                        # Link the defining nodes for all callee parameter registers.
+                        # When CP baked a constant directly into a call arg at lift
+                        # time, the register name is absent from name_refs() and the
+                        # existing ExprStmt case-2 path won't fire.  Iterate over
+                        # every register in the callee prototype and link whatever
+                        # last wrote it in this function's HIR.
+                        for tg in callee_groups:
+                            for _pr in tg.active_regs:
+                                _src = reg_def_nodes.get(_pr)
+                                if _src is not None and id(_src) not in _linked:
+                                    node.source_nodes = [copy.copy(_src)] + list(node.source_nodes)
+                                    _linked.add(id(_src))
+
                     # Collect callee XRAM params for backward annotation
                     try:
                         callee_ea = _resolve_name_addr(call_expr.func_name)

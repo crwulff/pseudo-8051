@@ -345,6 +345,19 @@ def _is_reg_free(expr: Expr) -> bool:
     return not found[0]
 
 
+def _regs_in_expr(expr: Expr) -> set:
+    """Return the set of register names (Regs.name) contained in expr."""
+    found: set = set()
+
+    def _fn(e: Expr) -> Expr:
+        if isinstance(e, Regs):
+            found.add(e.name)
+        return e
+
+    _walk_expr(expr, _fn)
+    return found
+
+
 def _fold_unary_const(e: Expr) -> Expr:
     """Fold UnaryOp(++/--, Const) → Const (alias always removed).
 

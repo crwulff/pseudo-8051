@@ -16,7 +16,7 @@ from pseudo8051.ir.hir import (HIRNode, Assign, CompoundAssign, ExprStmt,
 from pseudo8051.ir.expr import (Expr, Const, Call, BinOp, Paren, XRAMRef,
                                  Reg as RegExpr, Regs as RegsExpr,
                                  RegGroup as RegGroupExpr, Name as NameExpr)
-from pseudo8051.passes.patterns._utils import TypeGroup, VarInfo, _count_reg_uses_in_node, _subst_reg_in_node, _const_str
+from pseudo8051.passes.patterns._utils import TypeGroup, VarInfo, _count_reg_uses_in_node, _subst_reg_in_node, _const_str, _regs_in_expr, _is_reg_free
 from pseudo8051.passes.typesimplify._dptr import _is_dptr_inc_node
 from pseudo8051.constants import dbg
 
@@ -24,14 +24,22 @@ from pseudo8051.constants import dbg
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _resolve_const(expr: Expr, node: HIRNode) -> Expr:
-    """If expr is a single-register Regs and its value is known in node.ann.reg_consts,
-    return Const(val); otherwise return expr unchanged."""
+    """If expr is a single-register Regs and its value is known in node.ann,
+    return the resolved expression; otherwise return expr unchanged.
+
+    Checks reg_consts first (integer constant), then reg_exprs (symbolic
+    expression such as XRAM[EXT_DC41]).  reg_exprs results are only used when
+    they are reg-free (safe to duplicate at multiple sites).
+    """
     if isinstance(expr, RegsExpr) and expr.is_single:
         ann = getattr(node, 'ann', None)
         if ann is not None:
             val = ann.reg_consts.get(expr.name)
             if val is not None:
                 return Const(val)
+            sym = ann.reg_exprs.get(expr.name)
+            if sym is not None and _is_reg_free(sym):
+                return sym
     return expr
 
 
@@ -150,12 +158,16 @@ def _subst_reg_in_call_node(node: HIRNode, reg: str, replacement: Expr) -> HIRNo
     if isinstance(node, ExprStmt) and isinstance(node.expr, Call):
         new_call = _patch(node.expr)
         if new_call is not node.expr:
-            return node.copy_meta_to(ExprStmt(node.ea, new_call))
+            result = node.copy_meta_to(ExprStmt(node.ea, new_call))
+            result.source_nodes = [node]
+            return result
         return node
     if isinstance(node, Assign) and isinstance(node.rhs, Call):
         new_call = _patch(node.rhs)
         if new_call is not node.rhs:
-            return node.copy_meta_to(Assign(node.ea, node.lhs, new_call))
+            result = node.copy_meta_to(Assign(node.ea, node.lhs, new_call))
+            result.source_nodes = [node]
+            return result
         return node
     return node
 
@@ -254,7 +266,10 @@ def _fold_and_prune_setups(nodes: List[HIRNode],
                 continue
             new_nj = _subst_reg_in_call_node(nj, reg, val)
             if new_nj is not nj:
-                new_nj.source_nodes = [node] + list(nj.source_nodes)
+                # new_nj.source_nodes was set to [nj] by _subst_reg_in_call_node;
+                # prepend the consumed setup node so the full chain is: new_nj →
+                # [setup_node, nj] → nj's own sources.
+                new_nj.source_nodes = [node] + list(new_nj.source_nodes)
                 work[j] = new_nj
                 work[i] = None
                 dbg("typesimp", f"  [{hex(node.ea)}] fold-const: {reg}={val.render()} into call")
@@ -283,22 +298,38 @@ def _fold_and_prune_setups(nodes: List[HIRNode],
                             work[j].source_nodes = [node] + list(
                                 work[j].source_nodes)
                             break
-                elif (isinstance(node.rhs, Const)
-                        and isinstance(node.lhs, RegsExpr)
-                        and node.lhs.name == 'DPTR'):
-                    # DPTR = Const(k): the XRAM handler may have already folded
-                    # DPTR's value into XRAMRef(Const(k)) at lift time, so the
-                    # XRAM node no longer references 'DPTR' by name.  Find the
-                    # first downstream node whose lhs (or a direct source lhs)
-                    # is XRAMRef(Const(k)) and attach this node as provenance.
-                    dptr_val = node.rhs.value
-                    for j in range(i + 1, len(work)):
-                        wj = work[j]
-                        if _references_xram_const(wj, dptr_val):
-                            if node not in wj.source_nodes:
-                                wj.source_nodes = [node] + list(
-                                    wj.source_nodes)
-                            break
+                elif isinstance(node.rhs, Const) and isinstance(node.lhs, RegsExpr):
+                    if node.lhs.name == 'DPTR':
+                        # DPTR = Const(k): the XRAM handler may have already folded
+                        # DPTR's value into XRAMRef(Const(k)) at lift time, so the
+                        # XRAM node no longer references 'DPTR' by name.  Find the
+                        # first downstream node whose lhs (or a direct source lhs)
+                        # is XRAMRef(Const(k)) and attach this node as provenance.
+                        dptr_val = node.rhs.value
+                        for j in range(i + 1, len(work)):
+                            wj = work[j]
+                            if _references_xram_const(wj, dptr_val):
+                                if node not in wj.source_nodes:
+                                    wj.source_nodes = [node] + list(
+                                        wj.source_nodes)
+                                break
+                    else:
+                        # Reg = Const: the register's constant value may have been
+                        # tracked in a downstream call's reg_exprs annotation and
+                        # folded in by _subst_from_reg_exprs (register renamed to
+                        # a param alias, so not visible by name in the call args).
+                        # Link to the first downstream call node as provenance.
+                        lhs_name = node.lhs.name
+                        for j in range(i + 1, len(work)):
+                            wj = work[j]
+                            if ((isinstance(wj, ExprStmt) and isinstance(wj.expr, Call))
+                                    or (isinstance(wj, Assign) and isinstance(wj.rhs, Call))):
+                                if node not in wj.source_nodes:
+                                    wj.source_nodes = [node] + list(wj.source_nodes)
+                                break
+                            # Stop if the register is written before we reach a call
+                            if lhs_name in wj.written_regs:
+                                break
                 continue
             live_lhs = lhs_regs & all_downstream
             if live_lhs and all(_first_kill_before_read(r, work[i + 1:])
@@ -373,6 +404,7 @@ def _inline_group_into_node(node: HIRNode, regs_key: tuple,
             result = Assign(node.ea, node.lhs, new_call)
     if result is not None:
         node.copy_meta_to(result)
+        result.source_nodes = [node]
     return result
 
 
@@ -532,13 +564,25 @@ def _fold_call_arg_pairs(nodes: List[HIRNode],
         # _inline_group_setups gets a chance to fold it in.
         inlined = False
         max_consumed_idx = max(idx for _, (idx, _) in byte_assigns.items())
+        source_regs = _regs_in_expr(combined)  # registers whose values combined depends on
         for k in range(max_consumed_idx + 1, len(nodes)):
             if k in consumed:
                 continue
             nd = nodes[k]
+            # If a source register is written before we reach the call, the
+            # combined expression would be stale after propagation re-reads it
+            # (e.g. R7 reused for sram_sel after being used as osdAddr.lo).
+            # Stop inlining in that case and emit the TypedAssign instead.
+            if source_regs and _writes_any_reg(nd, source_regs):
+                break
             patched = _inline_group_into_node(nd, regs_key, combined)
             if patched is not None:
-                patched.source_nodes = list(result_node.source_nodes) + list(nd.source_nodes)
+                # Merge byte-assign source nodes with any provenance already
+                # attached to nd (e.g. AnnotationPass-linked defining nodes for
+                # other call parameters like sram_sel=R7).
+                seen_ids = {id(sn) for sn in result_node.source_nodes}
+                extra = [sn for sn in nd.source_nodes if id(sn) not in seen_ids]
+                patched.source_nodes = list(result_node.source_nodes) + extra
                 nodes[k] = patched
                 inlined = True
                 dbg("typesimp",

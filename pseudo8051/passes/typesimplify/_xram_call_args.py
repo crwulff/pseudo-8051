@@ -44,6 +44,7 @@ def _fold_xram_call_args(nodes: List[HIRNode]) -> List[HIRNode]:
         else:
             return node
         node.copy_meta_to(new_node)
+        new_node.source_nodes = [node]
         return new_node
 
     try:

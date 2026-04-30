@@ -219,7 +219,9 @@ def _patch_call(node: HIRNode, new_call: Call) -> HIRNode:
         new_node = Assign(node.ea, node.lhs, new_call)
     else:
         return node
-    return node.copy_meta_to(new_node)
+    node.copy_meta_to(new_node)
+    new_node.source_nodes = [node]
+    return new_node
 
 
 # ── Condition walker ─────────────────────────────────────────────────────────

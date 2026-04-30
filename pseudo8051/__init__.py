@@ -248,21 +248,29 @@ class PseudocodeViewer(ida_kernwin.simplecustviewer_t):
         self._func_name = func.name
         lines = func.render()
 
-        # Build viewer-line → node chain map (lines 0="sig", 1="{" are skipped)
+        # Build HIR-line-index → node chain map (used below to populate _node_map
+        # keyed by visual line number, which may diverge due to multi-line comments).
+        _hir_line_map: dict = {}
+        _collect_line_chains(func.hir, _hir_line_map, offset=2, ancestors=())
+
+        # _node_map is keyed by VISUAL line number (what GetLineNo() returns) so
+        # that the detail viewer always finds the right node regardless of how many
+        # IDA comment lines have been injected above the current line.
         self._node_map: dict = {}
-        _collect_line_chains(func.hir, self._node_map, offset=2, ancestors=())
 
         annotate = getattr(self, '_annotate_nodes', False)
         vline = 0   # actual viewer line counter (differs from i when annotating)
         _cmt_shown: set = set()   # EAs whose IDA comment has already been emitted
         for i, (ea, text) in enumerate(lines):
             self._ea_map[vline] = ea
+            chain = _hir_line_map.get(i)
+            # Map this visual line to the HIR chain.
+            self._node_map[vline] = chain
             # Append IDA comment (regular or repeatable) to the first line for
             # this EA.  Multi-line comments produce extra indented viewer lines.
             # Also check src_eas of the HIR node so that folded instructions
             # (e.g. lcall absorbed into an assignment) surface their comments.
             cmt_lines = []
-            chain = self._node_map.get(i)
             _eas_to_check = [ea]
             if chain:
                 _node = chain[-1]
@@ -282,13 +290,14 @@ class PseudocodeViewer(ida_kernwin.simplecustviewer_t):
                 vline += 1
                 for extra in cmt_lines[1:]:
                     self._ea_map[vline] = ea
+                    # Extra comment lines also map to the same chain.
+                    self._node_map[vline] = chain
                     self.AddLine(colorize(f"{cmt_indent}// {extra}"))
                     vline += 1
             else:
                 self.AddLine(colorize(text))
                 vline += 1
             if annotate:
-                chain = self._node_map.get(i)
                 if chain:
                     node = chain[-1]
                     anns = node.ann_lines() + node.node_ann_lines()
@@ -296,6 +305,7 @@ class PseudocodeViewer(ida_kernwin.simplecustviewer_t):
                         anns[0] = f"{anns[0]} [{hex(node.ea)}]"
                     for ann in anns:
                         self._ea_map[vline] = ea
+                        self._node_map[vline] = chain
                         self.AddLine(f"    // {ann}")
                         vline += 1
 

@@ -83,6 +83,7 @@ def _fold_return_chains(hir: List[HIRNode], ret_regs: tuple,
                     and nodes[i + 1].value is None):
                 ret = ReturnStmt(node.ea, node.rhs)
                 ret.ann = NodeAnnotation.merge(node, nodes[i + 1])
+                ret.source_nodes = [node, nodes[i + 1]]
                 out.append(ret)
                 dbg("typesimp", f"  [{hex(node.ea)}] fold-return (RegGroup): {node.rhs.render()}")
                 i += 2
@@ -99,6 +100,7 @@ def _fold_return_chains(hir: List[HIRNode], ret_regs: tuple,
                          or nodes[i + 1].value == Reg(node.lhs.name))):
                 ret = ReturnStmt(node.ea, node.rhs)
                 ret.ann = NodeAnnotation.merge(node, nodes[i + 1])
+                ret.source_nodes = [node, nodes[i + 1]]
                 out.append(ret)
                 dbg("typesimp", f"  [{hex(node.ea)}] fold-return (single): {node.rhs.render()}")
                 i += 2
@@ -148,6 +150,7 @@ def _fold_return_chains(hir: List[HIRNode], ret_regs: tuple,
                 if combined is not None:
                     ret = ReturnStmt(node.ea, combined)
                     ret.ann = NodeAnnotation.merge(first_consumed, node)
+                    ret.source_nodes = [first_consumed, node]
                     out.append(ret)
                 else:
                     out.append(node)

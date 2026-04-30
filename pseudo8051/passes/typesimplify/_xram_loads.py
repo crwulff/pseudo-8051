@@ -132,11 +132,13 @@ def _consolidate_xram_local_loads(nodes: List[HIRNode],
                                     break
                             # If lo byte landed in DPL and next node is DPH = Rhi,
                             # collapse to DPTR = var instead of RegGroup = var.
+                            consumed = list(nodes[i:j])
                             if (regs[-1] == "DPL" and j < len(nodes)
                                     and _as_dph_assign(nodes[j]) == regs[0]):
                                 new_node = Assign(node.ea, Reg("DPTR"),
                                                   NameExpr(parent_nm))
                                 new_node.ann = merged_ann
+                                new_node.source_nodes = consumed + [nodes[j]]
                                 out.append(new_node)
                                 j += 1
                                 dbg("typesimp",
@@ -146,6 +148,7 @@ def _consolidate_xram_local_loads(nodes: List[HIRNode],
                                 lhs_expr = RegGroup(tuple(regs), alias=lhs_alias)
                                 new_node = Assign(node.ea, lhs_expr, NameExpr(parent_nm))
                                 new_node.ann = merged_ann
+                                new_node.source_nodes = consumed
                                 out.append(new_node)
                                 label = lhs_alias or "".join(regs)
                                 dbg("typesimp",
