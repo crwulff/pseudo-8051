@@ -9,7 +9,8 @@ enum type and replaces them with Name(enum_member_name).
 
 Contexts handled:
   1. Call arguments whose corresponding Param.type is a known enum.
-  2. RHS of Assign(Name/Reg, Const) where the LHS name has an enum type in reg_map.
+  2. RHS of Assign(Name/Reg, Const) where the LHS name has an enum type in reg_map,
+     or the node is a TypedAssign whose type_str is itself an enum type.
   3. Const operand of a BinOp comparison where the other operand is a named enum var.
 """
 
@@ -34,9 +35,18 @@ def _try_resolve(type_str: str, value: int, context: str = "") -> Optional[Const
     return Const(value, alias=name)
 
 
+_RE_NUMERIC_ALIAS = __import__('re').compile(r'^-?(?:0x[0-9a-fA-F]+|\d+)$')
+
+
+def _is_numeric_alias(alias: str) -> bool:
+    """Return True for hex/decimal aliases like '0xff' or '255' — overridable by enum resolution."""
+    return bool(_RE_NUMERIC_ALIAS.match(alias))
+
+
 def _resolve_in_expr(expr: Expr, type_str: str) -> Expr:
-    """If expr is an unaliased Const whose value resolves in type_str, return Const(alias). Else expr."""
-    if isinstance(expr, Const) and not expr.alias:
+    """If expr is a Const with no alias (or only a numeric/hex alias) whose value resolves
+    in type_str, return Const(alias=member_name). Else expr."""
+    if isinstance(expr, Const) and (not expr.alias or _is_numeric_alias(expr.alias)):
         replacement = _try_resolve(type_str, expr.value, f"expr={expr.render()}")
         if replacement is not None:
             return replacement
@@ -294,11 +304,14 @@ def _resolve_enum_consts(nodes: List[HIRNode], reg_map: dict) -> List[HIRNode]:
             if new_call is not call_expr:
                 node = _patch_call(node, new_call)
 
-        # 2. RHS of Assign where LHS has enum type in reg_map
+        # 2. RHS of Assign where LHS has enum type in reg_map,
+        #    or TypedAssign whose declared type_str is itself an enum.
         if isinstance(node, (Assign, TypedAssign)) and isinstance(node.rhs, Const):
             lhs = node.lhs
             if isinstance(lhs, (NameExpr, RegExpr)):
                 type_str = _get_var_type(lhs.name, reg_map)
+                if not type_str and isinstance(node, TypedAssign) and is_enum_type(node.type_str):
+                    type_str = node.type_str
                 if type_str:
                     new_rhs = _resolve_in_expr(node.rhs, type_str)
                     if new_rhs is not node.rhs:
