@@ -21,7 +21,7 @@ from pseudo8051.passes.typesimplify._post     import (
     _collapse_dpl_dph_arithmetic,
     _fold_inline_trampolines,
     _fold_and_prune_setups, _fold_call_arg_pairs, _propagate_values,
-    _simplify_carry_comparison, _simplify_cjne_jnc,
+    _simplify_carry_comparison, _simplify_subb_jc, _simplify_cjne_jnc,
     _simplify_orl_zero_check,
     _prune_orphaned_dptr_inc,
     _fold_return_chains,
@@ -156,6 +156,8 @@ class TypeAwareSimplifier(OptimizationPass):
         func.hir = _fold_and_prune_setups(func.hir, reg_map)
         func.hir = _simplify_carry_comparison(func.hir)
         func.hir = _fold_and_prune_setups(func.hir, reg_map)  # clean up setups dead after SUBB16 collapse
+        # Collapse CLR-C + SUBB + JC/JNC → typed comparison in flat if context.
+        func.hir = _simplify_subb_jc(func.hir)
         # Collapse CJNE(nop-goto) + JNC/JC → typed comparison (e.g. expr >= const).
         func.hir = _simplify_cjne_jnc(func.hir)
         func.hir = _simplify_orl_zero_check(func.hir)

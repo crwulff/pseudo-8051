@@ -816,7 +816,7 @@ class AnnotationPass(OptimizationPass):
                 # preceding CLR C so it doesn't propagate past the arithmetic.
                 if (isinstance(node, CompoundAssign)
                         and node.op in ("-=", "+=")
-                        and "C" in const_state):
+                        and ("C" in const_state or "C" in expr_state)):
                     from pseudo8051.ir.expr import Regs as _RegsExpr
                     def _rhs_uses_carry(e) -> bool:
                         if isinstance(e, _RegsExpr) and e.names == ('C',):
@@ -824,6 +824,11 @@ class AnnotationPass(OptimizationPass):
                         return any(_rhs_uses_carry(c) for c in e.children())
                     if _rhs_uses_carry(node.rhs):
                         const_state.pop("C", None)
+                        expr_state.pop("C", None)
+                        stale_c = [k for k, v in expr_state.items()
+                                   if isinstance(v, _RegsExpr) and "C" in v.names]
+                        for k in stale_c:
+                            expr_state.pop(k)
 
                 # (e) Forward-propagate new constant produced by this node
                 _propagate_const(node, const_state)

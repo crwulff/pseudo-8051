@@ -3,6 +3,7 @@ passes/typesimplify/_carry.py — Carry-flag and comparison simplification passe
 
 Exports:
   _simplify_carry_comparison   collapse CLR C + SUBB16/SUBB8 sequence in while-loop conditions
+  _simplify_subb_jc            fold CLR C + SUBB + JC/JNC into typed comparison (flat if)
   _simplify_cjne_jnc           fold CJNE(nop-goto) + JNC/JC into typed comparisons
   _simplify_orl_zero_check     fold ORL + JZ idiom into multi-byte zero test
   _simplify_arithmetic         remove identity +0/-0 and fold Const OP Const
@@ -96,12 +97,20 @@ def _get_a_var_name(node: HIRNode) -> Optional[str]:
     """Return the named variable that A holds at this node (from annotation), or None.
 
     Uses the TypeGroup annotation set by AnnotationPass.  Only returns a name when
-    A is the sole register in a TypeGroup that has a non-empty name, ensuring we
-    don't produce bogus conditions from raw/unnamed register groups.
+    A maps to a TypeGroup with a non-empty name (not 'A'), ensuring we don't produce
+    bogus conditions from raw/unnamed register groups.
+
+    Two paths:
+    1. A is directly the sole register in a TypeGroup (A=flags directly).
+    2. A is aliased to a single register Rx via reg_exprs (A=R7), and Rx is the
+       sole register in a named TypeGroup (R7=flags).  This covers the common case
+       where the function parameter is in Rx and A was just loaded from it.
     """
     ann = getattr(node, 'ann', None)
     if ann is None:
         return None
+
+    # Path 1: A directly in a named TypeGroup.
     for g in ann.reg_groups:
         if (hasattr(g, 'full_regs')
                 and len(g.full_regs) == 1
@@ -109,6 +118,19 @@ def _get_a_var_name(node: HIRNode) -> Optional[str]:
                 and g.name
                 and g.name != 'A'):
             return g.name
+
+    # Path 2: A=Rx in reg_exprs, and Rx is directly in a named TypeGroup.
+    a_expr = ann.reg_exprs.get('A') if ann.reg_exprs else None
+    if a_expr is not None and isinstance(a_expr, RegExpr) and a_expr.is_single:
+        rx = a_expr.name
+        for g in ann.reg_groups:
+            if (hasattr(g, 'full_regs')
+                    and len(g.full_regs) == 1
+                    and g.full_regs[0] == rx
+                    and g.name
+                    and g.name != rx):
+                return g.name
+
     return None
 
 
@@ -297,6 +319,168 @@ def _simplify_carry_comparison(nodes: List[HIRNode]) -> List[HIRNode]:
             result.append(rebuilt)
         else:
             result.append(node.map_bodies(_simplify_carry_comparison))
+    return result
+
+
+# ── CLR-C + SUBB + JC/JNC flat if-statement simplification ──────────────────
+
+def _a_name_before_subb(nodes: List[HIRNode], subb_idx: int) -> Optional[str]:
+    """
+    Return the named variable A held immediately before nodes[subb_idx] (SUBB).
+
+    Three paths (tried in order):
+    1. TypeGroup directly on A at the SUBB node.
+    2. A=Rx in reg_exprs; TypeGroup on Rx at the SUBB node.
+    3. Scan backward, skipping CLR/SETB C, Labels, and dec/inc ExprStmts, for:
+       a. Assign(Reg("A"), Name(varname)) — direct load of named var into A.
+       b. Assign(Name(_), Name(varname)) — xram-local-write that captured A.
+    """
+    node = nodes[subb_idx]
+    # Paths 1 and 2: annotation-based.
+    name = _get_a_var_name(node)
+    if name is not None:
+        return name
+
+    # Path 3: backward scan.
+    from pseudo8051.ir.hir import ExprStmt as _ExprStmt
+    for k in range(subb_idx - 1, -1, -1):
+        prev = nodes[k]
+        if isinstance(prev, Label):
+            continue
+        # CLR C / SETB C
+        if (isinstance(prev, Assign)
+                and prev.lhs == Reg("C")
+                and isinstance(prev.rhs, Const)
+                and prev.rhs.value in (0, 1)):
+            continue
+        # --name / ++name  (dec/inc of an XRAM local — safe to skip)
+        if (isinstance(prev, _ExprStmt)
+                and isinstance(prev.expr, UnaryOp)
+                and prev.expr.op in ("--", "++")
+                and isinstance(prev.expr.operand, NameExpr)):
+            continue
+        # Assign(Reg("A"), Name(varname)) — A was loaded from a named variable.
+        if (isinstance(prev, Assign)
+                and prev.lhs == Reg("A")
+                and isinstance(prev.rhs, NameExpr)):
+            return prev.rhs.name
+        # Assign(Name(_), Name(varname)) — xram-local-write captured A.
+        if (isinstance(prev, Assign)
+                and isinstance(prev.lhs, NameExpr)
+                and isinstance(prev.rhs, NameExpr)):
+            return prev.rhs.name
+        break  # anything else — give up
+
+    return None
+
+
+def _simplify_subb_jc(nodes: List[HIRNode]) -> List[HIRNode]:
+    """
+    Collapse CLR-C/SETB-C + SUBB A, #k + JC/JNC into a typed comparison.
+
+    CLR-C pattern (C=0):
+      A -= k;                → if (a_name < k) / if (a_name >= k)
+
+    SETB-C pattern (C=1):
+      A -= k + 1;            → if (a_name < k+1) / if (a_name >= k+1)
+      (setb C; subb A,#k folds to A -= k+1; C set when a_name < k+1)
+
+    Also handles IfGoto variants.  Recurses into structured bodies first.
+    The SUBB CompoundAssign is consumed.
+    """
+    nodes = [n.map_bodies(_simplify_subb_jc) for n in nodes]
+
+    result: List[HIRNode] = []
+    i = 0
+    while i < len(nodes):
+        node = nodes[i]
+
+        # Match: CompoundAssign(A, -=, ...) with C=0 or C=1 in annotation.
+        if not (isinstance(node, CompoundAssign)
+                and node.lhs == Reg("A")
+                and node.op == "-="):
+            result.append(node)
+            i += 1
+            continue
+
+        ann = getattr(node, 'ann', None)
+        c_val = ann.reg_consts.get("C") if ann is not None else None
+        if c_val not in (0, 1):
+            result.append(node)
+            i += 1
+            continue
+
+        a_name = _a_name_before_subb(nodes, i)
+        if a_name is None:
+            result.append(node)
+            i += 1
+            continue
+
+        # Extract the comparison operand.
+        # CLR-C (C=0): rhs = k [+ C/0]; operand = k.
+        # SETB-C (C=1): rhs = k [+ C/1]; actual subtraction = k+1; operand = k+1.
+        rhs = node.rhs
+        if c_val == 0:
+            # Strip "+ C" or "+ 0" tail.
+            operand = rhs.lhs if isinstance(rhs, BinOp) and rhs.op == '+' else rhs
+        else:
+            # SETB-C: subtrahend is k+1.  _extract_carry1_operand returns k for
+            # rhs = k+C or k+1; total operand = k+1.  If rhs is Const(1) (k=0
+            # fully folded), operand = Const(1) directly.
+            base_k = _extract_carry1_operand(rhs)
+            if base_k is not None:
+                # Fold base_k + 1 now if both are constants, else keep as BinOp.
+                if isinstance(base_k, Const):
+                    operand = Const(base_k.value + 1)
+                else:
+                    operand = BinOp(base_k, "+", Const(1))
+            elif isinstance(rhs, Const):
+                operand = rhs   # already k+1 = Const(n), e.g. Const(1) when k=0
+            else:
+                result.append(node)
+                i += 1
+                continue
+
+        # Skip optional Label gap nodes.
+        j = i + 1
+        while j < len(nodes) and isinstance(nodes[j], Label):
+            j += 1
+        if j >= len(nodes):
+            result.append(node)
+            i += 1
+            continue
+
+        cond_node = nodes[j]
+        if isinstance(cond_node, (IfNode, WhileNode, ForNode, DoWhileNode)):
+            current_cond = cond_node.condition
+        elif isinstance(cond_node, IfGoto):
+            current_cond = cond_node.cond
+        else:
+            result.append(node)
+            i += 1
+            continue
+
+        is_c = (current_cond == Reg("C"))
+        is_not_c = (isinstance(current_cond, UnaryOp)
+                    and current_cond.op == "!"
+                    and current_cond.operand == Reg("C"))
+        if not (is_c or is_not_c):
+            result.append(node)
+            i += 1
+            continue
+
+        new_cond = BinOp(NameExpr(a_name), "<" if is_c else ">=", operand)
+        dbg("typesimp",
+            f"  [{hex(node.ea)}] subb-jc(C={c_val}): {a_name} "
+            f"{'<' if is_c else '>='} {operand.render()!r}")
+
+        repl = cond_node.replace_condition(new_cond)
+        repl.source_nodes = [node, cond_node]
+        # Emit gap labels, then the replaced condition node.  SUBB is consumed.
+        result.extend(nodes[i + 1:j])
+        result.append(repl)
+        i = j + 1
+
     return result
 
 

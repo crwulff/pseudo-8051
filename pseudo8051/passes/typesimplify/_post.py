@@ -34,6 +34,7 @@ from pseudo8051.passes.typesimplify._propagate import (      # noqa: F401
 )
 from pseudo8051.passes.typesimplify._carry import (          # noqa: F401
     _simplify_carry_comparison,
+    _simplify_subb_jc,
     _simplify_cjne_jnc,
     _simplify_orl_zero_check,
     _simplify_arithmetic,
