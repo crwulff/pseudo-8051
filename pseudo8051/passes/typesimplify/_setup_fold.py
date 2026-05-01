@@ -298,6 +298,20 @@ def _fold_and_prune_setups(nodes: List[HIRNode],
                             work[j].source_nodes = [node] + list(
                                 work[j].source_nodes)
                             break
+                        # Multi-reg setup (e.g. R6R7 = xarg2): _subst_from_reg_exprs
+                        # may have already replaced the lhs registers with XRAM refs
+                        # before this prune runs, leaving register names only in the
+                        # immediate source_nodes of the downstream node.
+                        if not node.lhs.is_single:
+                            src_refs = frozenset().union(
+                                *(sn.name_refs() for sn in work[j].source_nodes))
+                            if not lhs_regs.isdisjoint(src_refs):
+                                work[j].source_nodes = [node] + list(
+                                    work[j].source_nodes)
+                                break
+                            # Stop searching if a downstream node kills any lhs reg
+                            if not lhs_regs.isdisjoint(work[j].written_regs):
+                                break
                 elif isinstance(node.rhs, Const) and isinstance(node.lhs, RegsExpr):
                     if node.lhs.name == 'DPTR':
                         # DPTR = Const(k): the XRAM handler may have already folded
