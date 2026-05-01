@@ -247,6 +247,16 @@ def _canonicalize_expr(expr: Expr,
             if combined <= 0x7F:
                 return BinOp(lhs.lhs, '+', Const(combined))
             return BinOp(lhs.lhs, '-', Const(0x100 - combined))
+        # 16-bit byte-field reconstruction: (x.hi << 8) | x.lo → Name("x")
+        # Handles both (Paren(x.hi << 8) | x.lo) and (x.hi << 8) | x.lo).
+        if op == '|' and isinstance(rhs, Name) and rhs.name.endswith('.lo'):
+            inner_lhs = lhs.inner if isinstance(lhs, _Paren) else lhs
+            if (isinstance(inner_lhs, BinOp) and inner_lhs.op == '<<'
+                    and isinstance(inner_lhs.rhs, Const) and inner_lhs.rhs.value == 8
+                    and isinstance(inner_lhs.lhs, Name)
+                    and inner_lhs.lhs.name.endswith('.hi')
+                    and inner_lhs.lhs.name[:-3] == rhs.name[:-3]):
+                return Name(rhs.name[:-3])
         return e
 
     def _fn(e: Expr) -> Expr:

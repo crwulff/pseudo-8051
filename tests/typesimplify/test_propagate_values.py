@@ -9,7 +9,7 @@ from pseudo8051.passes.typesimplify._propagate import _subst_from_reg_exprs
 from pseudo8051.passes.patterns._utils import VarInfo, _canonicalize_expr
 from pseudo8051.ir.hir import Assign, TypedAssign, ExprStmt, CompoundAssign, IfNode, ReturnStmt, SwitchNode
 from pseudo8051.ir.hir._base import NodeAnnotation
-from pseudo8051.ir.expr import Reg, Name, XRAMRef, Call, Const, BinOp, UnaryOp
+from pseudo8051.ir.expr import Reg, Name, XRAMRef, Call, Const, BinOp, UnaryOp, Paren
 
 
 class TestAdditiveFold:
@@ -473,3 +473,50 @@ class TestSubstFromRegExprs:
         assert result[2].rhs == Name("xarg2_hi"), (
             f"Expected xarg2_hi substituted, got {result[2].rhs.render()!r}"
         )
+
+    def test_dptr_dph_dpl_reconstructed_and_collapsed(self):
+        """DPTR used as call arg; DPH=osdAddr.hi, DPL=osdAddr.lo in annotations.
+        _subst_from_reg_exprs builds (osdAddr.hi << 8) | osdAddr.lo, then
+        _fold_exprs_in_node collapses it to Name('osdAddr')."""
+        from pseudo8051.ir.hir import ExprStmt
+        call_node = ExprStmt(0x100, Call("set_osd_addr", [Reg("DPTR")]))
+        call_node.ann = self._make_ann({
+            "DPH": Name("osdAddr.hi"),
+            "DPL": Name("osdAddr.lo"),
+        })
+        result, changed = _subst_from_reg_exprs([call_node])
+        assert changed
+        rendered = result[0].expr.args[0].render()
+        assert rendered == "osdAddr", (
+            f"Expected 'osdAddr', got {rendered!r}"
+        )
+
+
+class TestByteFieldReconstruction:
+    """(x.hi << 8) | x.lo → Name('x') via _canonicalize_expr."""
+
+    def _fold(self, expr):
+        from pseudo8051.passes.patterns._expr_utils import _canonicalize_expr
+        return _canonicalize_expr(expr, {}, [], {})
+
+    def test_paren_form_collapses(self):
+        """(Paren(x.hi << 8)) | x.lo → Name('x')."""
+        expr = BinOp(Paren(BinOp(Name("osdAddr.hi"), "<<", Const(8))), "|", Name("osdAddr.lo"))
+        assert self._fold(expr) == Name("osdAddr")
+
+    def test_no_paren_form_collapses(self):
+        """(x.hi << 8) | x.lo → Name('x') (no Paren wrapper)."""
+        expr = BinOp(BinOp(Name("osdAddr.hi"), "<<", Const(8)), "|", Name("osdAddr.lo"))
+        assert self._fold(expr) == Name("osdAddr")
+
+    def test_mismatched_parent_not_collapsed(self):
+        """(a.hi << 8) | b.lo — different parents → not simplified."""
+        expr = BinOp(BinOp(Name("a.hi"), "<<", Const(8)), "|", Name("b.lo"))
+        result = self._fold(expr)
+        assert result != Name("a") and result != Name("b")
+
+    def test_wrong_shift_amount_not_collapsed(self):
+        """(x.hi << 4) | x.lo — shift by 4 not 8 → not simplified."""
+        expr = BinOp(BinOp(Name("x.hi"), "<<", Const(4)), "|", Name("x.lo"))
+        result = self._fold(expr)
+        assert result != Name("x")

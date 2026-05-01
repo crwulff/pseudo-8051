@@ -233,6 +233,7 @@ def _subst_xram_in_hir(nodes, reg_map):
     indexed writes like XRAM[base + idx] = ... become arr[idx] = ... .
     """
     from pseudo8051.passes.patterns._utils import _subst_xram_in_expr, _apply_expr_subst_to_node
+    from pseudo8051.passes.patterns._node_utils import _fold_exprs_in_node
     from pseudo8051.ir.hir import Assign
     from pseudo8051.ir.expr import XRAMRef
 
@@ -253,6 +254,10 @@ def _subst_xram_in_hir(nodes, reg_map):
                 prev = patched
                 patched = patched.copy_meta_to(Assign(patched.ea, new_lhs, patched.rhs))
                 patched.source_nodes = [prev]
+        # Fold after substitution so that byte-field reconstructions like
+        # (x.hi << 8) | x.lo collapse to Name("x").
+        if patched is not node:
+            patched = _fold_exprs_in_node(patched)
         result.append(patched.map_bodies(_visit))
     return result
 

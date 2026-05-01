@@ -419,6 +419,37 @@ def _folded_addr_consts(node: HIRNode) -> List[int]:
     return results
 
 
+def _addr_reg_refs(node: HIRNode) -> List[str]:
+    """Return register names used directly as the address inside XRAMRef/IRAMRef/CROMRef.
+
+    Handles the non-folded case: XRAM[DPTR] where the inner is a single-reg Regs
+    rather than a Const.  These don't appear in _folded_addr_consts but still need
+    their defining nodes linked as provenance.
+    """
+    from pseudo8051.ir.expr import Regs as _Regs
+    results: List[str] = []
+
+    def _scan(expr) -> None:
+        if expr is None:
+            return
+        if isinstance(expr, (XRAMRef, IRAMRef, CROMRef)):
+            inner = expr.inner
+            if isinstance(inner, _Regs) and inner.is_single:
+                results.append(inner.name)
+            else:
+                _scan(inner)
+            return
+        for child in getattr(expr, 'children', lambda: [])():
+            _scan(child)
+
+    if isinstance(node, (Assign, CompoundAssign)):
+        _scan(node.lhs)
+        _scan(node.rhs)
+    elif isinstance(node, ExprStmt):
+        _scan(node.expr)
+    return results
+
+
 # ── Pass ───────────────────────────────────────────────────────────────────────
 
 class AnnotationPass(OptimizationPass):
@@ -572,6 +603,10 @@ class AnnotationPass(OptimizationPass):
                 #   nodes we skip this: explicit register reads are either still
                 #   visible in the rendered expression or will be captured by the
                 #   fusion pattern that consumes them (e.g. MOV A + MOVX → fused).
+                #
+                # Case 3 — non-folded register address: XRAM[Reg] (e.g. XRAM[DPTR])
+                #   where the register name is visible but won't be captured by a
+                #   fusion pattern because it's an address operand, not a data read.
                 _linked: set = set()
                 for _addr_val in _folded_addr_consts(node):
                     for _reg, _val in const_state.items():
@@ -584,6 +619,13 @@ class AnnotationPass(OptimizationPass):
                                 node.source_nodes = [copy.copy(_src)] + list(node.source_nodes)
                                 _linked.add(id(_src))
 
+                for _addr_reg in _addr_reg_refs(node):
+                    if _addr_reg in reg_def_nodes:
+                        _src = reg_def_nodes[_addr_reg]
+                        if id(_src) not in _linked:
+                            node.source_nodes = [copy.copy(_src)] + list(node.source_nodes)
+                            _linked.add(id(_src))
+
                 if isinstance(node, ExprStmt):
                     for _reg in node.name_refs():
                         if _reg in reg_def_nodes:
@@ -595,10 +637,15 @@ class AnnotationPass(OptimizationPass):
 
                 # (b) Snapshot annotation
                 ann = NodeAnnotation()
-                ann.reg_groups = list(groups)
-                ann.reg_consts = dict(const_state)
-                ann.reg_exprs  = dict(expr_state)
-                ann.user_anns  = user_tgs   # user annotations force-install in _build_node_eff
+                ann.reg_groups        = list(groups)
+                ann.reg_consts        = dict(const_state)
+                ann.reg_exprs         = dict(expr_state)
+                # For each register whose value is tracked in reg_exprs, record the
+                # HIR node that last defined it so downstream passes can forward
+                # source provenance when they use reg_exprs values.
+                ann.reg_expr_sources  = {r: reg_def_nodes[r]
+                                         for r in expr_state if r in reg_def_nodes}
+                ann.user_anns         = user_tgs   # user annotations force-install in _build_node_eff
                 node.ann = ann
 
                 # (c) Detect call

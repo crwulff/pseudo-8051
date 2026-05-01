@@ -80,15 +80,17 @@ if TYPE_CHECKING:
 
 class NodeAnnotation:
     """Per-node annotation: register names/types and constant values at this point."""
-    __slots__ = ("reg_groups", "reg_consts", "reg_exprs", "call_arg_ann", "callee_args", "user_anns")
+    __slots__ = ("reg_groups", "reg_consts", "reg_exprs", "reg_expr_sources",
+                 "call_arg_ann", "callee_args", "user_anns")
 
     def __init__(self):
-        self.reg_groups:   "List[TypeGroup]"           = []   # forward-propagated TypeGroups
-        self.reg_consts:   Dict[str, int]               = {}   # reg → known const
-        self.reg_exprs:    "Dict[str, Expr]"            = {}   # reg → defining Expr (met across preds)
-        self.call_arg_ann: "List[TypeGroup]"            = []   # backward-propagated callee params
-        self.callee_args:  "Optional[List[TypeGroup]]"  = None # call node only
-        self.user_anns:    "List[TypeGroup]"            = []   # user register annotations (force-installed)
+        self.reg_groups:      "List[TypeGroup]"           = []   # forward-propagated TypeGroups
+        self.reg_consts:      Dict[str, int]               = {}   # reg → known const
+        self.reg_exprs:       "Dict[str, Expr]"            = {}   # reg → defining Expr (met across preds)
+        self.reg_expr_sources: "Dict[str, HIRNode]"        = {}   # reg → HIR node that last defined it
+        self.call_arg_ann:    "List[TypeGroup]"            = []   # backward-propagated callee params
+        self.callee_args:     "Optional[List[TypeGroup]]"  = None # call node only
+        self.user_anns:       "List[TypeGroup]"            = []   # user register annotations (force-installed)
 
     @staticmethod
     def merge(first: "object", last: "object") -> "Optional[NodeAnnotation]":
@@ -106,10 +108,11 @@ class NodeAnnotation:
             return None
         ann = NodeAnnotation()
         if first_ann is not None:
-            ann.reg_groups  = first_ann.reg_groups
-            ann.reg_consts  = first_ann.reg_consts
-            ann.reg_exprs   = first_ann.reg_exprs
-            ann.callee_args = first_ann.callee_args
+            ann.reg_groups        = first_ann.reg_groups
+            ann.reg_consts        = first_ann.reg_consts
+            ann.reg_exprs         = first_ann.reg_exprs
+            ann.reg_expr_sources  = first_ann.reg_expr_sources
+            ann.callee_args       = first_ann.callee_args
         if last_ann is not None:
             ann.call_arg_ann = last_ann.call_arg_ann
             if ann.callee_args is None:

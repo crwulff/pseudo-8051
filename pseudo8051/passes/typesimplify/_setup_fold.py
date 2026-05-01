@@ -43,6 +43,25 @@ def _resolve_const(expr: Expr, node: HIRNode) -> Expr:
     return expr
 
 
+def _resolve_const_with_source(expr: Expr, node: HIRNode):
+    """Like _resolve_const but also returns the defining HIR node when the value
+    came from reg_exprs annotation (so callers can forward source provenance).
+
+    Returns (resolved_expr, defining_node_or_None).
+    """
+    if isinstance(expr, RegsExpr) and expr.is_single:
+        ann = getattr(node, 'ann', None)
+        if ann is not None:
+            val = ann.reg_consts.get(expr.name)
+            if val is not None:
+                return Const(val), None
+            sym = ann.reg_exprs.get(expr.name)
+            if sym is not None and _is_reg_free(sym):
+                src = ann.reg_expr_sources.get(expr.name)
+                return sym, src
+    return expr, None
+
+
 # ── Predicates ────────────────────────────────────────────────────────────────
 
 def _references_xram_const(node: HIRNode, val: int) -> bool:
@@ -492,7 +511,12 @@ def _fold_call_arg_pairs(nodes: List[HIRNode],
         all_regs = set(regs_key)
         remaining_regs = all_regs - {r0}
 
-        byte_assigns: Dict[str, tuple] = {r0: (i, _resolve_const(node.rhs, node))}
+        r0_expr, r0_src = _resolve_const_with_source(node.rhs, node)
+        byte_assigns: Dict[str, tuple] = {r0: (i, r0_expr)}
+        # Defining HIR nodes for registers whose values came from reg_exprs annotation.
+        expr_sources: Dict[str, HIRNode] = {}
+        if r0_src is not None:
+            expr_sources[r0] = r0_src
         interleaved: List[int] = []
         conflict = False
 
@@ -505,7 +529,10 @@ def _fold_call_arg_pairs(nodes: List[HIRNode],
 
             if (isinstance(nd, Assign) and isinstance(nd.lhs, RegsExpr) and nd.lhs.is_single
                     and nd.lhs.name in remaining_regs and not reads_pair):
-                byte_assigns[nd.lhs.name] = (k, _resolve_const(nd.rhs, nd))
+                rk_expr, rk_src = _resolve_const_with_source(nd.rhs, nd)
+                byte_assigns[nd.lhs.name] = (k, rk_expr)
+                if rk_src is not None:
+                    expr_sources[nd.lhs.name] = rk_src
                 remaining_regs -= {nd.lhs.name}
                 if not remaining_regs:
                     break
@@ -589,7 +616,16 @@ def _fold_call_arg_pairs(nodes: List[HIRNode],
                                       RegGroupExpr(regs_key, alias=naming_vinfo.name), combined)
         else:
             result_node = Assign(node.ea, RegGroupExpr(regs_key), combined)
-        result_node.source_nodes = [nodes[idx] for _, (idx, _) in byte_assigns.items()]
+        base_sources = [nodes[idx] for _, (idx, _) in byte_assigns.items()]
+        # For registers whose values came from reg_exprs annotation (relay through
+        # another register, e.g. R4 = A where A = XRAM[...]), include the defining
+        # HIR node recorded in the annotation so the XRAM-load chain is preserved.
+        # Place these before base_sources so the source order follows data flow:
+        # XRAM load → register assignment → combined expression.
+        seen_src_ids = {id(n) for n in base_sources}
+        extra_sources = [src for r, src in expr_sources.items()
+                         if id(src) not in seen_src_ids]
+        result_node.source_nodes = extra_sources + base_sources
         dbg("typesimp",
             f"  [{hex(node.ea)}] fold-call-arg-pair: {''.join(regs_key)} = {combined.render()}")
 
