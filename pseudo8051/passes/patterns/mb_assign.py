@@ -29,7 +29,7 @@ raw XRAM-write nodes into named Assign nodes).
 import re
 from typing import List, Optional, Tuple
 
-from pseudo8051.ir.hir   import HIRNode, Assign, ExprStmt
+from pseudo8051.ir.hir   import HIRNode, Assign, CompoundAssign, ExprStmt
 from pseudo8051.ir.expr  import Reg, Regs, UnaryOp, Name, Const, BinOp, Cast
 from pseudo8051.constants import dbg
 
@@ -123,14 +123,16 @@ def _try_collapse_rmw_inc(nodes: List[HIRNode], i: int):
         return None, i
 
     dbg("typesimp", f"  mb_assign: {var_name}++ (rmw-inc)")
-    return ExprStmt(n0.ea, UnaryOp('++', Name(var_name), post=True)), i + 2
+    result = ExprStmt(n0.ea, UnaryOp('++', Name(var_name), post=True))
+    result.source_nodes = [n0, n1]
+    return result, i + 2
 
 
 def _try_collapse(nodes: List[HIRNode], i: int):
     """
     Attempt to collapse a byte-field assignment sequence starting at nodes[i].
 
-    Returns (Assign, new_i) on success, or (None, i) if no collapse.
+    Returns (collapsed_node, new_i) on success, or (None, i) if no collapse.
     """
     n0 = nodes[i]
     if not isinstance(n0, Assign) or not isinstance(n0.lhs, Name):
@@ -194,7 +196,9 @@ def _try_collapse(nodes: List[HIRNode], i: int):
 
     if valid_field and rhs_parent is not None:
         dbg("typesimp", f"  mb_assign: {lhs_parent} = {rhs_parent}")
-        return Assign(n0.ea, Name(lhs_parent), Name(rhs_parent)), j
+        result = Assign(n0.ea, Name(lhs_parent), Name(rhs_parent))
+        result.source_nodes = nodes[i:j]
+        return result, j
 
     # Try: all RHS are integer constants (Const or Name with numeric literal)
     const_vals = [_rhs_as_const(rhs) for rhs in rhs_exprs]
@@ -203,7 +207,9 @@ def _try_collapse(nodes: List[HIRNode], i: int):
         for cv in const_vals:
             value = (value << 8) | (cv & 0xFF)
         dbg("typesimp", f"  mb_assign: {lhs_parent} = {hex(value)} (const)")
-        return Assign(n0.ea, Name(lhs_parent), Const(value)), j
+        result = Assign(n0.ea, Name(lhs_parent), Const(value))
+        result.source_nodes = nodes[i:j]
+        return result, j
 
     # Try: 16-bit RMW add-with-carry from 8051 MUL result.
     # Pattern (lo first or hi first):
@@ -221,13 +227,111 @@ def _try_collapse(nodes: List[HIRNode], i: int):
             hi_rhs, lo_rhs = rhs_exprs
         full_expr = _extract_mul_addc_pair(lhs_parent, hi_rhs, lo_rhs)
         if full_expr is not None:
-            from pseudo8051.ir.hir import CompoundAssign
             dbg("typesimp",
                 f"  mb_assign: {lhs_parent} += {full_expr.render()} (mul-addc)")
             node = CompoundAssign(n0.ea, Name(lhs_parent), "+=", full_expr)
+            node.source_nodes = nodes[i:j]
+            return node, j
+
+        # Try: general 16-bit add-with-carry
+        # var.lo = var.lo + lo_addend; var.hi = var.hi + hi_addend + C
+        if suffixes == ["lo", "hi"]:
+            lo_rhs2, hi_rhs2 = rhs_exprs
+        else:
+            hi_rhs2, lo_rhs2 = rhs_exprs
+        combined = _extract_add_carry_pair(lhs_parent, lo_rhs2, hi_rhs2)
+        if combined is not None:
+            dbg("typesimp",
+                f"  mb_assign: {lhs_parent} += {combined.render()} (add-carry)")
+            node = CompoundAssign(n0.ea, Name(lhs_parent), "+=", combined)
+            node.source_nodes = nodes[i:j]
             return node, j
 
     return None, i
+
+
+def _try_collapse_pair_store(nodes: List[HIRNode], i: int):
+    """
+    Recognise the pattern where a multi-register result is stored back to a
+    named hi/lo byte-field variable pair:
+
+        Rhi:Rlo = expr          (multi-reg Assign with exactly 2 registers)
+        var.hi  = Rhi           (store high byte)
+        var.lo  = Rlo           (store low byte)
+
+    and optionally an immediately following compound-assign into the same var:
+
+        var += addend
+
+    Collapses to:
+        var = expr              (or  var = expr + addend  when += follows)
+
+    The two byte-field stores may appear in either hi-then-lo or lo-then-hi
+    order.  DPTR++ and similar skippable nodes between the three main nodes
+    are silently dropped, as in _try_collapse.
+    """
+    n0 = nodes[i]
+    if not (isinstance(n0, Assign)
+            and isinstance(n0.lhs, Regs)
+            and not n0.lhs.is_single
+            and len(n0.lhs.names) == 2):
+        return None, i
+
+    rhi, rlo = n0.lhs.names   # first name = high byte, second = low byte
+    rhs_expr = n0.rhs
+
+    hi_found = lo_found = False
+    var_name = None
+    j = i + 1
+
+    while j < len(nodes) and not (hi_found and lo_found):
+        nd = nodes[j]
+        if _is_skippable(nd):
+            j += 1
+            continue
+        if isinstance(nd, Assign) and isinstance(nd.lhs, Name):
+            f = _split_field(nd.lhs.name)
+            if f is not None:
+                parent, suf = f
+                if var_name is not None and parent != var_name:
+                    break
+                rhs = nd.rhs
+                if suf == 'hi' and not hi_found:
+                    if isinstance(rhs, Regs) and rhs.is_single and rhs.name == rhi:
+                        var_name = parent
+                        hi_found = True
+                        j += 1
+                        continue
+                elif suf == 'lo' and not lo_found:
+                    if isinstance(rhs, Regs) and rhs.is_single and rhs.name == rlo:
+                        var_name = parent
+                        lo_found = True
+                        j += 1
+                        continue
+        break
+
+    if not (hi_found and lo_found and var_name is not None):
+        return None, i
+
+    end_j = j  # index past the last consumed byte-field store
+
+    # Optionally consume an immediately following  var += addend
+    k = j
+    while k < len(nodes) and _is_skippable(nodes[k]):
+        k += 1
+    if k < len(nodes):
+        nxt = nodes[k]
+        if (isinstance(nxt, CompoundAssign)
+                and isinstance(nxt.lhs, Name)
+                and nxt.lhs.name == var_name
+                and nxt.op == '+='):
+            rhs_expr = BinOp(rhs_expr, '+', nxt.rhs)
+            end_j = k + 1
+
+    dbg("typesimp", f"  mb_assign: {var_name} = ... (pair-store)")
+    result = Assign(n0.ea, Name(var_name), rhs_expr)
+    result.source_nodes = nodes[i:end_j]
+    return result, end_j
 
 
 def _extract_mul_addc_pair(var_name: str, hi_rhs, lo_rhs) -> Optional['Expr']:
@@ -314,6 +418,94 @@ def _is_b_plus_carry(expr) -> bool:
     return False
 
 
+def _has_carry(expr) -> bool:
+    """True if Reg('C') appears anywhere in expr."""
+    if isinstance(expr, Regs) and expr.is_single and expr.name == 'C':
+        return True
+    if isinstance(expr, BinOp):
+        return _has_carry(expr.lhs) or _has_carry(expr.rhs)
+    return False
+
+
+def _extract_add_carry_pair(var_name: str, lo_rhs, hi_rhs) -> Optional['Expr']:
+    """
+    Recognise the 16-bit add-with-carry RMW pattern:
+
+      var.lo = var.lo + lo_addend                (no carry)
+      var.hi = (var.hi + hi_addend) + C          (carry in outermost position)
+             OR var.hi + (hi_addend + C)
+
+    Returns a combined addend expression, or None if the pattern doesn't match.
+
+    Combined addend rules:
+      - Name(x.lo) + Name(x.hi) → Name(x)
+      - Const(lo) + Const(hi)   → Const((hi << 8) | lo)
+      - Otherwise               → None (cannot safely combine)
+    """
+    lo_field = f"{var_name}.lo"
+    hi_field = f"{var_name}.hi"
+
+    # --- Lo side: var.lo + lo_addend (or lo_addend + var.lo), no carry ---
+    if not isinstance(lo_rhs, BinOp) or lo_rhs.op != '+':
+        return None
+    if _name_matches(lo_rhs.lhs, lo_field):
+        lo_addend = lo_rhs.rhs
+    elif _name_matches(lo_rhs.rhs, lo_field):
+        lo_addend = lo_rhs.lhs
+    else:
+        return None
+    if _has_carry(lo_addend):
+        return None
+
+    # --- Hi side: (var.hi + hi_addend) + C  OR  var.hi + (hi_addend + C) ---
+    if not isinstance(hi_rhs, BinOp) or hi_rhs.op != '+':
+        return None
+
+    hi_addend: Optional['Expr'] = None
+    # Case A: outermost `+` has Reg('C') on the right
+    if hi_rhs.rhs == Reg('C'):
+        inner = hi_rhs.lhs
+        if isinstance(inner, BinOp) and inner.op == '+':
+            if _name_matches(inner.lhs, hi_field):
+                hi_addend = inner.rhs
+            elif _name_matches(inner.rhs, hi_field):
+                hi_addend = inner.lhs
+    # Case B: var.hi is the outermost left operand, right contains carry
+    elif _name_matches(hi_rhs.lhs, hi_field):
+        tail = hi_rhs.rhs
+        if isinstance(tail, BinOp) and tail.op == '+' and tail.rhs == Reg('C'):
+            hi_addend = tail.lhs
+        elif isinstance(tail, BinOp) and tail.op == '+' and tail.lhs == Reg('C'):
+            hi_addend = tail.rhs
+    # Case C: var.hi is the outermost right operand
+    elif _name_matches(hi_rhs.rhs, hi_field):
+        tail = hi_rhs.lhs
+        if isinstance(tail, BinOp) and tail.op == '+' and tail.rhs == Reg('C'):
+            hi_addend = tail.lhs
+        elif isinstance(tail, BinOp) and tail.op == '+' and tail.lhs == Reg('C'):
+            hi_addend = tail.rhs
+
+    if hi_addend is None or _has_carry(hi_addend):
+        return None
+
+    # --- Combine lo_addend and hi_addend ---
+    # Name(x.lo) + Name(x.hi) → Name(x)
+    if isinstance(lo_addend, Name) and isinstance(hi_addend, Name):
+        f_lo = _split_field(lo_addend.name)
+        f_hi = _split_field(hi_addend.name)
+        if (f_lo and f_hi
+                and f_lo[0] == f_hi[0]
+                and f_lo[1] == 'lo'
+                and f_hi[1] == 'hi'):
+            return Name(f_lo[0])
+
+    # Const(lo_val) + Const(hi_val) → Const combined
+    if isinstance(lo_addend, Const) and isinstance(hi_addend, Const):
+        return Const((hi_addend.value << 8) | (lo_addend.value & 0xFF))
+
+    return None
+
+
 def collapse_mb_assigns(nodes: List[HIRNode]) -> List[HIRNode]:
     """
     Second-pass collapse of byte-field assignment sequences.
@@ -336,6 +528,8 @@ def collapse_mb_assigns(nodes: List[HIRNode]) -> List[HIRNode]:
             continue
 
         collapsed, new_i = _try_collapse_rmw_inc(nodes, i)
+        if collapsed is None:
+            collapsed, new_i = _try_collapse_pair_store(nodes, i)
         if collapsed is None:
             collapsed, new_i = _try_collapse(nodes, i)
         if collapsed is not None:

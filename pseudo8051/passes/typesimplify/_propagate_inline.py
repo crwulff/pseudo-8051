@@ -11,7 +11,7 @@ from typing import Dict, List, Optional, Tuple
 from pseudo8051.ir.hir import (HIRNode, Assign, TypedAssign, CompoundAssign,
                                 ExprStmt, ReturnStmt, IfGoto, IfNode,
                                 NodeAnnotation)
-from pseudo8051.ir.expr import (Expr, Call, Const, Regs as RegExpr, Name as NameExpr)
+from pseudo8051.ir.expr import (Expr, Call, Const, BinOp, Regs as RegExpr, Name as NameExpr)
 from pseudo8051.passes.patterns._utils import (
     VarInfo, _count_reg_uses_in_node, _subst_reg_in_node,
     _walk_expr, _canonicalize_expr, _fold_exprs_in_node, _is_reg_free,
@@ -31,40 +31,27 @@ from pseudo8051.passes.typesimplify._propagate_utils import (
 
 def _subst_group_in_call_node(node: HIRNode, regs_tuple: tuple,
                                replacement: Expr) -> Optional[HIRNode]:
-    """Replace Regs(names==regs_tuple) in call args of node with replacement."""
-    def _patch(call: Call) -> Optional[Call]:
-        new_args = []
-        found = False
-        for a in call.args:
-            if isinstance(a, RegExpr) and not a.is_single and a.names == regs_tuple:
-                new_args.append(replacement)
-                found = True
-            else:
-                new_args.append(a)
-        return Call(call.func_name, new_args) if found else None
+    """Replace Regs(names==regs_tuple) anywhere in the RHS of node."""
+    def _sub(e: Expr) -> Expr:
+        if isinstance(e, RegExpr) and not e.is_single and e.names == regs_tuple:
+            return replacement
+        return e
 
     result: Optional[HIRNode] = None
-    if isinstance(node, Assign) and isinstance(node.rhs, Call):
-        new_call = _patch(node.rhs)
-        if new_call is not None:
-            result = node._rebuild(node.lhs, new_call)
-    elif (isinstance(node, Assign)
-          and isinstance(node.rhs, RegExpr)
-          and not node.rhs.is_single
-          and node.rhs.names == regs_tuple):
-        result = node._rebuild(node.lhs, replacement)
+    if isinstance(node, Assign):
+        new_rhs = _walk_expr(node.rhs, _sub)
+        if new_rhs is not node.rhs:
+            result = node._rebuild(node.lhs, new_rhs)
+    elif isinstance(node, CompoundAssign):
+        new_rhs = _walk_expr(node.rhs, _sub)
+        if new_rhs is not node.rhs:
+            result = CompoundAssign(node.ea, node.lhs, node.op, new_rhs)
     elif isinstance(node, ExprStmt) and isinstance(node.expr, Call):
-        new_call = _patch(node.expr)
-        if new_call is not None:
-            result = ExprStmt(node.ea, new_call)
+        new_expr = _walk_expr(node.expr, _sub)
+        if new_expr is not node.expr:
+            result = ExprStmt(node.ea, new_expr)
     elif isinstance(node, IfNode):
-        def _patch_in_expr(e: Expr) -> Expr:
-            if isinstance(e, Call):
-                new_call = _patch(e)
-                if new_call is not None:
-                    return new_call
-            return e
-        new_cond = _walk_expr(node.condition, _patch_in_expr)
+        new_cond = _walk_expr(node.condition, _sub)
         if new_cond is not node.condition:
             result = IfNode(node.ea, new_cond, node.then_nodes, node.else_nodes)
     if result is not None:
@@ -187,45 +174,72 @@ def _expr_safe_to_subst(expr: Expr, ann) -> bool:
 
 
 def _subst_from_reg_exprs(live: List[HIRNode]) -> Tuple[List[HIRNode], bool]:
-    """Sub-pass A1: substitute reg_exprs annotations directly into node expressions."""
+    """Sub-pass A1: substitute reg_exprs annotations directly into node expressions.
+
+    Maintains a running set of registers written by brace-LHS Assigns (MUL-type
+    nodes, e.g. ``{A, R7} = pair * 9``).  CProp annotations for those registers
+    at downstream nodes are stale — the annotation was computed through the
+    original byte-by-byte multiply sequence before it was collapsed — so they
+    are skipped to prevent wrong substitutions.
+    """
     result = list(live)
     any_changed = False
+    # Registers whose CProp annotation may be stale due to a preceding brace-LHS
+    # Assign (MUL result, Mul16 result, etc.) that CProp could not evaluate.
+    brace_written: set = set()
     for i, node in enumerate(result):
-        if node.ann is None or not node.ann.reg_exprs:
-            continue
-        current = node
-        for r, expr in current.ann.reg_exprs.items():
-            if not _expr_safe_to_subst(expr, current.ann):
-                continue
-            if r in _expr_name_refs(expr):
-                continue
-            if _count_reg_uses_in_node(r, current) == 0:
-                continue
-            new_node = _subst_reg_in_node(current, r, expr)
-            if new_node is None:
-                continue
-            new_node = _fold_exprs_in_node(new_node)
-            current = new_node
-            any_changed = True
-        if (current.ann is not None
-                and "DPTR" not in current.ann.reg_exprs
-                and "DPH" in current.ann.reg_exprs
-                and "DPL" in current.ann.reg_exprs
-                and _count_reg_uses_in_node("DPTR", current) > 0):
-            dph = current.ann.reg_exprs["DPH"]
-            dpl = current.ann.reg_exprs["DPL"]
-            if (_expr_safe_to_subst(dph, current.ann)
-                    and _expr_safe_to_subst(dpl, current.ann)
-                    and "DPTR" not in _expr_name_refs(dph)
-                    and "DPTR" not in _expr_name_refs(dpl)):
-                from pseudo8051.ir.expr import BinOp as _BinOp, Const as _Const, Paren as _Paren
-                dptr_expr = _BinOp(_Paren(_BinOp(dph, "<<", _Const(8))), "|", dpl)
-                new_node = _subst_reg_in_node(current, "DPTR", dptr_expr)
-                if new_node is not None:
-                    current = _fold_exprs_in_node(new_node)
-                    any_changed = True
-        if current is not node:
-            result[i] = current
+        if node.ann is not None and node.ann.reg_exprs:
+            current = node
+            for r, expr in current.ann.reg_exprs.items():
+                if r in brace_written:
+                    continue  # annotation stale: r written by a preceding brace-LHS
+                if not _expr_safe_to_subst(expr, current.ann):
+                    continue
+                if r in _expr_name_refs(expr):
+                    continue
+                if _count_reg_uses_in_node(r, current) == 0:
+                    continue
+                new_node = _subst_reg_in_node(current, r, expr)
+                if new_node is None:
+                    continue
+                new_node = _fold_exprs_in_node(new_node)
+                current = new_node
+                any_changed = True
+            if (current.ann is not None
+                    and "DPTR" not in current.ann.reg_exprs
+                    and "DPH" in current.ann.reg_exprs
+                    and "DPL" in current.ann.reg_exprs
+                    and _count_reg_uses_in_node("DPTR", current) > 0):
+                dph = current.ann.reg_exprs["DPH"]
+                dpl = current.ann.reg_exprs["DPL"]
+                if (_expr_safe_to_subst(dph, current.ann)
+                        and _expr_safe_to_subst(dpl, current.ann)
+                        and "DPTR" not in _expr_name_refs(dph)
+                        and "DPTR" not in _expr_name_refs(dpl)):
+                    from pseudo8051.ir.expr import BinOp as _BinOp, Const as _Const, Paren as _Paren
+                    dptr_expr = _BinOp(_Paren(_BinOp(dph, "<<", _Const(8))), "|", dpl)
+                    new_node = _subst_reg_in_node(current, "DPTR", dptr_expr)
+                    if new_node is not None:
+                        current = _fold_exprs_in_node(new_node)
+                        any_changed = True
+            if current is not node:
+                result[i] = current
+
+        # Track multi-register writes so downstream nodes know when CProp
+        # annotations are stale.  Use the ORIGINAL node's LHS.
+        #
+        # Add to brace_written:  computed RHS (BinOp, Call) or brace=True LHS —
+        #   CProp cannot evaluate these, so annotations for those regs are stale.
+        # Remove from brace_written: simple load/copy RHS (Name, Regs, Const,
+        #   XRAMRef, etc.) — CProp correctly tracks these, annotations are fresh.
+        if (isinstance(node, Assign)
+                and isinstance(node.lhs, RegExpr)
+                and not node.lhs.is_single):
+            if node.lhs.brace or isinstance(node.rhs, (BinOp, Call)):
+                brace_written.update(node.lhs.names)
+            else:
+                brace_written.difference_update(node.lhs.names)
+
     return result, any_changed
 
 

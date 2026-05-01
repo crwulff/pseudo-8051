@@ -436,3 +436,40 @@ class TestSubstFromRegExprs:
         result, changed = _subst_from_reg_exprs([node])
         assert changed
         assert result[0].rhs.render() == "arg1 * 2"
+
+    def test_binop_multi_reg_lhs_blocks_downstream_subst(self):
+        """Multi-reg Assign with BinOp RHS adds to brace_written; stale annotation
+        for those regs is blocked in a downstream node."""
+        from pseudo8051.ir.expr import RegGroup
+        # Node 0: R6R7 = osdAddr * 9  (computed, brace=False)
+        mul_result = Assign(0x100, RegGroup(("R6", "R7")),
+                            BinOp(Name("osdAddr"), "*", Const(9)))
+        mul_result.ann = None
+        # Node 1: A += R6  — stale ann says R6 = Name("staleVal")
+        addc = CompoundAssign(0x101, Reg("A"), "+=", Reg("R6"))
+        addc.ann = self._make_ann({"R6": Name("staleVal")})
+        result, changed = _subst_from_reg_exprs([mul_result, addc])
+        # R6 must NOT be substituted with staleVal
+        assert result[1].rhs == Reg("R6"), (
+            f"Expected R6 unchanged, got {result[1].rhs.render()!r}"
+        )
+
+    def test_simple_multi_reg_lhs_clears_brace_written(self):
+        """Multi-reg Assign with simple RHS (Name) clears brace_written for those
+        regs; a downstream annotation for them is now valid and should be applied."""
+        from pseudo8051.ir.expr import RegGroup
+        # Node 0: R6R7 = osdAddr * 9 — adds R6,R7 to brace_written
+        mul_result = Assign(0x100, RegGroup(("R6", "R7")),
+                            BinOp(Name("osdAddr"), "*", Const(9)))
+        mul_result.ann = None
+        # Node 1: R6R7 = xarg2  (simple load) — clears R6,R7 from brace_written
+        load = Assign(0x102, RegGroup(("R6", "R7")), Name("xarg2"))
+        load.ann = None
+        # Node 2: A += R6  — annotation now fresh: R6 = Name("xarg2_hi")
+        addc = CompoundAssign(0x103, Reg("A"), "+=", Reg("R6"))
+        addc.ann = self._make_ann({"R6": Name("xarg2_hi")})
+        result, changed = _subst_from_reg_exprs([mul_result, load, addc])
+        assert changed
+        assert result[2].rhs == Name("xarg2_hi"), (
+            f"Expected xarg2_hi substituted, got {result[2].rhs.render()!r}"
+        )

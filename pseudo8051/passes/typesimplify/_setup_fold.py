@@ -509,6 +509,7 @@ def _fold_call_arg_pairs(nodes: List[HIRNode],
         # since pair_groups uses setdefault and a different callee's annotation may
         # have won for the same register tuple.
         naming_vinfo = vinfo
+        naming_from_call_arg = False
         for r_check, (idx_check, _) in byte_assigns.items():
             nd_check = nodes[idx_check]
             ann_check = getattr(nd_check, "ann", None)
@@ -516,11 +517,32 @@ def _fold_call_arg_pairs(nodes: List[HIRNode],
                 ca_g = ann_check.call_arg_for(r_check)
                 if ca_g is not None and ca_g.full_regs == regs_key:
                     naming_vinfo = ca_g
+                    naming_from_call_arg = True
                     break
 
         # Build combined expression: (byte0 << (n-1)*8) | byte1 | ... | byte_{n-1}
         n_bytes = len(regs_key)
         ordered_exprs = [byte_assigns[r][1] for r in regs_key]
+
+        # When naming came only from pair_groups (register-backed VarInfo), verify
+        # it against the actual hi-byte source.  If the hi byte is an XRAM load,
+        # look up its parent VarInfo; a different (or unknown) variable means the
+        # register pair is carrying unrelated data here, so suppress the name.
+        if not naming_from_call_arg and not naming_vinfo.xram_sym and ordered_exprs:
+            hi_expr = ordered_exprs[0]
+            if isinstance(hi_expr, XRAMRef) and isinstance(hi_expr.inner, NameExpr):
+                hi_sym = hi_expr.inner.name
+                xram_parent = reg_map.get(hi_sym)
+                if isinstance(xram_parent, VarInfo) and not xram_parent.is_byte_field:
+                    naming_vinfo = xram_parent
+                    dbg("typesimp",
+                        f"  [{hex(node.ea)}] fold-call-arg-pair: override naming "
+                        f"{vinfo.name!r} → {xram_parent.name!r} from {hi_sym}")
+                else:
+                    dbg("typesimp",
+                        f"  [{hex(node.ea)}] fold-call-arg-pair: suppress naming "
+                        f"{vinfo.name!r} (hi-byte XRAM {hi_sym!r} unknown)")
+                    naming_vinfo = VarInfo("", naming_vinfo.type, ())
 
         dbg("typesimp",
             f"  [{hex(node.ea)}] fold-call-arg-pair exprs: "

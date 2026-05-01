@@ -28,6 +28,7 @@ from pseudo8051.passes.patterns.retval           import RetvalPattern
 from pseudo8051.passes.patterns.reg_copy_group   import RegCopyGroupPattern
 from pseudo8051.passes.patterns.reg_inc          import RegPostIncPattern, RegPreIncPattern
 from pseudo8051.passes.patterns.accum_relay      import AccumRelayPattern
+from pseudo8051.passes.patterns.mul16            import Mul16Pattern
 from pseudo8051.passes.patterns.rol_switch       import RolSwitchPattern
 from pseudo8051.passes.patterns.accum_fold       import AccumFoldPattern
 from pseudo8051.passes.patterns.xch_copy         import XchCopyPattern
@@ -41,6 +42,7 @@ _PATTERNS: List[Pattern] = [
     RegPreIncPattern(),        # Rn++/-- + any node using Rn once → embed pre-op
     AccumRelayPattern(),       # collapse A=expr; target=A; → target=expr;
     RolSwitchPattern(),        # collapse A=rol8(A)×N + compounds before switch(A>>K)
+    Mul16Pattern(),            # collapse 16×16→16 multiply idiom into {A,Rlo1} = pair1 * pair2
     AccumFoldPattern(),        # collapse A-chain + IfGoto/IfNode/Assign terminal
     MultiByteAddPattern(),     # before XRAMLocalWrite: consumes the whole ADD+ADDC sequence
     MultiByteIncDecPattern(),  # collapse multi-byte inc/dec chains into var++/var--
