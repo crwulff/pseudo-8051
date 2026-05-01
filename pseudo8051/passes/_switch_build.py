@@ -97,6 +97,12 @@ def _find_switch_merge_ea(func: Function, switch_node: SwitchNode,
         return None
 
     arm_eas = [label_to_block[l].start_ea for l in all_labels if l in label_to_block]
+    # Exclude non-default case arm EAs from merge candidates: one arm may reach
+    # another case arm's entry (e.g. via cjne fall-through), which would
+    # otherwise be incorrectly chosen as the merge point.
+    case_labels = [body for _, body in switch_node.cases if isinstance(body, str)]
+    case_arm_ea_set = {label_to_block[l].start_ea for l in case_labels
+                       if l in label_to_block}
     bfs_floor = min(arm_eas) - 1 if arm_eas else branch_ea
 
     per_arm: List[set] = []
@@ -113,11 +119,13 @@ def _find_switch_merge_ea(func: Function, switch_node: SwitchNode,
     common = per_arm[0].copy()
     for s in per_arm[1:]:
         common &= s
+    common -= case_arm_ea_set
     if common:
         return min(common)
 
-    # Strategy 2: mode — EA reachable from the most arms
-    ea_count: Counter = Counter(ea for s in per_arm for ea in s)
+    # Strategy 2: mode — EA reachable from the most arms (exclude case arm entries)
+    ea_count: Counter = Counter(ea for s in per_arm for ea in s
+                                if ea not in case_arm_ea_set)
     max_cnt = max(ea_count.values(), default=0)
     if max_cnt < 2:
         return None
