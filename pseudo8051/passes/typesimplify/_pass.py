@@ -156,8 +156,6 @@ class TypeAwareSimplifier(OptimizationPass):
         func.hir = _fold_and_prune_setups(func.hir, reg_map)
         func.hir = _simplify_carry_comparison(func.hir)
         func.hir = _fold_and_prune_setups(func.hir, reg_map)  # clean up setups dead after SUBB16 collapse
-        # Collapse CLR-C + SUBB + JC/JNC → typed comparison in flat if context.
-        func.hir = _simplify_subb_jc(func.hir)
         # Collapse CJNE(nop-goto) + JNC/JC → typed comparison (e.g. expr >= const).
         func.hir = _simplify_cjne_jnc(func.hir)
         func.hir = _simplify_orl_zero_check(func.hir)
@@ -165,6 +163,12 @@ class TypeAwareSimplifier(OptimizationPass):
         func.hir = _collapse_dpl_dph_arithmetic(func.hir)
         func.hir = _subst_xram_in_hir(func.hir, reg_map)
         func.hir = _subst_iram_in_hir(func.hir, reg_map)
+        # Collapse CLR-C + SUBB + JC/JNC → typed comparison in flat if context.
+        # Runs after the second _subst_xram_in_hir so that XRAM local variable
+        # references in hi-byte Assigns (e.g. A = XRAM[EXT_DC37] - C) have
+        # already been replaced by named variables (e.g. A = _sourceIndex.hi - C),
+        # enabling parent-name extraction for 16-bit comparisons.
+        func.hir = _simplify_subb_jc(func.hir)
         # Second fold: catches xram params that were only renamed by the second
         # _subst_xram_in_hir above (e.g. ++DPTR writes resolved by _simplify_arithmetic),
         # or that became adjacent to the call after earlier pruning passes removed

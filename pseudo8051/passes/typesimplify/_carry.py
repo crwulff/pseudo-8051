@@ -374,6 +374,37 @@ def _a_name_before_subb(nodes: List[HIRNode], subb_idx: int) -> Optional[str]:
     return None
 
 
+def _hi_byte_to_parent_name(hi_expr) -> Optional[str]:
+    """Extract the parent 16-bit variable name from a hi-byte expression.
+
+    If hi_expr is Name("var.hi") or Regs with alias "var.hi", returns "var".
+    Otherwise returns None.
+    """
+    if isinstance(hi_expr, NameExpr) and hi_expr.name.endswith('.hi'):
+        return hi_expr.name[:-3]
+    alias = getattr(hi_expr, 'alias', None)
+    if alias and alias.endswith('.hi'):
+        return alias[:-3]
+    return None
+
+
+def _is_carry_expr(expr) -> bool:
+    """Return True if expr is equivalent to the carry flag C.
+
+    Matches bare Reg("C") or a BinOp "+" with one side Const(0) and the
+    other Reg("C") — the form left by _fold_compound_assigns when C=0 was
+    not yet constant-folded (e.g. A = Rhi - (0 + C)).
+    """
+    if expr == Reg("C"):
+        return True
+    if isinstance(expr, BinOp) and expr.op == "+":
+        if isinstance(expr.lhs, Const) and expr.lhs.value == 0 and expr.rhs == Reg("C"):
+            return True
+        if isinstance(expr.rhs, Const) and expr.rhs.value == 0 and expr.lhs == Reg("C"):
+            return True
+    return False
+
+
 def _simplify_subb_jc(nodes: List[HIRNode]) -> List[HIRNode]:
     """
     Collapse CLR-C/SETB-C + SUBB A, #k + JC/JNC into a typed comparison.
@@ -385,8 +416,13 @@ def _simplify_subb_jc(nodes: List[HIRNode]) -> List[HIRNode]:
       A -= k + 1;            → if (a_name < k+1) / if (a_name >= k+1)
       (setb C; subb A,#k folds to A -= k+1; C set when a_name < k+1)
 
+    16-bit CLR-C pattern (C=0, with hi-byte SUBB propagation):
+      A -= lo_k;             (lo-byte comparison, C=0)
+      A = hi_expr - C;       (hi-byte borrow propagation: A = var.hi - C)
+      if (C) / if (!C)       → if (var16 < lo_k) / if (var16 >= lo_k)
+
     Also handles IfGoto variants.  Recurses into structured bodies first.
-    The SUBB CompoundAssign is consumed.
+    The SUBB CompoundAssign (and hi-byte Assign if present) are consumed.
     """
     nodes = [n.map_bodies(_simplify_subb_jc) for n in nodes]
 
@@ -405,25 +441,58 @@ def _simplify_subb_jc(nodes: List[HIRNode]) -> List[HIRNode]:
 
         ann = getattr(node, 'ann', None)
         c_val = ann.reg_consts.get("C") if ann is not None else None
-        if c_val not in (0, 1):
-            result.append(node)
-            i += 1
-            continue
 
         a_name = _a_name_before_subb(nodes, i)
-        if a_name is None:
-            result.append(node)
-            i += 1
-            continue
+
+        # Skip optional Label gap nodes to find what follows the lo-SUBB.
+        j = i + 1
+        while j < len(nodes) and isinstance(nodes[j], Label):
+            j += 1
+
+        # Detect 16-bit hi-byte SUBB propagation step before the c_val bail,
+        # because the inner SUBB of a nested 16-bit comparison may have no
+        # CLR-C annotation (carry flows from the outer comparison).
+        #   A = hi_expr - C  (or A = hi_expr - (0+C) before _simplify_arithmetic)
+        hi_subb_idx = None   # index of the hi-byte Assign node, if present
+        hi_var_name = None   # parent 16-bit variable name derived from hi_expr
+        if j < len(nodes):
+            nd = nodes[j]
+            if (isinstance(nd, Assign)
+                    and nd.lhs == Reg("A")
+                    and isinstance(nd.rhs, BinOp)
+                    and nd.rhs.op == "-"
+                    and _is_carry_expr(nd.rhs.rhs)):
+                hi_expr = nd.rhs.lhs
+                parent = _hi_byte_to_parent_name(hi_expr)
+                if parent is not None:
+                    hi_subb_idx = j
+                    hi_var_name = parent
+                    j += 1
+                    # Skip any labels between hi-SUBB and condition
+                    while j < len(nodes) and isinstance(nodes[j], Label):
+                        j += 1
+
+        # For the 8-bit path require a known carry state and a named variable.
+        # The 16-bit path (hi_var_name set) can proceed without c_val.
+        if hi_var_name is None:
+            if c_val not in (0, 1):
+                result.append(node)
+                i += 1
+                continue
+            if a_name is None:
+                result.append(node)
+                i += 1
+                continue
 
         # Extract the comparison operand.
-        # CLR-C (C=0): rhs = k [+ C/0]; operand = k.
-        # SETB-C (C=1): rhs = k [+ C/1]; actual subtraction = k+1; operand = k+1.
+        # CLR-C (C=0): rhs = k [+ C/0] → operand = k.
+        # SETB-C (C=1): rhs = k [+ C/1] → operand = k+1.
+        # Unknown carry (16-bit only): strip the "+ C" tail, use base k.
         rhs = node.rhs
         if c_val == 0:
             # Strip "+ C" or "+ 0" tail.
             operand = rhs.lhs if isinstance(rhs, BinOp) and rhs.op == '+' else rhs
-        else:
+        elif c_val == 1:
             # SETB-C: subtrahend is k+1.  _extract_carry1_operand returns k for
             # rhs = k+C or k+1; total operand = k+1.  If rhs is Const(1) (k=0
             # fully folded), operand = Const(1) directly.
@@ -440,11 +509,25 @@ def _simplify_subb_jc(nodes: List[HIRNode]) -> List[HIRNode]:
                 result.append(node)
                 i += 1
                 continue
+        else:
+            # c_val unknown (only reached for 16-bit path where hi_var_name is set).
+            # Strip the "+ C" tail to get the base constant as the threshold.
+            if isinstance(rhs, BinOp) and rhs.op == '+':
+                if _is_carry_expr(rhs.rhs):
+                    operand = rhs.lhs
+                elif _is_carry_expr(rhs.lhs):
+                    operand = rhs.rhs
+                else:
+                    result.append(node)
+                    i += 1
+                    continue
+            elif isinstance(rhs, Const):
+                operand = rhs
+            else:
+                result.append(node)
+                i += 1
+                continue
 
-        # Skip optional Label gap nodes.
-        j = i + 1
-        while j < len(nodes) and isinstance(nodes[j], Label):
-            j += 1
         if j >= len(nodes):
             result.append(node)
             i += 1
@@ -469,15 +552,34 @@ def _simplify_subb_jc(nodes: List[HIRNode]) -> List[HIRNode]:
             i += 1
             continue
 
-        new_cond = BinOp(NameExpr(a_name), "<" if is_c else ">=", operand)
-        dbg("typesimp",
-            f"  [{hex(node.ea)}] subb-jc(C={c_val}): {a_name} "
-            f"{'<' if is_c else '>='} {operand.render()!r}")
+        # For 8-bit pattern a_name is required; 16-bit uses hi_var_name instead.
+        if hi_var_name is None and a_name is None:
+            result.append(node)
+            i += 1
+            continue
+
+        # Build comparison.  For 16-bit pattern use parent var; for 8-bit use a_name.
+        cmp_name = hi_var_name if hi_var_name is not None else a_name
+        new_cond = BinOp(NameExpr(cmp_name), "<" if is_c else ">=", operand)
+        if hi_var_name is not None:
+            dbg("typesimp",
+                f"  [{hex(node.ea)}] subb-jc16(C={c_val}): {cmp_name} "
+                f"{'<' if is_c else '>='} {operand.render()!r}")
+        else:
+            dbg("typesimp",
+                f"  [{hex(node.ea)}] subb-jc(C={c_val}): {cmp_name} "
+                f"{'<' if is_c else '>='} {operand.render()!r}")
 
         repl = cond_node.replace_condition(new_cond)
-        repl.source_nodes = [node, cond_node]
-        # Emit gap labels, then the replaced condition node.  SUBB is consumed.
-        result.extend(nodes[i + 1:j])
+        # Emit gap labels (between lo-SUBB and hi-SUBB or condition), skipping
+        # the hi-byte Assign node itself (it is consumed alongside the lo-SUBB).
+        gap_nodes = [nodes[k] for k in range(i + 1, j)
+                     if k != hi_subb_idx]
+        src_nodes = [node, cond_node]
+        if hi_subb_idx is not None:
+            src_nodes.insert(1, nodes[hi_subb_idx])
+        repl.source_nodes = src_nodes
+        result.extend(gap_nodes)
         result.append(repl)
         i = j + 1
 

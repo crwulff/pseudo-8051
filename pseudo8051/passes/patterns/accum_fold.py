@@ -457,6 +457,12 @@ class AccumFoldPattern(Pattern):
                     sub_raw = sub_raw.lhs
                 elif isinstance(sub_raw.lhs, Const) and sub_raw.lhs.value == 0:
                     sub_raw = sub_raw.rhs
+            # After stripping, if sub_raw is just Reg("C"), the entire subtrahend is
+            # the carry flag.  This is the hi-byte borrow-propagation step of a 16-bit
+            # comparison (A = Rhi; A -= 0 + C).  We cannot produce a meaningful typed
+            # comparison at this level — leave the carry branch unmodified.
+            if sub_raw == Reg("C"):
+                return None
             minuend    = _subst_all_expr(a_expr.lhs, reg_map)
             subtrahend = _subst_all_expr(sub_raw,    reg_map)
             carry_cond = BinOp(minuend, "<",  subtrahend)
