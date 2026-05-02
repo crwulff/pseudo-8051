@@ -85,6 +85,13 @@ class CrossPageTrampolinePass(OptimizationPass):
 
     Runs before AnnotationPass so the trampoline blocks are absorbed before
     IfElseStructurer can pull them into IfNode bodies.
+
+    Two-phase approach:
+    1. Find all trampoline blocks (DPTR=func; goto *_call_page_N), record their
+       label(s) → call_node mapping, fold in-place, and absorb them plus their
+       page-switch stub chains.
+    2. Replace every GotoStatement(label) in remaining blocks where label points
+       to a folded trampoline block with the corresponding call node.
     """
 
     def run(self, func: Function) -> None:
@@ -97,13 +104,15 @@ class CrossPageTrampolinePass(OptimizationPass):
         from pseudo8051.passes._switch_detect import _label_for
         label_to_block = {_label_for(b): b for b in func.blocks}
 
+        # ── Phase 1: detect and fold trampoline blocks ────────────────────────
+        # label → call_node for every folded trampoline block label
+        trampoline_calls: dict = {}
+
         for block in func.blocks:
             if getattr(block, '_absorbed', False):
                 continue
 
             hir = block.hir
-            # Find: (optional Labels) Assign(DPTR, Const) GotoStatement(*_call_page_N)
-            # Scan for the GotoStatement first, then verify the preceding Assign.
             for idx, node in enumerate(hir):
                 if not isinstance(node, GotoStatement):
                     continue
@@ -141,6 +150,40 @@ class CrossPageTrampolinePass(OptimizationPass):
                 # Replace Assign(DPTR)+GotoStatement with call; keep preceding Labels
                 block.hir = hir[:j] + [call_node] + hir[idx + 1:]
 
-                # Absorb the page-switch stub and epilogue blocks
+                # Record all labels of this trampoline block so callers can be patched
+                for n in block.hir:
+                    if isinstance(n, Label):
+                        trampoline_calls[n.name] = call_node
+                    else:
+                        break  # labels are always at the front
+
+                # Absorb this trampoline block and the page-switch stub chain
+                block._absorbed = True
+                dbg("trampolines", f"  xpage-absorb: absorbed trampoline block {hex(block.start_ea)}")
                 _absorb_chain(label_to_block, node.label)
                 break  # one trampoline per block
+
+        if not trampoline_calls:
+            return
+
+        dbg("trampolines", f"  xpage: trampoline labels to patch: {sorted(trampoline_calls)}")
+
+        # ── Phase 2: replace GotoStatement(trampoline_label) with call ────────
+        import copy as _copy
+        for block in func.blocks:
+            if getattr(block, '_absorbed', False):
+                continue
+            new_hir = []
+            for node in block.hir:
+                if (isinstance(node, GotoStatement)
+                        and node.label in trampoline_calls):
+                    # Replace goto with a fresh copy of the call node
+                    repl = _copy.copy(trampoline_calls[node.label])
+                    repl.source_nodes = list(repl.source_nodes or []) + [node]
+                    new_hir.append(repl)
+                    dbg("trampolines",
+                        f"  xpage-patch: replaced goto {node.label!r} "
+                        f"with call in block {hex(block.start_ea)}")
+                else:
+                    new_hir.append(node)
+            block.hir = new_hir
