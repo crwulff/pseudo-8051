@@ -112,8 +112,9 @@ def run_all_passes(func: Function) -> None:
     for block in func.blocks:
         block.hir = block.initial_hir()
 
-    from pseudo8051.passes.chunk_inline  import ChunkInliner
-    from pseudo8051.passes.simple_inline import SimpleExternalInliner
+    from pseudo8051.passes.chunk_inline      import ChunkInliner
+    from pseudo8051.passes.simple_inline     import SimpleExternalInliner
+    from pseudo8051.passes.xpage_trampoline  import CrossPageTrampolinePass
     ChunkInliner().run(func)
     SimpleExternalInliner().run(func)
 
@@ -122,6 +123,12 @@ def run_all_passes(func: Function) -> None:
     # sees correct block.cp_entry with the full, corrected CFG.
     fixup_jmptable_edges(func)
     ConstantPropagation().run(func)
+
+    # Fold cross-page trampoline blocks (DPTR=func; goto *_call_page_N) into
+    # ExprStmt(Call) before structural passes absorb them into IfNode bodies.
+    # Runs after fixup_jmptable_edges so jump-table-reachable trampoline blocks
+    # are also covered.
+    CrossPageTrampolinePass().run(func)
 
     from pseudo8051.passes.annotate import AnnotationPass
     AnnotationPass().run(func)

@@ -74,6 +74,7 @@ _RELOAD_ORDER = [
     "pseudo8051.passes.debug_dump",
     "pseudo8051.passes.chunk_inline",
     "pseudo8051.passes.simple_inline",
+    "pseudo8051.passes.xpage_trampoline",
     "pseudo8051.passes.annotate",
     "pseudo8051.passes.rmw",
     "pseudo8051.passes.loops",
