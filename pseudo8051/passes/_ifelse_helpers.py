@@ -262,6 +262,134 @@ def _replace_goto_in_hir(nodes: List[HIRNode], label: str,
 
 # ── Flat if/else structuring ──────────────────────────────────────────────────
 
+def _count_goto_refs(nodes: List[HIRNode], label: str) -> int:
+    """Count total GotoStatement references to label anywhere in the HIR tree."""
+    count = 0
+    for node in nodes:
+        if isinstance(node, GotoStatement) and node.label == label:
+            count += 1
+        elif isinstance(node, IfNode):
+            count += _count_goto_refs(node.then_nodes, label)
+            count += _count_goto_refs(node.else_nodes, label)
+        elif isinstance(node, (WhileNode, ForNode, DoWhileNode)):
+            count += _count_goto_refs(node.body_nodes, label)
+        elif isinstance(node, SwitchNode):
+            for _, body in node.cases:
+                if isinstance(body, list):
+                    count += _count_goto_refs(body, label)
+            if isinstance(node.default_body, list):
+                count += _count_goto_refs(node.default_body, label)
+    return count
+
+
+def _replace_goto_with_nodes(nodes: List[HIRNode], label: str,
+                              replacement: List[HIRNode]) -> Tuple[List[HIRNode], bool]:
+    """Replace every GotoStatement(label) with a copy of replacement, recursing into bodies."""
+    result: List[HIRNode] = []
+    changed = False
+    for node in nodes:
+        if isinstance(node, GotoStatement) and node.label == label:
+            result.extend(copy.deepcopy(replacement))
+            changed = True
+        elif isinstance(node, IfNode):
+            new_then, c1 = _replace_goto_with_nodes(node.then_nodes, label, replacement)
+            new_else, c2 = _replace_goto_with_nodes(node.else_nodes, label, replacement)
+            if c1 or c2:
+                result.append(node.copy_meta_to(
+                    IfNode(node.ea, node.condition, new_then, new_else)))
+                changed = True
+            else:
+                result.append(node)
+        elif isinstance(node, (WhileNode, ForNode, DoWhileNode)):
+            new_body, c = _replace_goto_with_nodes(node.body_nodes, label, replacement)
+            if c:
+                import copy as _copy
+                new_node = _copy.copy(node)
+                new_node.body_nodes = new_body
+                result.append(new_node)
+                changed = True
+            else:
+                result.append(node)
+        elif isinstance(node, SwitchNode):
+            new_cases = []
+            sc = False
+            for case_val, body in node.cases:
+                if isinstance(body, list):
+                    new_body, c = _replace_goto_with_nodes(body, label, replacement)
+                    new_cases.append((case_val, new_body))
+                    sc = sc or c
+                else:
+                    new_cases.append((case_val, body))
+            new_default = node.default_body
+            if isinstance(node.default_body, list):
+                new_default, c = _replace_goto_with_nodes(node.default_body, label, replacement)
+                sc = sc or c
+            if sc:
+                import copy as _copy
+                new_node = _copy.copy(node)
+                new_node.cases = new_cases
+                new_node.default_body = new_default
+                result.append(new_node)
+                changed = True
+            else:
+                result.append(node)
+        else:
+            result.append(node)
+    return result, changed
+
+
+def _inline_singleton_goto_targets(nodes: List[HIRNode]) -> List[HIRNode]:
+    """
+    Find flat-level labels referenced by exactly one GotoStatement anywhere in
+    the HIR tree (including inside structured bodies).  For each such label,
+    inline its code block at the goto site and remove the flat-level label block.
+
+    This handles the case where _structure_flat_ifelse has already structured
+    the goto into an IfNode body, making the goto invisible to the flat-level
+    structurer that matches Label nodes.
+    """
+    changed = True
+    while changed:
+        changed = False
+        # Find all flat-level Labels and collect the code block after each.
+        # A "singleton label block" runs from the Label to the next Label or end.
+        flat_labels: dict = {}  # label_name → (label_idx, end_idx)
+        for i, node in enumerate(nodes):
+            if isinstance(node, Label):
+                flat_labels[node.name] = i
+
+        for lbl_name, lbl_idx in flat_labels.items():
+            # Count total goto references across the whole tree
+            if _count_goto_refs(nodes, lbl_name) != 1:
+                continue
+            # The label must not be targeted by any IfGoto (only GotoStatement)
+            ifgoto_targets = set()
+            for nd in nodes:
+                if isinstance(nd, IfGoto):
+                    ifgoto_targets.add(nd.label)
+            if lbl_name in ifgoto_targets:
+                continue
+
+            # Find the extent of the label's code block (up to the next Label or end).
+            end_idx = lbl_idx + 1
+            while end_idx < len(nodes) and not isinstance(nodes[end_idx], Label):
+                end_idx += 1
+
+            # The body to inline is everything after the Label node (not the label itself).
+            body = nodes[lbl_idx + 1:end_idx]
+
+            # Replace the single goto with the body, then remove the flat-level block.
+            new_nodes, did_replace = _replace_goto_with_nodes(nodes, lbl_name, body)
+            if did_replace:
+                # Remove the flat-level Label + body (now inlined at the goto site).
+                new_nodes = new_nodes[:lbl_idx] + new_nodes[end_idx:]
+                nodes = new_nodes
+                changed = True
+                break  # restart after any change
+
+    return nodes
+
+
 def _structure_flat_ifelse(nodes: List[HIRNode]) -> List[HIRNode]:
     """
     Apply if/else structuring to a flat HIR list containing IfGoto / GotoStatement /
@@ -275,6 +403,7 @@ def _structure_flat_ifelse(nodes: List[HIRNode]) -> List[HIRNode]:
     changed = True
     while changed:
         nodes, changed = _structure_flat_ifelse_pass(nodes)
+    nodes = _inline_singleton_goto_targets(nodes)
     nodes = _strip_redundant_exit_gotos(nodes)
     return nodes
 

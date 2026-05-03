@@ -303,6 +303,21 @@ def _fold_and_prune_setups(nodes: List[HIRNode],
             # Use unresolved-ref collection: aliased Regs (e.g. Regs(R2R1, alias='src'))
             # count as 'src' not as 'R2'/'R1', so setup assigns for those regs can be pruned.
             all_downstream = _collect_unresolved_reg_refs(work[i + 1:]) | _outer_refs
+            # Don't prune setups whose next non-setup, non-label node is a goto:
+            # GotoStatement.name_refs() returns frozenset() so the target's register
+            # usage is invisible here, but the registers may be needed at the target.
+            next_action = None
+            for j in range(i + 1, len(work)):
+                nj = work[j]
+                if isinstance(nj, Label):
+                    continue
+                if _is_call_setup_assign(nj) or _is_dptr_inc_node(nj):
+                    continue
+                next_action = nj
+                break
+            if isinstance(next_action, GotoStatement):
+                out.append(node)
+                continue
             if lhs_regs.isdisjoint(all_downstream):
                 dbg("typesimp",
                     f"  [{hex(node.ea)}] prune-setup: {node.lhs.render()} = {node.rhs.render()}")

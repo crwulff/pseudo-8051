@@ -36,6 +36,12 @@ from pseudo8051.passes._ifelse_helpers import (  # noqa: F401 — re-exported fo
 _Cond = Union[str, Expr]
 
 
+def _block_hir_has_return(block: BasicBlock) -> bool:
+    """Return True if any HIR node in block is a ReturnStmt (not recursive)."""
+    from pseudo8051.ir.hir import ReturnStmt
+    return any(isinstance(n, ReturnStmt) for n in block.hir)
+
+
 # ── Condition helpers ─────────────────────────────────────────────────────────
 
 def _extract_condition_node(node: HIRNode) -> Optional[tuple]:
@@ -128,15 +134,41 @@ class IfElseStructurer(BlockStructurer):
                       f"false={hex(false_block.start_ea)}")
 
         merge_ea = _find_merge_ea(true_block, false_block, block.start_ea)
+
+        # Special case: _find_merge_ea returns true_block.start_ea when the
+        # false arm is a dead end (no common reachable EAs, false dead).  But if
+        # the true block also truly exits the function (its HIR contains a
+        # ReturnStmt), the true block would be excluded from _arm_blocks
+        # (EA not < merge_ea) and silently dropped.  Detect this and treat it as
+        # a both-dead if/else instead.
+        #
+        # We use "HIR contains ReturnStmt" rather than _is_dead_end so that a
+        # continuation block with no test-successors is NOT mistaken for a
+        # dead-end arm.
+        if (merge_ea == true_block.start_ea
+                and _block_hir_has_return(true_block)
+                and true_block.start_ea
+                    not in _reachable_eas(false_block, block.start_ea)):
+            merge_ea = None  # fall through to both-dead path below
+
         if merge_ea is None:
-            dbg("ifelse", f"  → no merge point found, skipping")
-            return False
-
-        dbg("ifelse", f"  merge={hex(merge_ea)}")
-
-        merge_block = block._block_map.get(merge_ea)
-        merge_label = (_label_for(merge_block) if merge_block
-                       else f"label_{hex(merge_ea).removeprefix('0x')}")
+            if (_is_dead_end(true_block, block.start_ea)
+                    and _is_dead_end(false_block, block.start_ea)):
+                # Both arms exit the function — structure as if/else with no
+                # merge continuation.  Use sentinel values so _arm_blocks
+                # collects all reachable blocks and _build_arm_hir strips nothing.
+                merge_ea    = 0xFFFFFFFF
+                merge_label = "\x00__no_merge__"
+                dbg("ifelse", f"  → both arms are dead-ends, structuring as if/else "
+                              f"with no merge")
+            else:
+                dbg("ifelse", f"  → no merge point found, skipping")
+                return False
+        else:
+            dbg("ifelse", f"  merge={hex(merge_ea)}")
+            merge_block = block._block_map.get(merge_ea)
+            merge_label = (_label_for(merge_block) if merge_block
+                           else f"label_{hex(merge_ea).removeprefix('0x')}")
 
         true_arm  = _arm_blocks(true_block,  merge_ea)
         false_arm = _arm_blocks(false_block, merge_ea)

@@ -21,6 +21,16 @@ class ChunkInliner(OptimizationPass):
     """
 
     def run(self, func) -> None:
+        # Collect all branch targets across the whole function so we know which
+        # chunk entry EAs are referenced by gotos (not just by the lcall itself).
+        # A chunk entry that is also a branch target must keep its Label node so
+        # that _structure_flat_ifelse can fold the goto into an if body.
+        all_branch_targets: set = set()
+        for b in func.blocks:
+            for insn in b.instructions:
+                for tgt in insn.branch_targets():
+                    all_branch_targets.add(tgt)
+
         for block in list(func.blocks):
             if not block.instructions:
                 continue
@@ -46,11 +56,31 @@ class ChunkInliner(OptimizationPass):
             chunk_calls_rev = list(reversed(chunk_calls))
             for call_ea, chunk_entry in chunk_calls_rev:
                 chunk_blocks = _bfs(chunk_entry)
+                # If the chunk entry EA is also a branch target (not just the
+                # lcall itself), prepend a Label node to the inlined HIR so that
+                # _structure_flat_ifelse can match goto targets to their code.
+                entry_is_branch_target = chunk_entry.start_ea in all_branch_targets
+
                 inline_hir = []
+                if entry_is_branch_target:
+                    import ida_name
+                    lbl_name = chunk_entry.label
+                    if not lbl_name:
+                        ida_lbl = (ida_name.get_ea_name(chunk_entry.start_ea, ida_name.GN_LOCAL)
+                                   or ida_name.get_name(chunk_entry.start_ea))
+                        lbl_name = (ida_lbl if ida_lbl
+                                    else f"label_{hex(chunk_entry.start_ea).removeprefix('0x')}")
+                    inline_hir.append(Label(chunk_entry.start_ea, lbl_name))
+
                 for cb in sorted(chunk_blocks, key=lambda b: b.start_ea):
                     for node in cb.hir:
-                        if not isinstance(node, (Label, ReturnStmt)):
-                            inline_hir.append(copy.deepcopy(node))
+                        if isinstance(node, ReturnStmt):
+                            continue
+                        # Strip the Label of the chunk entry block — it was either
+                        # already prepended above (branch-target case) or is unused.
+                        if isinstance(node, Label) and cb is chunk_entry:
+                            continue
+                        inline_hir.append(copy.deepcopy(node))
 
                 # Find insertion point: first HIR node whose EA is strictly
                 # greater than the call instruction's EA.  Since the chunk call

@@ -88,7 +88,11 @@ class Operand:
         if op.type in (ida_ua.o_near, ida_ua.o_far):
             page_base = insn.ea & ~0xFFFF
             target_ea = page_base | (op.addr & 0xFFFF)
-            name = ida_name.get_name(target_ea)
+            # Prefer local names (GN_LOCAL) so user-assigned local labels are
+            # picked up; fall back to public names, then EA-based generated name.
+            name = ida_name.get_ea_name(target_ea, ida_name.GN_LOCAL)
+            if not name:
+                name = ida_name.get_name(target_ea)
             # Fallback format must match _label_for() in passes/ifelse.py and
             # _assign_labels() in ir/function.py so that IfGoto.label == block.label.
             return name if name else f"label_{hex(target_ea).removeprefix('0x')}"

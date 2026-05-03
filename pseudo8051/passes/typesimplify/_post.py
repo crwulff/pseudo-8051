@@ -119,12 +119,19 @@ def _fold_inline_trampolines(hir):
     def _is_page_epilogue_block(nodes, start):
         """
         Return True if nodes[start:] begins a page-restore block:
-        optional Label nodes, then IRAM assign + XRAM assign + ReturnStmt.
+        optional Label nodes, then a short sequence of IRAM/XRAM assigns
+        and a ReturnStmt (at most ~6 non-label nodes before the return).
+
+        Real page-epilogue blocks are very short (2-4 instructions: restore
+        code-page IRAM, restore XRAM value, ret).  Long blocks that happen to
+        write XRAM (e.g. real function bodies) must not be mistaken for epilogues.
         """
         k = start
         while k < len(nodes) and isinstance(nodes[k], Label):
             k += 1
         has_iram = has_xram = has_ret = False
+        body_count = 0
+        MAX_EPILOGUE_BODY = 6
         while k < len(nodes) and not isinstance(nodes[k], Label):
             nd = nodes[k]
             if isinstance(nd, Assign) and isinstance(nd.lhs, IRAMRef):
@@ -134,6 +141,13 @@ def _fold_inline_trampolines(hir):
             elif isinstance(nd, ReturnStmt):
                 has_ret = True
                 break
+            else:
+                # Any other node type (ExprStmt, CompoundAssign, etc.) means
+                # this is not a bare page-restore epilogue.
+                return False
+            body_count += 1
+            if body_count > MAX_EPILOGUE_BODY:
+                return False
             k += 1
         return has_ret and (has_iram or has_xram)
 

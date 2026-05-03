@@ -128,6 +128,31 @@ class Function:
         # ── Fix return statements using prototype ─────────────────────────
         self._fix_return_statements()
 
+        # ── Strip dead code after returns ─────────────────────────────────
+        # After block assembly, blocks that were copied into IfNode bodies via
+        # externally_ref inlining may still appear as live (non-absorbed) blocks
+        # in the flat HIR.  Remove any run of nodes that follows a ReturnStmt
+        # without an intervening Label — such code is unreachable.
+        cleaned: List[HIRNode] = []
+        skip = False
+        from pseudo8051.ir.hir import ReturnStmt as _RetStmt, Label as _Lbl
+        for node in self.hir:
+            if isinstance(node, _Lbl):
+                skip = False   # label makes subsequent code reachable
+            if not skip:
+                cleaned.append(node)
+            if isinstance(node, _RetStmt):
+                skip = True
+        self.hir = cleaned
+
+        # ── Inline singleton goto targets ─────────────────────────────────
+        # After block assembly, some gotos (nested inside IfNode bodies) target
+        # flat-level labels that the block-based IfElseStructurer couldn't fold.
+        # Inline the label's code at the single goto site and remove the
+        # flat-level block.
+        from pseudo8051.passes._ifelse_helpers import _inline_singleton_goto_targets
+        self.hir = _inline_singleton_goto_targets(self.hir)
+
         # ── CJNE chain → switch (runs on assembled func.hir) ─────────────
         from pseudo8051.passes.cjne_switch import CJNEChainToSwitch
         CJNEChainToSwitch().run(self)
@@ -205,11 +230,13 @@ class Function:
         needs_label = loop_headers | {ea for ea, cnt in pred_count.items() if cnt > 1}
 
         # Any block that IDA has a symbol for must also get a label: branch
-        # operands are rendered via ida_name.get_name(), so the goto target
-        # text must match block.label exactly — even for single-predecessor
+        # operands are rendered via ida_name.get_ea_name(GN_LOCAL), so the goto
+        # target text must match block.label exactly — even for single-predecessor
         # blocks that structural criteria alone would not label.
         for block in self._blocks:
-            if block.start_ea != self.ea and ida_name.get_name(block.start_ea):
+            if block.start_ea != self.ea and (
+                    ida_name.get_ea_name(block.start_ea, ida_name.GN_LOCAL)
+                    or ida_name.get_name(block.start_ea)):
                 needs_label.add(block.start_ea)
 
         for ea in needs_label:
@@ -219,7 +246,7 @@ class Function:
                 # (resolved via ida_name.get_name in Operand.render) produce
                 # goto targets that match.  Fall back to a generated name only
                 # when IDA has no symbol at this address.
-                ida_lbl = ida_name.get_name(ea)
+                ida_lbl = ida_name.get_ea_name(ea, ida_name.GN_LOCAL) or ida_name.get_name(ea)
                 block.label = ida_lbl if ida_lbl else f"label_{hex(ea).removeprefix('0x')}"
 
     # ── Return-statement fix ──────────────────────────────────────────────
