@@ -15,6 +15,7 @@ from pseudo8051.passes.patterns._utils import (
     VarInfo, _count_reg_uses_in_node, _subst_reg_in_node,
     _canonicalize_expr, _is_reg_free,
 )
+from pseudo8051.passes.patterns._node_utils import _fold_exprs_in_node
 from pseudo8051.constants import dbg
 from pseudo8051.passes.typesimplify._propagate_utils import (
     _COMPOUND_OPS,
@@ -221,6 +222,7 @@ def _propagate_register_copies(live: List[HIRNode],
 
             new_node = _subst_reg_in_node(old_use_node, r, replacement)
             if new_node is not None:
+                new_node = _fold_exprs_in_node(new_node)
                 define_node = live[i]
                 new_node.source_nodes = [define_node] + list(old_use_node.source_nodes or [old_use_node])
                 live[use_idx] = new_node
@@ -286,7 +288,7 @@ def _propagate_register_copies(live: List[HIRNode],
                     if new_node is None:
                         all_ok = False
                         break
-                    tentative[j] = new_node
+                    tentative[j] = _fold_exprs_in_node(new_node)
             if all_ok and tentative:
                 src_node = live[i]
                 for j, new_node in tentative.items():

@@ -93,6 +93,7 @@ _RELOAD_ORDER = [
     "pseudo8051.passes.patterns.sign_bit",
     "pseudo8051.passes.patterns.neg16",
     "pseudo8051.passes.patterns.const_group",
+    "pseudo8051.passes.patterns.zero_ext_group",
     "pseudo8051.passes.patterns.xram_group_read",
     "pseudo8051.passes.patterns.xram_local_write",
     "pseudo8051.passes.patterns.mb_add",

@@ -209,13 +209,13 @@ class TestMul16PatternWithRegMap:
         assert rhs_str == "count"
 
     def test_const_lo2_no_reg_map(self):
-        """Constant lo2 (e.g. Const(9)) with hi2=Const(0) → pair2=Const(9)."""
+        """Constant lo2 (e.g. Const(9)) with hi2=Const(0) → pair2=(uint16_t)9."""
         nodes = _make_mul16_nodes(lo2=Const(9), hi2=Const(0))
         result = _match(nodes)
         assert result is not None
         node = result[0][0]
         rhs_str = node.rhs.rhs.render()
-        assert rhs_str == "9"
+        assert rhs_str == "(uint16_t)9"
 
 
 class TestPair2Expr:
@@ -236,9 +236,9 @@ class TestPair2Expr:
         assert result.render() == "count"
 
     def test_const_lo_zero_hi(self):
-        """Const(9) with Const(0) hi → result is Const(9)."""
+        """Const(9) with Const(0) hi → zero-extension cast."""
         result = _pair2_expr(Const(9), Const(0), {})
-        assert result.render() == "9"
+        assert result.render() == "(uint16_t)9"
 
     def test_general_byte_shift(self):
         """Non-paired, non-zero hi → byte-shift construct."""

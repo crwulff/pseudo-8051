@@ -13,7 +13,7 @@ from pseudo8051.ir.hir import (HIRNode, Assign, CompoundAssign, ExprStmt,
                                 ReturnStmt, IfGoto, IfNode, WhileNode, ForNode,
                                 DoWhileNode, SwitchNode, TypedAssign,
                                 GotoStatement, Label, BreakStmt, ContinueStmt)
-from pseudo8051.ir.expr import (Expr, Const, Call, BinOp, Paren, XRAMRef,
+from pseudo8051.ir.expr import (Expr, Const, Call, BinOp, Paren, XRAMRef, Cast,
                                  Reg as RegExpr, Regs as RegsExpr,
                                  RegGroup as RegGroupExpr, Name as NameExpr)
 from pseudo8051.passes.patterns._utils import TypeGroup, VarInfo, _count_reg_uses_in_node, _subst_reg_in_node, _const_str, _regs_in_expr, _is_reg_free
@@ -612,6 +612,15 @@ def _fold_call_arg_pairs(nodes: List[HIRNode],
             combined: Expr = Const(int_val, alias=alias)
             dbg("typesimp",
                 f"  [{hex(node.ea)}] fold-call-arg-pair → const {combined.render()!r}")
+        elif (n_bytes == 2
+              and isinstance(ordered_exprs[0], Const)
+              and ordered_exprs[0].value == 0):
+            # Hi byte is zero, lo byte is non-constant: zero-extension cast.
+            # (0 << 8) | lo_expr  →  (type)lo_expr
+            lo_expr = ordered_exprs[1]
+            combined: Expr = Cast(naming_vinfo.type, lo_expr) if naming_vinfo.type else lo_expr
+            dbg("typesimp",
+                f"  [{hex(node.ea)}] fold-call-arg-pair → zero-ext cast {combined.render()!r}")
         else:
             def _paren_if_binop(e: Expr) -> Expr:
                 return Paren(e) if isinstance(e, BinOp) else e

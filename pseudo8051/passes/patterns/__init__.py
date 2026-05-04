@@ -32,6 +32,7 @@ from pseudo8051.passes.patterns.mul16            import Mul16Pattern
 from pseudo8051.passes.patterns.rol_switch       import RolSwitchPattern
 from pseudo8051.passes.patterns.accum_fold       import AccumFoldPattern
 from pseudo8051.passes.patterns.xch_copy         import XchCopyPattern
+from pseudo8051.passes.patterns.zero_ext_group   import ZeroExtGroupPattern
 
 _PATTERNS: List[Pattern] = [
     SignBitTestPattern(),
@@ -49,6 +50,7 @@ _PATTERNS: List[Pattern] = [
     IfNodeIncDecPattern(),     # IfNode carry form (post-loop-structuring)
     XRAMLocalWritePattern(),   # before ConstGroup so locals are handled first
     ConstGroupPattern(),
+    ZeroExtGroupPattern(),
     XRAMGroupReadPattern(),
     Neg16Pattern(),
 ]

@@ -31,10 +31,10 @@ hi2_expr / lo2_expr (full pair if they form a known reg-map pair, lo2_expr only
 if hi2_expr is zero, or a byte-shift construct otherwise).
 """
 
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple  # noqa: F401 (Optional used in _pair2_expr)
 
 from pseudo8051.ir.hir import HIRNode, Assign, CompoundAssign, ExprStmt
-from pseudo8051.ir.expr import Expr, Reg, Regs, Const, BinOp, Call, RegGroup, XRAMRef, Name
+from pseudo8051.ir.expr import Expr, Reg, Regs, Const, BinOp, Call, RegGroup, XRAMRef, Name, Cast
 from pseudo8051.constants import dbg
 from pseudo8051.passes.patterns.base import CombineTransform, Match, Simplify
 from pseudo8051.passes.patterns._utils import VarInfo
@@ -148,7 +148,8 @@ def _find_pair_load_source(nodes: List[HIRNode], i: int,
 # ── Second-operand expression builder ────────────────────────────────────────
 
 def _pair2_expr(lo2: Expr, hi2: Expr,
-                reg_map: Dict[str, VarInfo]) -> Expr:
+                reg_map: Dict[str, VarInfo],
+                const_state: Optional[Dict[str, int]] = None) -> Expr:
     """
     Build the 16-bit second-operand expression from its lo and hi byte values.
 
@@ -158,7 +159,8 @@ def _pair2_expr(lo2: Expr, hi2: Expr,
       2. lo2 is a single register that is the low byte of a 2-byte VarInfo,
          and hi2 is either the corresponding hi register or Const(0) (i.e. the
          hi byte was constant-propagated away) → use the full RegGroup.
-      3. hi2 is Const(0) → use lo2 alone (8-bit operand).
+      3. hi2 is Const(0), or hi2 is a register known to be 0 via const_state
+         → zero-extension cast: (uint16_t)lo2.
       4. General → construct (hi2 << 8) | lo2.
     """
     lo2_reg = lo2.name if (isinstance(lo2, Regs) and lo2.is_single) else None
@@ -181,9 +183,13 @@ def _pair2_expr(lo2: Expr, hi2: Expr,
             if hi2_reg == hi_reg or hi2 == Const(0):
                 return _subst_all_expr(RegGroup((hi_reg, lo2_reg)), reg_map)
 
-    # Case 3: hi2 is zero → 8-bit operand only
-    if hi2 == Const(0):
-        return _subst_all_expr(lo2, reg_map)
+    # Case 3: hi2 is zero (literal or annotation-known) → zero-extension cast
+    hi2_is_zero = (hi2 == Const(0)
+                   or (hi2_reg is not None
+                       and const_state is not None
+                       and const_state.get(hi2_reg) == 0))
+    if hi2_is_zero:
+        return Cast("uint16_t", _subst_all_expr(lo2, reg_map))
 
     # Case 4: general → byte-shift construct
     hi2_s = _subst_all_expr(hi2, reg_map)
@@ -244,7 +250,8 @@ class Mul16Pattern(CombineTransform):
         j += 1
 
         # ── Step 5: swap(A, Rlo1) ────────────────────────────────────────────
-        if _swap_target(get(j)) != Rlo1:
+        n5 = get(j)
+        if _swap_target(n5) != Rlo1:
             return None
         j += 1
 
@@ -348,7 +355,11 @@ class Mul16Pattern(CombineTransform):
                                 f"{Rhi1}→{hi_sym}={vi_parent.name}")
             if pair1 is None:
                 pair1 = _subst_all_expr(RegGroup((Rhi1, Rlo1)), reg_map)
-        pair2 = _pair2_expr(lo2, hi2, reg_map)
+        # Use the step-5 (swap) node's annotation to resolve hi2 constants —
+        # it carries reg_consts for R4 etc. that n6 (B = hi2) itself lacks.
+        _n5_ann = n5.ann if n5 is not None else None
+        _const_state = _n5_ann.reg_consts if _n5_ann is not None else None
+        pair2 = _pair2_expr(lo2, hi2, reg_map, _const_state)
         # Use braces only when the hi register is A (non-pair position);
         # a natural Rhi1/Rlo1 pair renders cleanly without braces.
         lhs   = RegGroup((result_hi, Rlo1), brace=(result_hi == "A"))
