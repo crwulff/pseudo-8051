@@ -93,18 +93,21 @@ def _try_collapse_subb16(cond, body: List[HIRNode]):
 
 # ── 8-bit SUBB comparison collapsing ─────────────────────────────────────────
 
-def _get_a_var_name(node: HIRNode) -> Optional[str]:
+def _get_a_var_name(node: HIRNode, reg_map: dict = None) -> Optional[str]:
     """Return the named variable that A holds at this node (from annotation), or None.
 
     Uses the TypeGroup annotation set by AnnotationPass.  Only returns a name when
     A maps to a TypeGroup with a non-empty name (not 'A'), ensuring we don't produce
     bogus conditions from raw/unnamed register groups.
 
-    Two paths:
+    Three paths:
     1. A is directly the sole register in a TypeGroup (A=flags directly).
     2. A is aliased to a single register Rx via reg_exprs (A=R7), and Rx is the
        sole register in a named TypeGroup (R7=flags).  This covers the common case
        where the function parameter is in Rx and A was just loaded from it.
+    3. A=XRAMRef(Const(alias=sym)) in reg_exprs — XRAM local variable. The
+       annotation retains the raw XRAMRef form even after _subst_xram_in_hir
+       replaces it with Name(var_name) in the HIR.  Use reg_map to resolve sym.
     """
     ann = getattr(node, 'ann', None)
     if ann is None:
@@ -119,8 +122,9 @@ def _get_a_var_name(node: HIRNode) -> Optional[str]:
                 and g.name != 'A'):
             return g.name
 
-    # Path 2: A=Rx in reg_exprs, and Rx is directly in a named TypeGroup.
     a_expr = ann.reg_exprs.get('A') if ann.reg_exprs else None
+
+    # Path 2: A=Rx in reg_exprs, and Rx is directly in a named TypeGroup.
     if a_expr is not None and isinstance(a_expr, RegExpr) and a_expr.is_single:
         rx = a_expr.name
         for g in ann.reg_groups:
@@ -130,6 +134,18 @@ def _get_a_var_name(node: HIRNode) -> Optional[str]:
                     and g.name
                     and g.name != rx):
                 return g.name
+
+    # Path 3: A=XRAMRef(Const(alias=sym)) — XRAM local; look up sym in reg_map.
+    if (a_expr is not None and reg_map is not None):
+        from pseudo8051.ir.expr import XRAMRef
+        if isinstance(a_expr, XRAMRef):
+            inner = a_expr.inner
+            if isinstance(inner, Const) and inner.alias:
+                sym = inner.alias
+                from pseudo8051.passes.patterns._utils import VarInfo
+                vi = reg_map.get(sym)
+                if isinstance(vi, VarInfo) and vi.name and not vi.is_byte_field:
+                    return vi.name
 
     return None
 
@@ -324,20 +340,24 @@ def _simplify_carry_comparison(nodes: List[HIRNode]) -> List[HIRNode]:
 
 # ── CLR-C + SUBB + JC/JNC flat if-statement simplification ──────────────────
 
-def _a_name_before_subb(nodes: List[HIRNode], subb_idx: int) -> Optional[str]:
+def _a_name_before_subb(nodes: List[HIRNode], subb_idx: int,
+                         reg_map: dict = None) -> Optional[str]:
     """
     Return the named variable A held immediately before nodes[subb_idx] (SUBB).
 
     Three paths (tried in order):
     1. TypeGroup directly on A at the SUBB node.
     2. A=Rx in reg_exprs; TypeGroup on Rx at the SUBB node.
-    3. Scan backward, skipping CLR/SETB C, Labels, and dec/inc ExprStmts, for:
-       a. Assign(Reg("A"), Name(varname)) — direct load of named var into A.
-       b. Assign(Name(_), Name(varname)) — xram-local-write that captured A.
+    3a. A=XRAMRef(alias) in reg_exprs; look up alias in reg_map (Path 3 of
+        _get_a_var_name) — covers XRAM locals whose annotation wasn't updated
+        by _subst_xram_in_hir.
+    3b. Scan backward, skipping CLR/SETB C, Labels, and dec/inc ExprStmts, for:
+        - Assign(Reg("A"), Name(varname)) — direct load of named var into A.
+        - Assign(Name(_), Name(varname)) — xram-local-write that captured A.
     """
     node = nodes[subb_idx]
-    # Paths 1 and 2: annotation-based.
-    name = _get_a_var_name(node)
+    # Paths 1, 2, and 3a: annotation-based (including reg_map XRAMRef lookup).
+    name = _get_a_var_name(node, reg_map)
     if name is not None:
         return name
 
@@ -405,7 +425,7 @@ def _is_carry_expr(expr) -> bool:
     return False
 
 
-def _simplify_subb_jc(nodes: List[HIRNode]) -> List[HIRNode]:
+def _simplify_subb_jc(nodes: List[HIRNode], reg_map: dict = None) -> List[HIRNode]:
     """
     Collapse CLR-C/SETB-C + SUBB A, #k + JC/JNC into a typed comparison.
 
@@ -424,7 +444,7 @@ def _simplify_subb_jc(nodes: List[HIRNode]) -> List[HIRNode]:
     Also handles IfGoto variants.  Recurses into structured bodies first.
     The SUBB CompoundAssign (and hi-byte Assign if present) are consumed.
     """
-    nodes = [n.map_bodies(_simplify_subb_jc) for n in nodes]
+    nodes = [n.map_bodies(lambda ns: _simplify_subb_jc(ns, reg_map)) for n in nodes]
 
     result: List[HIRNode] = []
     i = 0
@@ -442,7 +462,7 @@ def _simplify_subb_jc(nodes: List[HIRNode]) -> List[HIRNode]:
         ann = getattr(node, 'ann', None)
         c_val = ann.reg_consts.get("C") if ann is not None else None
 
-        a_name = _a_name_before_subb(nodes, i)
+        a_name = _a_name_before_subb(nodes, i, reg_map)
 
         # Skip optional Label gap nodes to find what follows the lo-SUBB.
         j = i + 1

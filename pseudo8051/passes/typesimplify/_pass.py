@@ -169,7 +169,7 @@ class TypeAwareSimplifier(OptimizationPass):
         # references in hi-byte Assigns (e.g. A = XRAM[EXT_DC37] - C) have
         # already been replaced by named variables (e.g. A = _sourceIndex.hi - C),
         # enabling parent-name extraction for 16-bit comparisons.
-        func.hir = _simplify_subb_jc(func.hir)
+        func.hir = _simplify_subb_jc(func.hir, reg_map)
         # Second fold: catches xram params that were only renamed by the second
         # _subst_xram_in_hir above (e.g. ++DPTR writes resolved by _simplify_arithmetic),
         # or that became adjacent to the call after earlier pruning passes removed
