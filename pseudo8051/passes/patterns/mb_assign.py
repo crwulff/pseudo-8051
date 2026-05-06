@@ -29,7 +29,7 @@ raw XRAM-write nodes into named Assign nodes).
 import re
 from typing import List, Optional, Tuple
 
-from pseudo8051.ir.hir   import HIRNode, Assign, CompoundAssign, ExprStmt
+from pseudo8051.ir.hir   import HIRNode, Assign, TypedAssign, CompoundAssign, ExprStmt
 from pseudo8051.ir.expr  import Reg, Regs, UnaryOp, Name, Const, BinOp, Cast
 from pseudo8051.constants import dbg
 
@@ -506,6 +506,118 @@ def _extract_add_carry_pair(var_name: str, lo_rhs, hi_rhs) -> Optional['Expr']:
     return None
 
 
+def _parse_addc_terms(expr, suffix):
+    """Walk a '+'-only BinOp tree extracting named byte-field operands.
+
+    Returns (names, carries, extras) where:
+      names   = ordered list of parent names for Name(parent.suffix) nodes
+      carries = count of Reg('C') / Regs(('C',)) terms
+      extras  = list of Expr nodes that are neither Name(*.suffix) nor carry
+    """
+    names = []
+    carries = 0
+    extras = []
+
+    def _walk(e):
+        nonlocal carries
+        if isinstance(e, BinOp) and e.op == '+':
+            _walk(e.lhs)
+            _walk(e.rhs)
+        elif isinstance(e, Regs) and e.is_single and e.name == 'C':
+            carries += 1
+        elif isinstance(e, Name):
+            f = _split_field(e.name)
+            if f is not None and f[1] == suffix:
+                names.append(f[0])
+            else:
+                extras.append(e)
+        else:
+            extras.append(e)
+
+    _walk(expr)
+    return names, carries, extras
+
+
+def _try_fix_stale_reg_pair_addc(nodes: List[HIRNode], i: int, out: List[HIRNode]):
+    """
+    Recognise the 16-bit add-with-carry pattern on register LHS and fix any
+    stale TypedAssign for the same register pair in the already-emitted output.
+
+    Pattern:
+      nodes[i]:   Assign(Regs((R_lo,)), a.lo + b.lo [+ byte_extras...])
+      nodes[i+j]: Assign(Regs((R_hi,)), a.hi + b.hi + C [+ C per extra lo addend])
+
+    If a TypedAssign(Regs((R_hi, R_lo)), stale_expr) exists in out[], it is
+    updated in-place with the correct combined expression  a + b [+ byte_extras],
+    and both the R_lo and R_hi assignment nodes are consumed (not appended to out).
+
+    Returns (True, new_i) on success, or (False, i) if the pattern doesn't match
+    or no stale TypedAssign exists for the pair.
+    """
+    n0 = nodes[i]
+    if not (isinstance(n0, Assign)
+            and not isinstance(n0, TypedAssign)
+            and isinstance(n0.lhs, Regs)
+            and n0.lhs.is_single):
+        return False, i
+
+    r_lo = n0.lhs.name
+    lo_names, lo_carries, lo_extras = _parse_addc_terms(n0.rhs, 'lo')
+    if not lo_names or lo_carries != 0:
+        return False, i
+
+    # Find next non-skippable node (hi-byte assign)
+    j = i + 1
+    while j < len(nodes) and _is_skippable(nodes[j]):
+        j += 1
+    if j >= len(nodes):
+        return False, i
+
+    n1 = nodes[j]
+    if not (isinstance(n1, Assign)
+            and not isinstance(n1, TypedAssign)
+            and isinstance(n1.lhs, Regs)
+            and n1.lhs.is_single):
+        return False, i
+
+    r_hi = n1.lhs.name
+    hi_names, hi_carries, hi_extras = _parse_addc_terms(n1.rhs, 'hi')
+    if not hi_names or hi_extras:
+        return False, i
+    if sorted(lo_names) != sorted(hi_names):
+        return False, i
+    # Each extra lo-byte addend contributes one carry to hi
+    if hi_carries != 1 + len(lo_extras):
+        return False, i
+
+    # Build the combined 16-bit expression, preserving lo operand order
+    combined = Name(lo_names[0])
+    for name in lo_names[1:]:
+        combined = BinOp(combined, '+', Name(name))
+    for extra in lo_extras:
+        combined = BinOp(combined, '+', extra)
+
+    # Look backward in out[] for a TypedAssign whose LHS is Regs({r_hi, r_lo})
+    pair_set = {r_hi, r_lo}
+    for k in range(len(out) - 1, -1, -1):
+        nd = out[k]
+        if (isinstance(nd, TypedAssign)
+                and isinstance(nd.lhs, Regs)
+                and not nd.lhs.is_single
+                and set(nd.lhs.names) == pair_set):
+            new_ta = TypedAssign(nd.ea, nd.type_str, nd.lhs, combined)
+            nd.copy_meta_to(new_ta)
+            new_ta.source_nodes = [n0, n1] + list(nd.source_nodes or [nd])
+            out[k] = new_ta
+            alias = nd.lhs.alias or f"{r_hi}:{r_lo}"
+            dbg("typesimp",
+                f"  mb_assign: fixed stale {alias!r} TypedAssign "
+                f"→ {combined.render()!r}")
+            return True, j + 1
+
+    return False, i
+
+
 def collapse_mb_assigns(nodes: List[HIRNode]) -> List[HIRNode]:
     """
     Second-pass collapse of byte-field assignment sequences.
@@ -536,7 +648,11 @@ def collapse_mb_assigns(nodes: List[HIRNode]) -> List[HIRNode]:
             out.append(collapsed)
             i = new_i
         else:
-            out.append(node)
-            i += 1
+            fixed, new_i = _try_fix_stale_reg_pair_addc(nodes, i, out)
+            if fixed:
+                i = new_i
+            else:
+                out.append(node)
+                i += 1
 
     return out

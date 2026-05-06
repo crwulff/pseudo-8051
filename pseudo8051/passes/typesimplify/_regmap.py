@@ -391,6 +391,131 @@ def _augment_with_iram_local_vars(func_ea: int,
     return result
 
 
+def _collect_xram_refs(hir: List[HIRNode]) -> Dict[str, int]:
+    """Walk the HIR and collect all XRAMRef addresses seen.
+
+    Returns a dict mapping sym_name (or hex string) → raw XRAM address for
+    every XRAMRef whose inner is a Const (with or without an alias).
+    """
+    from pseudo8051.ir.expr import Expr, XRAMRef, Const as ConstExpr
+    from pseudo8051.passes.patterns._expr_utils import _walk_expr
+
+    seen: Dict[str, int] = {}
+
+    def _scan_expr(e: Expr) -> Expr:
+        if isinstance(e, XRAMRef):
+            inner = e.inner
+            if isinstance(inner, ConstExpr):
+                sym = inner.alias if inner.alias else hex(inner.value)
+                seen[sym] = inner.value
+        return e
+
+    def _walk_hir(nodes: List[HIRNode]) -> None:
+        for node in nodes:
+            node.map_exprs(lambda e: _walk_expr(e, _scan_expr))
+            for _, body in node.child_body_groups():
+                _walk_hir(body)
+
+    _walk_hir(hir)
+    return seen
+
+
+def _get_xram_type(sym: str, addr: int) -> str:
+    """Look up the IDA type for an XRAM symbol, normalised to C99.
+
+    Returns an empty string if no type info is available or if the type is
+    a single byte (not worth adding a byte-field decomposition).
+    """
+    try:
+        import idc
+        import ida_name
+        import ida_segment
+        import ida_nalt
+        import ida_typeinf
+        from pseudo8051.prototypes import _norm
+
+        # Compute EA: prefer name lookup for aliased symbols, fall back to segment base.
+        ea = idc.BADADDR
+        if not sym.startswith("0x"):
+            ea = ida_name.get_name_ea(idc.BADADDR, sym)
+            dbg("typesimp", f"  xram-type: name_ea({sym!r}) = {ea:#x}")
+        if ea == idc.BADADDR:
+            seg = ida_segment.get_segm_by_name("EXT")
+            if seg is None:
+                dbg("typesimp", f"  xram-type: no EXT segment")
+                return ""
+            ea = seg.start_ea + (addr & 0xFFFF)
+
+        # Try ida_nalt.get_tinfo first (IDA 7.x+).
+        tif = ida_typeinf.tinfo_t()
+        if ida_nalt.get_tinfo(tif, ea):
+            type_str = str(tif)
+            result = _norm(type_str)
+            dbg("typesimp", f"  xram-type: {sym} raw={type_str!r} → {result!r}")
+            return result
+
+        # Fall back to idc.get_type() string API.
+        type_raw = idc.get_type(ea)
+        if type_raw:
+            result = _norm(type_raw)
+            dbg("typesimp", f"  xram-type: {sym} idc raw={type_raw!r} → {result!r}")
+            return result
+
+        # Last resort: use the data item size (word=2 → int16_t, dword=4 → int32_t).
+        item_size = idc.get_item_size(ea)
+        dbg("typesimp", f"  xram-type: {sym} @ {ea:#x} item_size={item_size}")
+        if item_size == 2:
+            return "int16_t"
+        if item_size == 4:
+            return "int32_t"
+
+        dbg("typesimp", f"  xram-type: no tinfo for {sym} @ {ea:#x}")
+        return ""
+    except Exception as e:
+        dbg("typesimp", f"  xram-type: exception for {sym}: {e}")
+        return ""
+
+
+def _augment_with_xram_types(hir: List[HIRNode],
+                              reg_map: Dict[str, VarInfo]) -> Dict[str, VarInfo]:
+    """Add VarInfo entries for XRAM globals that have IDA type info and are multi-byte.
+
+    Scans the HIR for XRAMRef nodes, looks up each address in IDA's type system,
+    and for any symbol with a multi-byte type adds a parent VarInfo plus per-byte
+    field entries — matching the structure created by _augment_with_local_vars.
+    Entries already present in reg_map (from locals or params) are not overwritten.
+    """
+    from pseudo8051.constants import resolve_ext_addr
+    xrefs = _collect_xram_refs(hir)
+    dbg("typesimp", f"  xram-type: collected {len(xrefs)} xrefs: {list(xrefs.keys())[:10]}")
+    if not xrefs:
+        return reg_map
+    result = dict(reg_map)
+    for sym, addr in xrefs.items():
+        if sym in result:
+            continue   # already declared as a local/param
+        type_str = _get_xram_type(sym, addr)
+        if not type_str:
+            dbg("typesimp", f"  xram-type: skip {sym} (no type or single-byte)")
+            continue
+        n = _type_bytes(type_str)
+        if n < 2:
+            continue   # single-byte or unknown — nothing to decompose
+        result[sym] = VarInfo(sym, type_str, (), xram_sym=sym, xram_addr=addr)
+        dbg("typesimp", f"  xram-type: {sym} ({type_str}) @ {addr:#06x}")
+        bnames = _byte_names(sym, n, type_str)
+        for k, byte_name in enumerate(bnames):
+            byte_addr = addr + k
+            byte_sym = resolve_ext_addr(byte_addr)
+            bkey = f"_byte_{byte_sym}"
+            if bkey not in result:
+                result[bkey] = VarInfo(byte_name, "uint8_t", (),
+                                       xram_sym=byte_sym, is_byte_field=True,
+                                       xram_addr=byte_addr)
+                dbg("typesimp", f"  xram-type byte: {byte_name} @ {byte_sym}")
+    return result
+
+
 def _augment_with_callee_regs(hir: List[HIRNode],
                                reg_map: Dict[str, VarInfo]) -> Dict[str, VarInfo]:
     """Scan the HIR for function calls and add callee parameter register mappings.

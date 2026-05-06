@@ -13,7 +13,7 @@ from pseudo8051.constants import PARAM_REG_ORDER
 from pseudo8051.passes.typesimplify._regmap   import (
     _build_reg_map, _augment_with_local_vars, _augment_with_callee_regs,
     _augment_with_xram_params, _augment_with_callee_xram_params,
-    _augment_with_iram_local_vars,
+    _augment_with_iram_local_vars, _augment_with_xram_types,
 )
 from pseudo8051.passes.typesimplify._simplify import _simplify, _simplify_once
 from pseudo8051.passes.typesimplify._post     import (
@@ -72,6 +72,7 @@ class TypeAwareSimplifier(OptimizationPass):
         reg_map = _augment_with_local_vars(func.ea, reg_map)
         reg_map = _augment_with_xram_params(func.ea, reg_map)
         reg_map = _augment_with_iram_local_vars(func.ea, reg_map)
+        reg_map = _augment_with_xram_types(func.hir, reg_map)
 
         # Fall back to global callee-reg scan when AnnotationPass hasn't run
         # (e.g. unit tests that call TypeAwareSimplifier directly).
