@@ -5,14 +5,15 @@ Exports:
   _fold_xram_call_args
 """
 
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from pseudo8051.ir.hir import HIRNode, Assign, TypedAssign, ExprStmt
 from pseudo8051.ir.expr import Call, Name as NameExpr
 from pseudo8051.constants import dbg
 
 
-def _fold_xram_call_args(nodes: List[HIRNode]) -> List[HIRNode]:
+def _fold_xram_call_args(nodes: List[HIRNode],
+                          reg_map: Optional[Dict] = None) -> List[HIRNode]:
     """
     Fold XRAM parameter pre-call assignments into the call's argument list.
 
@@ -23,9 +24,14 @@ def _fold_xram_call_args(nodes: List[HIRNode]) -> List[HIRNode]:
     →
       callee(reg_args..., val1, val2, ...)
 
+    When reg_map is provided, caller-passthrough xram params (callee params whose
+    XRAM address is also an xram param of the caller) are resolved to the caller's
+    parameter name even when no explicit assignment node precedes the call.
+
     Recurses into structured bodies first.
     """
-    nodes = [node.map_bodies(_fold_xram_call_args) for node in nodes]
+    nodes = [node.map_bodies(lambda ns: _fold_xram_call_args(ns, reg_map))
+             for node in nodes]
 
     def _get_call_expr(node: HIRNode):
         if isinstance(node, ExprStmt) and isinstance(node.expr, Call):
@@ -101,16 +107,47 @@ def _fold_xram_call_args(nodes: List[HIRNode]) -> List[HIRNode]:
             else:
                 j -= 1
 
-        # Fold whatever xargs were collected immediately before this call.
-        if collected:
-            folded_params = [p for p in xps if p.name in collected]
-            extra_args = [collected[p.name][1] for p in folded_params]
+        # Resolve caller-passthrough params: when a callee xram param's address
+        # is also an xram param of the caller (same XRAM symbol in reg_map with
+        # is_param=True), use the caller's parameter name directly.  This handles
+        # the case where no explicit "xarg3 = ..." assignment precedes the call
+        # because the caller just passes its own xram param through unchanged.
+        #
+        # Guard against double-folding on the second _fold_xram_call_args pass:
+        # if Name(vi.name) is already present in the call's args (added by the
+        # first pass), skip it to avoid appending the same arg twice.
+        existing_arg_names = {a.name for a in call_expr.args if isinstance(a, NameExpr)}
+        passthrough: Dict[str, NameExpr] = {}
+        if reg_map:
+            from pseudo8051.constants import resolve_ext_addr
+            for p in xps:
+                if p.name in collected:
+                    continue   # already found an explicit assignment
+                sym = resolve_ext_addr(p.addr)
+                vi = reg_map.get(sym)
+                if vi is not None and getattr(vi, 'is_param', False) and vi.name:
+                    if vi.name in existing_arg_names:
+                        continue   # already folded on a previous pass
+                    passthrough[p.name] = NameExpr(vi.name)
+                    dbg("typesimp",
+                        f"  [{hex(node.ea)}] fold-xram-call-args: passthrough "
+                        f"{p.name} → {vi.name} ({sym}) in {call_expr.func_name}")
+
+        # Fold whatever xargs were collected (or resolved as passthrough) before this call.
+        if collected or passthrough:
+            extra_args = []
+            for p in xps:
+                if p.name in collected:
+                    extra_args.append(collected[p.name][1])
+                elif p.name in passthrough:
+                    extra_args.append(passthrough[p.name])
             new_call = Call(call_expr.func_name, list(call_expr.args) + extra_args)
             work[i] = _patch_call_node(node, new_call)
-            for p in folded_params:
-                removed.add(collected[p.name][0])
-                dbg("typesimp",
-                    f"  [{hex(work[i].ea)}] fold-xram-call-args: folded {p.name} into {call_expr.func_name}")
+            for p in xps:
+                if p.name in collected:
+                    removed.add(collected[p.name][0])
+                    dbg("typesimp",
+                        f"  [{hex(work[i].ea)}] fold-xram-call-args: folded {p.name} into {call_expr.func_name}")
 
         # Always extend callee_args with ALL xram params so that the renderer
         # can show placeholder comments (/* name */) for any params not yet folded.

@@ -153,7 +153,7 @@ class TypeAwareSimplifier(OptimizationPass):
         func.hir = _propagate_values(func.hir, reg_map)
         dump_pass_hir("10.propagate", func.hir, func.name)
         func.hir = _prune_orphaned_dptr_inc(func.hir)
-        func.hir = _fold_xram_call_args(func.hir)
+        func.hir = _fold_xram_call_args(func.hir, reg_map)
         func.hir = _fold_and_prune_setups(func.hir, reg_map)
         func.hir = _simplify_carry_comparison(func.hir)
         func.hir = _fold_and_prune_setups(func.hir, reg_map)  # clean up setups dead after SUBB16 collapse
@@ -174,7 +174,7 @@ class TypeAwareSimplifier(OptimizationPass):
         # _subst_xram_in_hir above (e.g. ++DPTR writes resolved by _simplify_arithmetic),
         # or that became adjacent to the call after earlier pruning passes removed
         # intervening nodes.
-        func.hir = _fold_xram_call_args(func.hir)
+        func.hir = _fold_xram_call_args(func.hir, reg_map)
         func.hir = _simplify_acc_bit_test(func.hir)
 
         # Rename byte-field register LHS to their named equivalents so that
