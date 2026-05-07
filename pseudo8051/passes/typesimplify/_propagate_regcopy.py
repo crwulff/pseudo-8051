@@ -30,6 +30,17 @@ from pseudo8051.passes.typesimplify._propagate_utils import (
 )
 
 
+def _expr_has_add_sub(expr) -> bool:
+    """True if expr contains a BinOp '+' or '-' at any depth.
+
+    Used to detect expressions that set the carry flag via ADD/SUBB so that
+    propagating them past carry-reading intermediate nodes can be blocked.
+    """
+    if isinstance(expr, BinOp) and expr.op in ('+', '-'):
+        return True
+    return any(_expr_has_add_sub(c) for c in expr.children())
+
+
 # ── Sub-pass A0: compound-assign expansion ────────────────────────────────────
 
 def _fold_compound_assigns(live: List[HIRNode]) -> Tuple[List[HIRNode], bool]:
@@ -207,6 +218,19 @@ def _propagate_register_copies(live: List[HIRNode],
                     dbg("typesimp",
                         f"  [{hex(node.ea)}] prop-values: blocked {r} — "
                         f"intermediate writes {repl_refs & mid_writes}")
+                    i += 1
+                    continue
+
+            # Block propagation when the replacement contains addition or
+            # subtraction (which sets the carry flag via ADD/SUBB) and any
+            # intermediate node reads C.  Moving the carry-setting operation
+            # past a carry-dependent ADDC/SUBB would produce wrong carry.
+            if use_idx > i + 1 and _expr_has_add_sub(replacement):
+                if any(_count_reg_uses_in_node('C', live[k]) > 0
+                       for k in range(i + 1, use_idx)):
+                    dbg("typesimp",
+                        f"  [{hex(node.ea)}] prop-values: blocked {r} — "
+                        f"replacement sets carry, intermediate reads C")
                     i += 1
                     continue
 

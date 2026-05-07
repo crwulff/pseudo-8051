@@ -520,3 +520,70 @@ class TestByteFieldReconstruction:
         expr = BinOp(BinOp(Name("x.hi"), "<<", Const(4)), "|", Name("x.lo"))
         result = self._fold(expr)
         assert result != Name("x")
+
+
+class TestPropagateCarryGuard:
+    """Regression: propagating an ADD expression past an intermediate ADDC
+    (that reads C) would reorder carry-producing and carry-consuming ops,
+    producing a wrong C value.  The propagation must be blocked.
+
+    Original pattern (pre-propagate):
+        R7 = lo_val + retval.lo;     # ADD — sets C
+        A  = hi_val + retval.hi + C; # ADDC — reads C  (intermediate)
+        XRAM[...] = A;               # hi store        (intermediate)
+        XRAM[...] = R7;              # lo store         <- R7 used here
+
+    _propagate_register_copies must NOT substitute R7's expression into the
+    lo-store node, because the ADD (in the substituted expression) would then
+    execute AFTER the ADDC, giving a stale/incorrect carry.
+    """
+
+    def _run(self, nodes):
+        return _propagate_values(list(nodes), {})
+
+    def test_add_expr_not_propagated_past_carry_reader(self):
+        """R7 = lo_val + rlo; [A = hi_val + rhi + C; store_hi]; store = R7
+        → R7 assignment must NOT be consumed / moved after the ADDC."""
+        r7_assign = Assign(0x100, Reg("R7"),
+                           BinOp(Name("lo_val"), "+", Name("rlo")))
+        addc_node = Assign(0x101, Reg("A"),
+                           BinOp(BinOp(Name("hi_val"), "+", Name("rhi")),
+                                 "+", Reg("C")))
+        store_hi  = Assign(0x102, XRAMRef(Const(0xdc2c)), Reg("A"))
+        store_lo  = Assign(0x103, XRAMRef(Const(0xdc2d)), Reg("R7"))
+
+        result = self._run([r7_assign, addc_node, store_hi, store_lo])
+
+        # R7 assignment must still be present (not consumed)
+        r7_nodes = [n for n in result
+                    if isinstance(n, Assign) and hasattr(n.lhs, 'name')
+                    and n.lhs.name == 'R7']
+        assert r7_nodes, "R7 assignment must not be propagated past ADDC"
+
+        # The lo-store node must still reference R7, not the inlined expression
+        lo_store = next(
+            (n for n in result if isinstance(n, Assign)
+             and isinstance(n.lhs, XRAMRef)
+             and isinstance(n.lhs.inner, Const)
+             and n.lhs.inner.value == 0xdc2d),
+            None
+        )
+        assert lo_store is not None
+        assert lo_store.rhs.render() == "R7", (
+            f"lo-store must still use R7, got: {lo_store.rhs.render()!r}"
+        )
+
+    def test_add_expr_propagated_when_no_carry_reader(self):
+        """Without an intermediate carry reader, R7 = lo + rlo CAN be propagated."""
+        r7_assign = Assign(0x100, Reg("R7"),
+                           BinOp(Name("lo_val"), "+", Name("rlo")))
+        store_hi  = Assign(0x101, XRAMRef(Const(0xdc2c)), Reg("A"))
+        store_lo  = Assign(0x102, XRAMRef(Const(0xdc2d)), Reg("R7"))
+
+        result = self._run([r7_assign, store_hi, store_lo])
+
+        # R7 assignment should be consumed (propagated into store_lo)
+        r7_nodes = [n for n in result
+                    if isinstance(n, Assign) and hasattr(n.lhs, 'name')
+                    and n.lhs.name == 'R7']
+        assert not r7_nodes, "R7 assignment should be propagated when no ADDC in between"
