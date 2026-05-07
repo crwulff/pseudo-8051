@@ -561,6 +561,32 @@ def _fold_call_arg_pairs(nodes: List[HIRNode],
             out.append(node)
             continue
 
+        # Safety: if any interleaved node (a node that doesn't read/write the pair
+        # registers but lies *between* two byte-assign nodes) overwrites a source
+        # register that a byte-assign expression references, the resolved expression
+        # is stale at the point where the combined value is used.
+        #
+        # Example: R7=R3; [R3=0 (interleaved)]; R6=0;  →  combined must use R7,
+        # not R3, because R3 is overwritten before the combined value is consumed.
+        #
+        # Fix: revert such expressions to the actual pair register so that
+        # downstream reg_exprs substitution (which knows R7=arg3) can pick it up.
+        if interleaved:
+            interleaved_written: set = set()
+            for _ii in interleaved:
+                interleaved_written |= nodes[_ii].written_regs
+            if interleaved_written:
+                for _r in list(byte_assigns.keys()):
+                    _idx, _expr = byte_assigns[_r]
+                    _expr_regs = _regs_in_expr(_expr)
+                    if _expr_regs & interleaved_written:
+                        dbg("typesimp",
+                            f"  [{hex(nodes[_idx].ea)}] fold-call-arg-pair: "
+                            f"source of {_r} clobbered by interleaved write "
+                            f"({_expr_regs & interleaved_written}) — using {_r} directly")
+                        byte_assigns[_r] = (_idx, RegsExpr((_r,)))
+                        expr_sources.pop(_r, None)
+
         # Prefer naming from consumed nodes' call_arg_ann over global pair_groups,
         # since pair_groups uses setdefault and a different callee's annotation may
         # have won for the same register tuple.

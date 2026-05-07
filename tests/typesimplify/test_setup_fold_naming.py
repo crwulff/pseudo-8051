@@ -74,3 +74,31 @@ class TestFoldCallArgPairsNaming:
         node = result[0]
         assert isinstance(node, TypedAssign)
         assert node.lhs.render() == "osdAddr"
+
+    def test_interleaved_write_to_source_reg_falls_back_to_pair_reg(self):
+        """R7=R3; [R3=0 (interleaved)]; R6=0 should produce Cast(int16_t, R7)
+        not Cast(int16_t, R3), because R3 is overwritten between the two
+        byte-assign nodes and is therefore stale at the call site.
+
+        The regression: _fold_call_arg_pairs used to propagate Reg('R3') as
+        the lo-byte expression, which _subst_from_reg_exprs then replaced with
+        Const(0) (because the annotation at the call site says R3=0), yielding
+        a wrong (int16_t)0 argument instead of (int16_t)arg3."""
+        vi = VarInfo("a", "int16_t", ("R6", "R7"))
+        reg_map = {"R6": vi, "R7": vi}
+        nodes = [
+            Assign(EA,       _reg("R7"), _reg("R3")),   # R7 = R3 (copy arg3)
+            Assign(EA + 1,   _reg("R3"), Regs(("A",))), # R3 = A (interleaved: clobbers R3)
+            Assign(EA + 2,   _reg("R6"), Regs(("A",))), # R6 = 0 (hi byte)
+        ]
+        result = self._run(nodes, reg_map)
+        # The combined node for R6R7 should use R7, not R3, as the lo-byte source.
+        # The R3=A interleaved node is not consumed, so two nodes remain.
+        combined_node = next(
+            (n for n in result if hasattr(n, "lhs") and "R6" in getattr(n.lhs, "names", ())),
+            None,
+        )
+        assert combined_node is not None, f"No R6R7 combined node in result: {result!r}"
+        rendered = combined_node.rhs.render()
+        assert "R7" in rendered, f"Expected R7 in combined rhs, got: {rendered!r}"
+        assert "R3" not in rendered, f"R3 should not appear in combined rhs, got: {rendered!r}"
