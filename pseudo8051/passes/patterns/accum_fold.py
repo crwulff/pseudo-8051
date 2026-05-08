@@ -433,6 +433,32 @@ class AccumFoldPattern(Pattern):
             from pseudo8051.ir.hir import NodeAnnotation as _NA
             new_node = Assign(a_start_node.ea, terminal.lhs, a_expr_subst)
             new_node.ann = _NA.merge(a_start_node, terminal)
+            # When the terminal LHS is indirect (e.g. XRAMRef(Reg('DPTR'))), the
+            # merged annotation inherits reg_exprs from a_start_node (the load site).
+            # That gives the WRONG value for address registers (e.g. DPTR=load_addr
+            # instead of DPTR=store_addr), which later causes _propagate_register_copies
+            # to substitute the load address into the store's XRAMRef.
+            # Fix: override reg_exprs entries for any register that appears in
+            # terminal.lhs with the terminal node's annotation values.
+            if (new_node.ann is not None
+                    and not isinstance(terminal.lhs, (Regs, Name))
+                    and terminal.ann is not None
+                    and terminal.ann.reg_exprs):
+                lhs_regs: set = set()
+                def _collect_regs(e: Expr) -> Expr:
+                    if isinstance(e, Regs) and e.is_single:
+                        lhs_regs.add(e.name)
+                    return e
+                _walk_expr(terminal.lhs, _collect_regs)
+                if lhs_regs:
+                    updated = dict(new_node.ann.reg_exprs)
+                    for _rn in lhs_regs:
+                        _tv = terminal.ann.reg_exprs.get(_rn)
+                        if _tv is not None:
+                            updated[_rn] = _tv
+                        else:
+                            updated.pop(_rn, None)
+                    new_node.ann.reg_exprs = updated
             new_node.source_nodes = [n for n in nodes[i:j + 1] if id(n) not in _skip_ids]
             return (skipped + [new_node], j + 1)
 
