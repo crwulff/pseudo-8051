@@ -309,3 +309,143 @@ class TestAddCarryPair:
         )
         result = collapse_mb_assigns(nodes)
         assert len(result) == 2
+
+
+class TestRegAddc:
+    """_try_collapse_reg_addc: R_lo=a.lo+b.lo; [A=a.hi+b.hi+C;] dst.hi=A; dst.lo=R_lo → dst=a+b"""
+
+    def test_4node_basic(self):
+        """4-node: R7=a.lo+b.lo; A=a.hi+b.hi+C; dst.hi=A; dst.lo=R7 → dst=a+b"""
+        nodes = [
+            Assign(0, Reg("R7"), BinOp(Name("a.lo"), "+", Name("b.lo"))),
+            Assign(2, Reg("A"),  BinOp(BinOp(Name("a.hi"), "+", Name("b.hi")), "+", _c())),
+            Assign(4, Name("dst.hi"), Reg("A")),
+            Assign(6, Name("dst.lo"), Reg("R7")),
+        ]
+        result = collapse_mb_assigns(nodes)
+        assert len(result) == 1
+        assert isinstance(result[0], Assign)
+        assert result[0].render()[0][1] == "dst = a + b;"
+
+    def test_3node_basic(self):
+        """3-node (accumulator already propagated): R7=a.lo+b.lo; dst.hi=a.hi+b.hi+C; dst.lo=R7"""
+        nodes = [
+            Assign(0, Reg("R7"), BinOp(Name("a.lo"), "+", Name("b.lo"))),
+            Assign(2, Name("dst.hi"), BinOp(BinOp(Name("a.hi"), "+", Name("b.hi")), "+", _c())),
+            Assign(4, Name("dst.lo"), Reg("R7")),
+        ]
+        result = collapse_mb_assigns(nodes)
+        assert len(result) == 1
+        assert isinstance(result[0], Assign)
+        assert result[0].render()[0][1] == "dst = a + b;"
+
+    def test_4node_regs_lhs(self):
+        """Regs with aliases as they appear in real HIR (retval2.lo / retval2.hi)"""
+        # Regs(('R7',), alias='retval2.lo') is the TypedAssign-resolved form
+        nodes = [
+            Assign(0, Regs(("R7",)),
+                   BinOp(Name("_var1.lo"), "+", Regs(("R7",), alias="retval2.lo"))),
+            Assign(2, Regs(("A",)),
+                   BinOp(Name("_var1.hi"), "+",
+                         BinOp(Regs(("R6",), alias="retval2.hi"), "+", Regs(("C",))))),
+            Assign(4, Name("_var5.hi"), Regs(("A",))),
+            Assign(6, Name("_var5.lo"), Regs(("R7",))),
+        ]
+        result = collapse_mb_assigns(nodes)
+        assert len(result) == 1
+        assert isinstance(result[0], Assign)
+        assert result[0].lhs == Name("_var5")
+        assert result[0].render()[0][1] == "_var5 = _var1 + retval2;"
+
+    def test_not_matched_without_carry(self):
+        """No carry in A assignment → not collapsed"""
+        nodes = [
+            Assign(0, Reg("R7"), BinOp(Name("a.lo"), "+", Name("b.lo"))),
+            Assign(2, Reg("A"),  BinOp(Name("a.hi"), "+", Name("b.hi"))),
+            Assign(4, Name("dst.hi"), Reg("A")),
+            Assign(6, Name("dst.lo"), Reg("R7")),
+        ]
+        result = collapse_mb_assigns(nodes)
+        assert len(result) == 4
+
+    def test_not_matched_mismatched_parents(self):
+        """a.lo + c.lo vs a.hi + b.hi → parents don't match"""
+        nodes = [
+            Assign(0, Reg("R7"), BinOp(Name("a.lo"), "+", Name("c.lo"))),
+            Assign(2, Reg("A"),  BinOp(BinOp(Name("a.hi"), "+", Name("b.hi")), "+", _c())),
+            Assign(4, Name("dst.hi"), Reg("A")),
+            Assign(6, Name("dst.lo"), Reg("R7")),
+        ]
+        result = collapse_mb_assigns(nodes)
+        assert len(result) == 4
+
+    def test_surrounding_nodes_preserved(self):
+        """Other nodes before and after the 4-node group are preserved."""
+        nodes = [
+            Assign(0, Reg("R5"), Name("other")),
+            Assign(2, Reg("R7"), BinOp(Name("a.lo"), "+", Name("b.lo"))),
+            Assign(4, Reg("A"),  BinOp(BinOp(Name("a.hi"), "+", Name("b.hi")), "+", _c())),
+            Assign(6, Name("dst.hi"), Reg("A")),
+            Assign(8, Name("dst.lo"), Reg("R7")),
+            Assign(10, Name("result"), Name("dst")),
+        ]
+        result = collapse_mb_assigns(nodes)
+        assert len(result) == 3
+        assert result[1].render()[0][1] == "dst = a + b;"
+
+
+class TestFreshAddCarryPair:
+    """Fresh (non-RMW) 16-bit add: dst.lo = a.lo + b.lo; dst.hi = a.hi + b.hi + C; → dst = a + b"""
+
+    def test_two_named_operands_lo_first(self):
+        """dst.lo = _var1.lo + retval2.lo; dst.hi = _var1.hi + retval2.hi + C; → dst = _var1 + retval2"""
+        nodes = [
+            Assign(0, Name("_var5.lo"), BinOp(Name("_var1.lo"), "+", Name("retval2.lo"))),
+            Assign(2, Name("_var5.hi"), BinOp(BinOp(Name("_var1.hi"), "+", Name("retval2.hi")), "+", _c())),
+        ]
+        result = collapse_mb_assigns(nodes)
+        assert len(result) == 1
+        assert isinstance(result[0], Assign)
+        assert result[0].render()[0][1] == "_var5 = _var1 + retval2;"
+
+    def test_two_named_operands_hi_first(self):
+        """hi before lo: same result"""
+        nodes = [
+            Assign(0, Name("_var5.hi"), BinOp(BinOp(Name("_var1.hi"), "+", Name("retval2.hi")), "+", _c())),
+            Assign(2, Name("_var5.lo"), BinOp(Name("_var1.lo"), "+", Name("retval2.lo"))),
+        ]
+        result = collapse_mb_assigns(nodes)
+        assert len(result) == 1
+        assert isinstance(result[0], Assign)
+        assert result[0].render()[0][1] == "_var5 = _var1 + retval2;"
+
+    def test_not_collapsed_when_dst_in_src(self):
+        """When dst appears in the source operands it is RMW, not a fresh add — not collapsed here."""
+        # v.lo = v.lo + other.lo; v.hi = v.hi + other.hi + C
+        # This is the RMW pattern and is handled by _extract_add_carry_pair, not the fresh path
+        nodes = [
+            Assign(0, Name("v.lo"), BinOp(Name("v.lo"), "+", Name("other.lo"))),
+            Assign(2, Name("v.hi"), BinOp(BinOp(Name("v.hi"), "+", Name("other.hi")), "+", _c())),
+        ]
+        result = collapse_mb_assigns(nodes)
+        assert len(result) == 1
+        assert isinstance(result[0], CompoundAssign)
+        assert result[0].render()[0][1] == "v += other;"
+
+    def test_not_collapsed_without_carry(self):
+        """dst.lo = a.lo + b.lo; dst.hi = a.hi + b.hi (no C) → not collapsed"""
+        nodes = [
+            Assign(0, Name("dst.lo"), BinOp(Name("a.lo"), "+", Name("b.lo"))),
+            Assign(2, Name("dst.hi"), BinOp(Name("a.hi"), "+", Name("b.hi"))),
+        ]
+        result = collapse_mb_assigns(nodes)
+        assert len(result) == 2
+
+    def test_not_collapsed_mismatched_operands(self):
+        """lo side uses a+b, hi side uses a+c → mismatched, not collapsed"""
+        nodes = [
+            Assign(0, Name("dst.lo"), BinOp(Name("a.lo"), "+", Name("b.lo"))),
+            Assign(2, Name("dst.hi"), BinOp(BinOp(Name("a.hi"), "+", Name("c.hi")), "+", _c())),
+        ]
+        result = collapse_mb_assigns(nodes)
+        assert len(result) == 2

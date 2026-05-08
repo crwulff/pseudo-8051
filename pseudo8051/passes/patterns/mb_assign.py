@@ -247,6 +247,16 @@ def _try_collapse(nodes: List[HIRNode], i: int):
             node.source_nodes = nodes[i:j]
             return node, j
 
+        # Try: fresh 16-bit add-with-carry (destination not in source operands)
+        # dst.lo = a.lo + b.lo; dst.hi = a.hi + b.hi + C  →  dst = a + b
+        fresh = _extract_fresh_add_carry_pair(lhs_parent, lo_rhs2, hi_rhs2)
+        if fresh is not None:
+            dbg("typesimp",
+                f"  mb_assign: {lhs_parent} = {fresh.render()} (fresh-add-carry)")
+            node = Assign(n0.ea, Name(lhs_parent), fresh)
+            node.source_nodes = nodes[i:j]
+            return node, j
+
     return None, i
 
 
@@ -506,6 +516,155 @@ def _extract_add_carry_pair(var_name: str, lo_rhs, hi_rhs) -> Optional['Expr']:
     return None
 
 
+def _try_collapse_reg_addc(nodes: List[HIRNode], i: int):
+    """
+    Recognize a 16-bit add-with-carry pattern where lo and hi byte results are
+    held in registers before being stored to named byte-field destinations.
+
+    3-node variant (accumulator already propagated into the hi store):
+      nodes[i]:   Assign(Regs((r_lo,)), lo_rhs)
+      nodes[i+k]: Assign(Name("dst.hi"), hi_rhs)  -- hi_rhs has byte-fields + C
+      nodes[i+m]: Assign(Name("dst.lo"), Regs((r_lo,)))
+
+    4-node variant (accumulator still separate):
+      nodes[i]:   Assign(Regs((r_lo,)), lo_rhs)
+      nodes[i+j]: Assign(Regs((r_hi,)), hi_rhs)
+      nodes[i+k]: Assign(Name("dst.hi"), Regs((r_hi,)))
+      nodes[i+m]: Assign(Name("dst.lo"), Regs((r_lo,)))
+
+    In both variants:
+      - lo_rhs contains only Name(*.lo) terms, no carry
+      - hi_rhs contains matching Name(*.hi) terms plus exactly one carry
+      - the parent variable sets match between lo and hi
+
+    Collapses to: Assign(Name("dst"), Name(a) + Name(b))
+    """
+    n0 = nodes[i]
+    if not (isinstance(n0, Assign)
+            and not isinstance(n0, TypedAssign)
+            and isinstance(n0.lhs, Regs)
+            and n0.lhs.is_single):
+        return None, i
+
+    r_lo = n0.lhs.name
+    lo_names, lo_carries, lo_extras = _parse_addc_terms(n0.rhs, 'lo')
+    if not lo_names or lo_carries != 0 or lo_extras:
+        return None, i
+
+    # Find the next non-skippable node: either an Assign(Regs, hi_expr) or
+    # an Assign(Name("dst.hi"), hi_expr).
+    j = i + 1
+    while j < len(nodes) and _is_skippable(nodes[j]):
+        j += 1
+    if j >= len(nodes):
+        return None, i
+
+    n1 = nodes[j]
+
+    # 4-node variant: intermediate register assignment (e.g. A = hi + C)
+    r_hi = None
+    hi_rhs = None
+    if (isinstance(n1, Assign)
+            and not isinstance(n1, TypedAssign)
+            and isinstance(n1.lhs, Regs)
+            and n1.lhs.is_single):
+        r_hi = n1.lhs.name
+        hi_rhs = n1.rhs
+        # Advance past this node to find the hi byte-field store
+        j += 1
+        while j < len(nodes) and _is_skippable(nodes[j]):
+            j += 1
+        if j >= len(nodes):
+            return None, i
+        n1 = nodes[j]   # now the Name("dst.hi") node
+
+    # Both variants: Assign(Name("dst.hi"), hi_expr_or_reg)
+    if not (isinstance(n1, Assign) and isinstance(n1.lhs, Name)):
+        return None, i
+    f_hi = _split_field(n1.lhs.name)
+    if f_hi is None or f_hi[1] != 'hi':
+        return None, i
+    dst_name = f_hi[0]
+
+    if r_hi is not None:
+        # 4-node: n1.rhs must be the same register as r_hi
+        if not (isinstance(n1.rhs, Regs) and n1.rhs.is_single and n1.rhs.name == r_hi):
+            return None, i
+    else:
+        # 3-node: n1.rhs is the hi expression directly
+        hi_rhs = n1.rhs
+
+    # Validate hi_rhs
+    hi_names, hi_carries, hi_extras = _parse_addc_terms(hi_rhs, 'hi')
+    if not hi_names or hi_carries != 1 or hi_extras:
+        return None, i
+    if sorted(lo_names) != sorted(hi_names):
+        return None, i
+    if dst_name in lo_names:   # RMW case handled elsewhere
+        return None, i
+
+    # Find lo byte-field store: Assign(Name("dst.lo"), Regs((r_lo,)))
+    k = j + 1
+    while k < len(nodes) and _is_skippable(nodes[k]):
+        k += 1
+    if k >= len(nodes):
+        return None, i
+
+    n2 = nodes[k]
+    if not (isinstance(n2, Assign) and isinstance(n2.lhs, Name)):
+        return None, i
+    f_lo = _split_field(n2.lhs.name)
+    if f_lo is None or f_lo[1] != 'lo' or f_lo[0] != dst_name:
+        return None, i
+    if not (isinstance(n2.rhs, Regs) and n2.rhs.is_single and n2.rhs.name == r_lo):
+        return None, i
+
+    # Build combined expression in lo operand order
+    combined = Name(lo_names[0])
+    for name in lo_names[1:]:
+        combined = BinOp(combined, '+', Name(name))
+
+    dbg("typesimp", f"  mb_assign: {dst_name} = {combined.render()} (reg-addc)")
+    result = Assign(n0.ea, Name(dst_name), combined)
+    result.source_nodes = nodes[i:k + 1]
+    return result, k + 1
+
+
+def _extract_fresh_add_carry_pair(var_name: str, lo_rhs, hi_rhs) -> Optional['Expr']:
+    """
+    Recognise the 16-bit fresh (non-RMW) add-with-carry pattern:
+
+      dst.lo = a.lo + b.lo          (no carry)
+      dst.hi = a.hi + b.hi + C      (carry from the lo addition)
+
+    where dst, a, b are distinct named variables (destination does not appear
+    in the source operands).
+
+    Returns a + b (or just Name(a) for a single operand) as the combined
+    expression, or None if the pattern doesn't match.
+    """
+    lo_names, lo_carries, lo_extras = _parse_addc_terms(lo_rhs, 'lo')
+    hi_names, hi_carries, hi_extras = _parse_addc_terms(hi_rhs, 'hi')
+
+    if lo_carries != 0 or hi_carries != 1:
+        return None
+    if lo_extras or hi_extras:
+        return None
+    if not lo_names or not hi_names:
+        return None
+    if sorted(lo_names) != sorted(hi_names):
+        return None
+    # Destination must not appear in source operands (fresh, not RMW)
+    if var_name in lo_names:
+        return None
+
+    # Build combined expression preserving lo operand order
+    combined = Name(lo_names[0])
+    for name in lo_names[1:]:
+        combined = BinOp(combined, '+', Name(name))
+    return combined
+
+
 def _parse_addc_terms(expr, suffix):
     """Walk a '+'-only BinOp tree extracting named byte-field operands.
 
@@ -527,6 +686,13 @@ def _parse_addc_terms(expr, suffix):
             carries += 1
         elif isinstance(e, Name):
             f = _split_field(e.name)
+            if f is not None and f[1] == suffix:
+                names.append(f[0])
+            else:
+                extras.append(e)
+        elif isinstance(e, Regs) and e.alias:
+            # Regs with a typed alias (e.g. Regs(('R6',), alias='retval2.hi'))
+            f = _split_field(e.alias)
             if f is not None and f[1] == suffix:
                 names.append(f[0])
             else:
@@ -642,6 +808,8 @@ def collapse_mb_assigns(nodes: List[HIRNode]) -> List[HIRNode]:
         collapsed, new_i = _try_collapse_rmw_inc(nodes, i)
         if collapsed is None:
             collapsed, new_i = _try_collapse_pair_store(nodes, i)
+        if collapsed is None:
+            collapsed, new_i = _try_collapse_reg_addc(nodes, i)
         if collapsed is None:
             collapsed, new_i = _try_collapse(nodes, i)
         if collapsed is not None:
