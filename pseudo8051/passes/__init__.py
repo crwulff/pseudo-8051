@@ -130,6 +130,11 @@ def run_all_passes(func: Function) -> None:
     # are also covered.
     CrossPageTrampolinePass().run(func)
 
+    from pseudo8051.passes.copyprop    import CopyPropagator
+    from pseudo8051.passes.dead_assign import DeadAssignEliminator
+    CopyPropagator().run(func)
+    DeadAssignEliminator().run(func)
+
     from pseudo8051.passes.annotate import AnnotationPass
     AnnotationPass().run(func)
 
