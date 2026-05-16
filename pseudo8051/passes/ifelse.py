@@ -9,7 +9,7 @@ from this module continue to work.
 from typing import Optional, Union
 
 from pseudo8051.ir.hir      import HIRNode, IfNode, Label, IfGoto, GotoStatement, SwitchNode
-from pseudo8051.ir.expr     import Expr
+from pseudo8051.ir.expr     import Expr, BinOp, UnaryOp
 from pseudo8051.passes    import BlockStructurer
 from pseudo8051.constants import dbg
 
@@ -34,6 +34,35 @@ from pseudo8051.passes._ifelse_helpers import (  # noqa: F401 — re-exported fo
 )
 
 _Cond = Union[str, Expr]
+
+# ── Condition normalization ───────────────────────────────────────────────────
+
+_FLIP_OPS = {">": "<", ">=": "<="}
+
+
+def _normalize_hir_list(nodes):
+    """Normalize IfNode conditions recursively (bottom-up) through a HIR list."""
+    result = []
+    changed = False
+    for node in nodes:
+        new_node = node.map_bodies(_normalize_hir_list)
+        if isinstance(new_node, IfNode):
+            cond = new_node.condition
+            # Rule 1: if (!inner) {A} else {B} → if (inner) {B} else {A}
+            if (isinstance(cond, UnaryOp) and cond.op == "!"
+                    and new_node.else_nodes):
+                new_node = new_node.copy_meta_to(
+                    IfNode(new_node.ea, cond.operand,
+                           new_node.else_nodes, new_node.then_nodes))
+                cond = new_node.condition
+            # Rule 2: a > b → b < a,  a >= b → b <= a
+            if isinstance(cond, BinOp) and cond.op in _FLIP_OPS:
+                new_node = new_node.replace_condition(
+                    BinOp(cond.rhs, _FLIP_OPS[cond.op], cond.lhs))
+        if new_node is not node:
+            changed = True
+        result.append(new_node)
+    return result if changed else nodes
 
 
 def _block_hir_has_return(block: BasicBlock) -> bool:
@@ -97,6 +126,11 @@ class IfElseStructurer(BlockStructurer):
                 removed.extend(dead)
         if removed:
             dbg("ifelse", f"dead labels removed: {removed}")
+
+        # ── Condition normalization ───────────────────────────────────────
+        for block in func.blocks:
+            if not getattr(block, "_absorbed", False) and block.hir:
+                block.hir = _normalize_hir_list(block.hir)
 
     def _try_structure(self, func: Function, block: BasicBlock) -> bool:
         succs = [s for s in block.successors
